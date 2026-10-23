@@ -2466,13 +2466,23 @@ class ScorpioDictManager private constructor(private val context: Context) {
         val source: String? = null,
         /** 資料包版本（線上更新用），例如 2026.10.23 */
         val version: String? = null,
+        /** 只能線上安裝的資料包還沒裝時是 false（清單上顯示下載大小） */
+        val installed: Boolean = true,
+        val downloadSize: Long = 0,
         /** 主詞庫不能關 */
         val toggleable: Boolean = true,
         /** 匯入的詞庫可以刪除 */
         val removable: Boolean = false
     )
 
-    private fun addonEnabled(id: String) = sourcePrefs.getBoolean(id, true)
+    private fun addonEnabled(id: String) = sourcePrefs.getBoolean(id, packDefaultOn(id))
+
+    /** 資料包預設開不開（dict_packs.default_on；舊版詞庫沒有這欄就當作開） */
+    private fun packDefaultOn(id: String): Boolean = try {
+        db?.rawQuery("SELECT default_on FROM dict_packs WHERE id = ?", arrayOf(id))?.use { !it.moveToFirst() || it.getInt(0) != 0 } ?: true
+    } catch (e: Exception) {
+        true
+    }
 
     private fun sourcePresent(source: String): Boolean = try {
         db?.rawQuery("SELECT 1 FROM dict WHERE source = ? LIMIT 1", arrayOf(source))?.use { it.moveToFirst() } ?: false
@@ -2592,7 +2602,8 @@ class ScorpioDictManager private constructor(private val context: Context) {
         return Triple(t, ini.ifEmpty { "_" }, fin.ifEmpty { "_" })
     }
 
-    suspend fun dictionaries(): List<DictionaryInfo> = withContext(Dispatchers.IO) {
+    /** available：manifest 裡的資料包，還沒安裝、只能線上安裝的也列出來（關著，顯示下載大小） */
+    suspend fun dictionaries(available: List<PackUpdater.ManifestPack> = emptyList()): List<DictionaryInfo> = withContext(Dispatchers.IO) {
         val out = ArrayList<DictionaryInfo>()
         fun count(database: SQLiteDatabase?, sql: String, id: String) = try {
             database?.rawQuery(sql, arrayOf(id))?.use { if (it.moveToFirst()) it.getInt(0) else 0 } ?: 0
@@ -2624,6 +2635,17 @@ class ScorpioDictManager private constructor(private val context: Context) {
                     )
                 )
             }
+        }
+        val local = packs().map { it.id }.toSet()
+        for (m in available) {
+            if (m.id in local || m.group == "kaomoji") continue
+            out.add(
+                DictionaryInfo(
+                    m.id, m.name, m.description.ifEmpty { "線上詞庫" }, m.rows, enabled = false,
+                    group = m.group, source = if (m.source.isNotEmpty()) "${m.source}（${m.license}）" else null,
+                    version = m.version, installed = false, downloadSize = m.size
+                )
+            )
         }
         out.add(
             DictionaryInfo(
@@ -2771,6 +2793,26 @@ class ScorpioDictManager private constructor(private val context: Context) {
         }
     }
 
+    /** 移除只能線上安裝的資料包：資料整個刪掉，清單上回到「未安裝」 */
+    @Synchronized
+    fun uninstallPack(id: String) {
+        File(packDir, "$id.db.gz").delete()
+        try {
+            db?.delete("dict", "source = ?", arrayOf(id))
+            db?.delete("addon_dict", "source = ?", arrayOf(id))
+            db?.delete("dict_packs", "id = ?", arrayOf(id))
+            bigramDb?.delete("bigram", "source = ?", arrayOf(id))
+            bigramDb?.delete("pack_versions", "id = ?", arrayOf(id))
+        } catch (e: Exception) {
+            Log.e(TAG, "移除資料包失敗：$id", e)
+        }
+        sourcePrefs.edit().remove(id).remove("ver:$id").apply()
+        packCache = null
+        enabledBigramSources = null
+        bigramCache.evictAll()
+        invalidateCandidateCaches()
+    }
+
     /** 下載過、比目前生效的版本新的資料包重新套用（App 內建詞庫改版覆蓋後） */
     private fun reapplyDownloadedPacks() {
         for (f in packDir.listFiles { f -> f.name.endsWith(".db.gz") } ?: return) {
@@ -2840,7 +2882,11 @@ class ScorpioDictManager private constructor(private val context: Context) {
                 bigramCache.evictAll()
                 syncDictionarySources()
             }
-            id.startsWith("import:") -> {
+            !id.startsWith("import:") -> {
+                // 還沒安裝的線上資料包：先記住開關，下載套用後就照這個生效
+                sourcePrefs.edit().putBoolean(id, enabled).commit()
+            }
+            else -> {
                 val v = android.content.ContentValues().apply { put("enabled", if (enabled) 1 else 0) }
                 importDb?.update("import_dicts", v, "id = ?", arrayOf(id.removePrefix("import:")))
                 syncDictionarySources()

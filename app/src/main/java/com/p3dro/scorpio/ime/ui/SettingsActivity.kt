@@ -681,6 +681,18 @@ class SettingsActivity : AppCompatActivity() {
         if (!ready) button(status, "完成設定") { open(Page.ONBOARDING) }
         testField(status, "在這裡試打…")
 
+        // 有新版 App：首頁最上面提示（一天最多在背景檢查一次）
+        com.p3dro.scorpio.ime.engine.AppUpdater.cachedNewer(this)?.let { tag ->
+            val u = card()
+            navRow(u, R.drawable.ic_set_info, "有新版本 $tag", "點這裡下載更新") { open(Page.ABOUT) }
+        }
+        if (System.currentTimeMillis() - com.p3dro.scorpio.ime.engine.AppUpdater.lastCheck(this) > 24 * 3600_000L) {
+            lifecycleScope.launch {
+                if (com.p3dro.scorpio.ime.engine.AppUpdater.check(this@SettingsActivity) is com.p3dro.scorpio.ime.engine.AppUpdater.Check.Available &&
+                    stack.lastOrNull() == Page.HOME) render()
+            }
+        }
+
         sectionTitle("鍵盤")
         val nav = card()
         val methods = ChineseMethod.enabled(prefs).joinToString("、") { it.label }
@@ -961,6 +973,7 @@ class SettingsActivity : AppCompatActivity() {
             "basic" to ("基本" to null),
             "places" to ("地名與地標" to null),
             "symbols" to ("表情符號" to null),
+            "extra" to ("可下載的詞庫" to "不內建在 App 裡，打開開關才下載安裝；關掉會整個移除。"),
             "bigram" to ("接續詞語料" to "影響整句選字與選完字後聯想的下一個詞，不影響打得出哪些詞。開了多個來源時取搭配最強的那個。"),
             "import" to ("匯入的詞庫" to null)
         )
@@ -981,7 +994,9 @@ class SettingsActivity : AppCompatActivity() {
             cards[key] = c
             loadings[key] = loadingText(c)
         }
+        var onlineOnly = emptySet<String>()
         fun groupOf(d: ScorpioDictManager.DictionaryInfo) = when {
+            d.id in onlineOnly -> "extra"
             d.group == "bigram" -> "bigram"
             d.removable -> "import"
             d.id in setOf("emoji", "kaomoji") -> "symbols"
@@ -989,17 +1004,25 @@ class SettingsActivity : AppCompatActivity() {
             else -> "basic"
         }
         lifecycleScope.launch {
-            val dicts = dict.dictionaries()
+            val available = com.p3dro.scorpio.ime.engine.PackUpdater.refreshManifest(this@SettingsActivity)
+            onlineOnly = available.filter { !it.bundled }.map { it.id }.toSet()
+            val dicts = dict.dictionaries(available)
             if (stack.lastOrNull() != Page.DICTIONARY) return@launch
             for ((key, c) in cards) c.removeView(loadings[key])
+            if (onlineOnly.isEmpty()) infoRow(cards.getValue("extra"), "目前沒有可下載的詞庫", "連上網路後再打開這頁看看。")
             for (d in dicts) {
                 val list = cards.getValue(groupOf(d))
                 val bigram = d.group == "bigram"
                 val summary = "${d.description}・${"%,d".format(d.count)} ${if (bigram) "組" else "個"}" +
+                    (if (!d.installed) "・未安裝，下載約 ${"%.1f".format(d.downloadSize / 1048576.0)} MB" else "") +
                     (d.source?.let { "\n來源：$it" } ?: "") + (d.version?.let { "\n版本 $it" } ?: "")
                 val openDetail = {
-                    detailDict = d
-                    open(Page.DICT_DETAIL)
+                    if (d.installed) {
+                        detailDict = d
+                        open(Page.DICT_DETAIL)
+                    } else {
+                        android.widget.Toast.makeText(this@SettingsActivity, "打開開關下載後就能看內容", android.widget.Toast.LENGTH_SHORT).show()
+                    }
                 }
                 if (!d.toggleable) {
                     navRow(list, null, d.name, summary) { openDetail() }
@@ -1007,12 +1030,26 @@ class SettingsActivity : AppCompatActivity() {
                 }
                 switchRow(list, d.name, summary, d.enabled, onRowClick = openDetail) { on ->
                     lifecycleScope.launch {
-                        dict.setDictionaryEnabled(d.id, on)
-                        // 打開時抓線上最新版（匯入的、Emoji 沒有線上版本）
-                        if (on && !d.removable && d.id != "emoji" && com.p3dro.scorpio.ime.engine.PackUpdater.ensureLatest(this@SettingsActivity, d.id)) {
-                            android.widget.Toast.makeText(this@SettingsActivity, "已更新「${d.name}」到最新版", android.widget.Toast.LENGTH_SHORT).show()
+                        if (!on && d.id in onlineOnly) {
+                            // 只能線上安裝的：關掉就整個移除
+                            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { dict.uninstallPack(d.id) }
                             if (stack.lastOrNull() == Page.DICTIONARY) render()
+                            return@launch
                         }
+                        dict.setDictionaryEnabled(d.id, on)
+                        if (!on || d.removable || d.id == "emoji") return@launch
+                        if (!d.installed) android.widget.Toast.makeText(this@SettingsActivity, "下載「${d.name}」中…", android.widget.Toast.LENGTH_SHORT).show()
+                        // 打開時抓線上最新版（匯入的、Emoji 沒有線上版本）；還沒安裝的就是下載安裝
+                        val ok = com.p3dro.scorpio.ime.engine.PackUpdater.ensureLatest(this@SettingsActivity, d.id)
+                        when {
+                            ok -> android.widget.Toast.makeText(this@SettingsActivity,
+                                if (d.installed) "已更新「${d.name}」到最新版" else "已安裝「${d.name}」", android.widget.Toast.LENGTH_SHORT).show()
+                            !d.installed -> {
+                                android.widget.Toast.makeText(this@SettingsActivity, "下載失敗，確認網路後再試一次", android.widget.Toast.LENGTH_SHORT).show()
+                                dict.setDictionaryEnabled(d.id, false)
+                            }
+                        }
+                        if ((ok || !d.installed) && stack.lastOrNull() == Page.DICTIONARY) render()
                     }
                 }
                 if (d.removable) {
@@ -1116,6 +1153,157 @@ class SettingsActivity : AppCompatActivity() {
 
     private var searchRunnable: Runnable? = null
 
+    /** 工具列的工具清單：開關＋拖拉排序（放開時存順序、鍵盤即時更新） */
+    private fun toolList(parent: LinearLayout) {
+        val items = com.p3dro.scorpio.ime.engine.Toolbar.all(this).toMutableList()
+        lateinit var touchHelper: androidx.recyclerview.widget.ItemTouchHelper
+
+        class Holder(val view: LinearLayout, val icon: ImageView, val name: TextView,
+                     val sw: com.google.android.material.materialswitch.MaterialSwitch, val handle: ImageView) :
+            androidx.recyclerview.widget.RecyclerView.ViewHolder(view)
+
+        val adapter = object : androidx.recyclerview.widget.RecyclerView.Adapter<Holder>() {
+            override fun getItemCount() = items.size
+            override fun onCreateViewHolder(p: ViewGroup, viewType: Int): Holder {
+                val row = LinearLayout(this@SettingsActivity).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    minimumHeight = dp(56)
+                    setPadding(dp(20), dp(4), dp(8), dp(4))
+                    layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+                }
+                val icon = ImageView(this@SettingsActivity).apply { setColorFilter(cOnSurfaceVariant) }
+                row.addView(icon, LinearLayout.LayoutParams(dp(24), dp(24)).apply { marginEnd = dp(20) })
+                val name = TextView(this@SettingsActivity).apply {
+                    textAppearance(this, com.google.android.material.R.attr.textAppearanceBodyLarge)
+                    setTextColor(cOnSurface)
+                }
+                row.addView(name, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                val sw = com.google.android.material.materialswitch.MaterialSwitch(this@SettingsActivity)
+                row.addView(sw)
+                val handle = ImageView(this@SettingsActivity).apply {
+                    setImageResource(R.drawable.ic_set_drag)
+                    setColorFilter(cOnSurfaceVariant)
+                    contentDescription = "拖拉調整順序"
+                    setPadding(dp(12), dp(12), dp(12), dp(12))
+                }
+                row.addView(handle, LinearLayout.LayoutParams(dp(48), dp(48)).apply { marginStart = dp(4) })
+                return Holder(row, icon, name, sw, handle)
+            }
+
+            @android.annotation.SuppressLint("ClickableViewAccessibility")
+            override fun onBindViewHolder(h: Holder, position: Int) {
+                val t = items[position]
+                h.icon.setImageResource(t.icon)
+                h.name.text = t.name
+                h.sw.setOnCheckedChangeListener(null)
+                h.sw.isChecked = t.visible
+                h.sw.setOnCheckedChangeListener { _, on ->
+                    val i = h.bindingAdapterPosition
+                    if (i < 0) return@setOnCheckedChangeListener
+                    items[i] = items[i].copy(visible = on)
+                    com.p3dro.scorpio.ime.engine.Toolbar.setVisible(this@SettingsActivity, items[i].id, on)
+                }
+                h.view.setOnClickListener { h.sw.toggle() }
+                h.handle.setOnTouchListener { _, e ->
+                    if (e.actionMasked == android.view.MotionEvent.ACTION_DOWN) touchHelper.startDrag(h)
+                    false
+                }
+            }
+        }
+        touchHelper = androidx.recyclerview.widget.ItemTouchHelper(object : androidx.recyclerview.widget.ItemTouchHelper.SimpleCallback(
+            androidx.recyclerview.widget.ItemTouchHelper.UP or androidx.recyclerview.widget.ItemTouchHelper.DOWN, 0
+        ) {
+            override fun onMove(rv: androidx.recyclerview.widget.RecyclerView, from: androidx.recyclerview.widget.RecyclerView.ViewHolder,
+                                to: androidx.recyclerview.widget.RecyclerView.ViewHolder): Boolean {
+                val a = from.bindingAdapterPosition
+                val b = to.bindingAdapterPosition
+                items.add(b, items.removeAt(a))
+                adapter.notifyItemMoved(a, b)
+                return true
+            }
+
+            override fun onSwiped(viewHolder: androidx.recyclerview.widget.RecyclerView.ViewHolder, direction: Int) {}
+
+            override fun onSelectedChanged(viewHolder: androidx.recyclerview.widget.RecyclerView.ViewHolder?, actionState: Int) {
+                super.onSelectedChanged(viewHolder, actionState)
+                // 拖起來的那列浮起、換成稍深的底色
+                if (actionState == androidx.recyclerview.widget.ItemTouchHelper.ACTION_STATE_DRAG) {
+                    viewHolder?.itemView?.apply {
+                        setBackgroundColor(cSurfaceHighest)
+                        elevation = dp(4).toFloat()
+                    }
+                }
+            }
+
+            override fun clearView(rv: androidx.recyclerview.widget.RecyclerView, viewHolder: androidx.recyclerview.widget.RecyclerView.ViewHolder) {
+                super.clearView(rv, viewHolder)
+                viewHolder.itemView.background = null
+                viewHolder.itemView.elevation = 0f
+                com.p3dro.scorpio.ime.engine.Toolbar.setOrder(this@SettingsActivity, items.map { it.id })
+            }
+
+            override fun isLongPressDragEnabled() = true
+        })
+        val rv = androidx.recyclerview.widget.RecyclerView(this).apply {
+            layoutManager = androidx.recyclerview.widget.LinearLayoutManager(this@SettingsActivity)
+            this.adapter = adapter
+            isNestedScrollingEnabled = false
+            overScrollMode = View.OVER_SCROLL_NEVER
+        }
+        touchHelper.attachToRecyclerView(rv)
+        parent.addView(rv, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+    }
+
+    /** 關於頁的「檢查 App 更新」：有新版就顯示更新內容，按「下載並安裝」交給系統安裝 */
+    private fun appUpdateRow(parent: LinearLayout) {
+        val U = com.p3dro.scorpio.ime.engine.AppUpdater
+        val r = row(parent, null, clickable = true)
+        val col = textColumn(r)
+        texts(col, "檢查 App 更新", U.cachedNewer(this)?.let { "有新版本 $it" } ?: "從 GitHub Releases 下載新版")
+        val sub = col.getChildAt(1) as TextView
+        var busy = false
+        r.setOnClickListener {
+            if (busy) return@setOnClickListener
+            busy = true
+            sub.text = "檢查中…"
+            lifecycleScope.launch {
+                when (val c = U.check(this@SettingsActivity)) {
+                    is com.p3dro.scorpio.ime.engine.AppUpdater.Check.Available -> {
+                        sub.text = "有新版本 ${c.release.tag}"
+                        com.google.android.material.dialog.MaterialAlertDialogBuilder(this@SettingsActivity)
+                            .setTitle("新版本 ${c.release.tag}")
+                            .setMessage(c.release.notes.ifBlank { "（沒有更新說明）" }.take(1500))
+                            .setPositiveButton(if (c.release.apkUrl != null) "下載並安裝" else "開啟下載頁") { _, _ ->
+                                if (c.release.apkUrl == null) {
+                                    startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(c.release.page)))
+                                    return@setPositiveButton
+                                }
+                                sub.text = "下載中…"
+                                lifecycleScope.launch {
+                                    val apk = U.download(this@SettingsActivity, c.release)
+                                    if (apk == null) {
+                                        sub.text = "下載失敗，請稍後再試"
+                                    } else {
+                                        sub.text = "下載完成"
+                                        if (!U.install(this@SettingsActivity, apk)) {
+                                            android.widget.Toast.makeText(this@SettingsActivity, "請允許安裝更新，回來後再按一次", android.widget.Toast.LENGTH_LONG).show()
+                                        }
+                                    }
+                                }
+                            }
+                            .setNegativeButton("稍後", null)
+                            .show()
+                    }
+                    com.p3dro.scorpio.ime.engine.AppUpdater.Check.UpToDate -> sub.text = "已經是最新版"
+                    com.p3dro.scorpio.ime.engine.AppUpdater.Check.NoRelease -> sub.text = "還沒有公開的版本（原始碼 repo 公開後才查得到）"
+                    is com.p3dro.scorpio.ime.engine.AppUpdater.Check.Failed -> sub.text = c.reason
+                }
+                busy = false
+            }
+        }
+    }
+
     // ---------- 擴充功能 ----------
 
     private fun buildPlugins() {
@@ -1123,39 +1311,8 @@ class SettingsActivity : AppCompatActivity() {
         val tb = card()
         boolSwitch(tb, "最近使用的 Emoji 與顏文字", "工具列中間常駐最近用過的 Emoji 和顏文字，可以左右滑。",
             com.p3dro.scorpio.ime.ScorpioImeService.PREF_RECENT_BAR, false)
-        infoRow(tb, "左邊的工具", "勾選要顯示的工具，用箭頭調整順序；全部不勾也可以。")
-        val tools = com.p3dro.scorpio.ime.engine.Toolbar.all(this)
-        for ((i, t) in tools.withIndex()) {
-            val r = row(tb, t.icon, clickable = true)
-            texts(textColumn(r), t.name, null)
-            fun iconButton(res: Int, desc: String, enabled: Boolean, onClick: () -> Unit) = ImageView(this).apply {
-                setImageResource(res)
-                setColorFilter(if (enabled) cOnSurfaceVariant else (cOnSurfaceVariant and 0x00FFFFFF) or 0x40000000)
-                contentDescription = desc
-                isEnabled = enabled
-                setPadding(dp(8), dp(8), dp(8), dp(8))
-                val tv = android.util.TypedValue()
-                theme.resolveAttribute(android.R.attr.selectableItemBackgroundBorderless, tv, true)
-                setBackgroundResource(tv.resourceId)
-                setOnClickListener { onClick() }
-                r.addView(this, LinearLayout.LayoutParams(dp(40), dp(40)))
-            }
-            iconButton(R.drawable.ic_set_arrow_up, "往前", i > 0) {
-                com.p3dro.scorpio.ime.engine.Toolbar.move(this, t.id, -1)
-                render()
-            }
-            iconButton(R.drawable.ic_set_arrow_down, "往後", i < tools.size - 1) {
-                com.p3dro.scorpio.ime.engine.Toolbar.move(this, t.id, 1)
-                render()
-            }
-            val cb = com.google.android.material.checkbox.MaterialCheckBox(this).apply { isChecked = t.visible }
-            cb.setOnCheckedChangeListener { _, on ->
-                com.p3dro.scorpio.ime.engine.Toolbar.setVisible(this, t.id, on)
-                refreshPreview()
-            }
-            r.addView(cb)
-            r.setOnClickListener { cb.toggle() }
-        }
+        infoRow(tb, "左邊的工具", "用開關決定要不要顯示，按住右邊的把手拖拉調整順序；全部關掉也可以。")
+        toolList(tb)
 
         sectionTitle("擴充功能")
         val intro = card()
@@ -1262,6 +1419,7 @@ class SettingsActivity : AppCompatActivity() {
                 android.widget.Toast.makeText(this, "沒有可以開啟網址的 App", android.widget.Toast.LENGTH_SHORT).show()
             }
         }
+        appUpdateRow(a)
         link("原始碼", "https://github.com/ScorpionSkypoo/ScorpionBopomofo")
         link("詞庫與擴充功能", "https://github.com/ScorpionSkypoo/scorpio-ime-data")
         sectionTitle("資料來源")

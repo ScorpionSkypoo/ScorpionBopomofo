@@ -43,6 +43,10 @@ object Toolbar {
         prefs(context).edit().putString(PREF_HIDDEN, hidden.joinToString(",")).apply()
     }
 
+    /** 拖拉排序後整個存起來 */
+    fun setOrder(context: Context, ids: List<String>) =
+        prefs(context).edit().putString(PREF_ORDER, ids.joinToString(",")).apply()
+
     /** delta = -1 往前、1 往後 */
     fun move(context: Context, id: String, delta: Int) {
         val ids = all(context).map { it.id }.toMutableList()

@@ -43,7 +43,13 @@ object PackUpdater {
         val size: Long,
         val sha256: String,
         val url: String,
-        val minAppVersion: Int
+        val minAppVersion: Int,
+        val description: String = "",
+        val source: String = "",
+        val license: String = "",
+        /** false＝App 不內建、只能線上安裝 */
+        val bundled: Boolean = true,
+        val rows: Int = 0
     )
 
     data class ManifestPlugin(
@@ -69,7 +75,8 @@ object PackUpdater {
             ManifestPack(
                 o.getString("id"), o.optString("group", "words"), o.optString("name", o.getString("id")),
                 o.getString("version"), o.optLong("size", -1), o.getString("sha256"), o.getString("url"),
-                o.optInt("minAppVersion", 0)
+                o.optInt("minAppVersion", 0), o.optString("description", ""), o.optString("source", ""),
+                o.optString("license", ""), o.optBoolean("bundled", true), o.optInt("rows", 0)
             )
         }
     }
@@ -123,7 +130,7 @@ object PackUpdater {
     suspend fun ensureLatest(context: Context, id: String): Boolean = withContext(Dispatchers.IO) {
         val dict = ScorpioDictManager.getInstance(context.applicationContext)
         val p = try {
-            parseManifest(fetch(MANIFEST_URL) ?: "").firstOrNull { it.id == id }
+            parseManifest(fetchManifest(context)).firstOrNull { it.id == id }
         } catch (e: Exception) {
             null
         } ?: return@withContext false
@@ -137,7 +144,7 @@ object PackUpdater {
     suspend fun availablePlugins(context: Context): List<ManifestPlugin>? = withContext(Dispatchers.IO) {
         try {
             val v = appVersion(context)
-            parsePlugins(fetch(MANIFEST_URL) ?: "").filter { it.minAppVersion <= v }
+            parsePlugins(fetchManifest(context)).filter { it.minAppVersion <= v }
         } catch (e: Exception) {
             null
         }
@@ -159,6 +166,30 @@ object PackUpdater {
     /** 需要更新的資料包：App 版本夠新、而且比目前生效的版本新 */
     fun pending(manifest: List<ManifestPack>, appVersionCode: Long, installed: (ManifestPack) -> String) =
         manifest.filter { it.minAppVersion <= appVersionCode && PackVersion.compare(it.version, installed(it)) > 0 }
+
+    private const val PREF_MANIFEST = "manifest_cache"
+
+    /** 上次讀到的 manifest（設定頁列出還沒安裝的資料包用；沒網路時也看得到） */
+    fun cachedManifest(context: Context): List<ManifestPack> = try {
+        parseManifest(context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(PREF_MANIFEST, null) ?: "{}")
+    } catch (e: Exception) {
+        emptyList()
+    }
+
+    private fun fetchManifest(context: Context): String {
+        val json = fetch(MANIFEST_URL) ?: ""
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(PREF_MANIFEST, json).apply()
+        return json
+    }
+
+    /** 重新讀一次 manifest（設定頁打開時），回傳還沒安裝、App 版本夠新的資料包 */
+    suspend fun refreshManifest(context: Context): List<ManifestPack> = withContext(Dispatchers.IO) {
+        try {
+            parseManifest(fetchManifest(context))
+        } catch (e: Exception) {
+            cachedManifest(context)
+        }.filter { it.minAppVersion <= appVersion(context) }
+    }
 
     private fun fetch(url: String, out: File? = null): String? {
         val conn = URL(url).openConnection() as HttpURLConnection
@@ -214,7 +245,7 @@ object PackUpdater {
         val appVersion = appVersion(context)
         val json: String
         val manifest = try {
-            json = fetch(MANIFEST_URL) ?: ""
+            json = fetchManifest(context)
             parseManifest(json)
         } catch (e: Exception) {
             Log.w(TAG, "讀取更新清單失敗", e)

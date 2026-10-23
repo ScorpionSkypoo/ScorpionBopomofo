@@ -1,8 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- 只用於手寫辨識第一次下載 ML Kit 模型；打字內容不會上傳 -->
+    <!-- 下載詞庫更新、擴充功能、App 更新，以及手寫辨識第一次下載 ML Kit 模型；打字內容不會上傳 -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- 檢查 App 更新：下載 GitHub Releases 的 APK 後交給系統安裝 -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <application
         android:allowBackup="true"
@@ -35,6 +37,16 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.files"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
 
     </application>
 
