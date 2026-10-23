@@ -671,6 +671,27 @@ class ScorpioDictManager private constructor(private val context: Context) {
     // 詞是否為使用者自建（user_dict 有、系統詞典沒有）的快取；學習或刪除時清空
     private val userOnlyCache = LruCache<String, Boolean>(3000)
 
+    /**
+     * 畫面上游標前文字的最後一個詞（選字的上文）：只看結尾連著的漢字，取主詞庫或學過的詞裡最長的結尾（最多 4 字），
+     * 都不是詞就取最後一個字（接續詞本來就會退回用最後一個字查）
+     */
+    fun lastWordOf(text: CharSequence): String? {
+        val cps = ArrayList<Int>()
+        var i = text.length
+        while (i > 0 && cps.size < 4) {
+            val cp = Character.codePointBefore(text, i)
+            if (Character.UnicodeScript.of(cp) != Character.UnicodeScript.HAN) break
+            cps.add(0, cp)
+            i -= Character.charCount(cp)
+        }
+        if (cps.isEmpty()) return null
+        for (len in cps.size downTo 2) {
+            val w = cps.subList(cps.size - len, cps.size).joinToString("") { String(Character.toChars(it)) }
+            if (words.hasWord(w) || user.hasWord(w)) return w
+        }
+        return String(Character.toChars(cps.last()))
+    }
+
     /** 從候選中挑出使用者自建詞（系統詞典沒有、後天選字學到的），供候選列標示小鉛筆、開放長按刪除 */
     suspend fun userOnlyWords(words: Collection<String>): Set<String> = withContext(Dispatchers.IO) {
         val out = HashSet<String>()

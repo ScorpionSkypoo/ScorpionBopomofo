@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 自動填入建議（驗證碼、密碼、地址）的膠囊底色：由自動填入服務的行程畫，不能用主題屬性，只能用一般顏色（日夜各一） -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <solid android:color="@color/ime_classic_key_function_bg" />
+    <corners android:radius="17dp" />
+</shape>

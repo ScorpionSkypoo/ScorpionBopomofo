@@ -2,7 +2,8 @@
 <input-method xmlns:android="http://schemas.android.com/apk/res/android"
     android:settingsActivity="com.p3dro.scorpio.ime.ui.SettingsActivity"
     android:isDefault="false"
-    android:supportsSwitchingToNextInputMethod="true">
+    android:supportsSwitchingToNextInputMethod="true"
+    android:supportsInlineSuggestions="true">
     <subtype
         android:label="@string/ime_subtype_zhuyin"
         android:imeSubtypeLocale="zh_TW"

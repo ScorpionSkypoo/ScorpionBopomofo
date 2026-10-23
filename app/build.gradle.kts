@@ -80,6 +80,8 @@ dependencies {
     implementation("androidx.work:work-runtime-ktx:2.9.1")
     // 側載安裝時也套用 Baseline Profile（src/main/baseline-prof.txt），選字的程式預先編譯成機器碼
     implementation("androidx.profileinstaller:profileinstaller:1.4.1")
+    // 自動填入建議（簡訊驗證碼、密碼）顯示在鍵盤上：Inline Suggestions 的樣式（Android 11 以上）
+    implementation("androidx.autofill:autofill:1.1.0")
 
     testImplementation("junit:junit:4.13.2")
     // 單元測試裡 android.jar 的 org.json 只是空殼，換成真的實作

@@ -31,8 +31,28 @@
                 android:orientation="horizontal"
                 android:gravity="center_vertical" />
 
+            <!-- 自動填入服務給的建議（簡訊驗證碼、密碼、地址）：有建議時取代最近使用列，點了由系統填進輸入框 -->
+            <HorizontalScrollView
+                android:id="@+id/scroll_inline_suggestions"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1"
+                android:scrollbars="none"
+                android:overScrollMode="never"
+                android:visibility="gone">
+                <LinearLayout
+                    android:id="@+id/layout_inline_suggestions"
+                    android:layout_width="wrap_content"
+                    android:layout_height="match_parent"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical"
+                    android:paddingStart="4dp"
+                    android:paddingEnd="4dp" />
+            </HorizontalScrollView>
+
             <!-- 常駐最近使用的 Emoji／顏文字（設定開啟才有內容），可以左右滑；沒開時當空白撐開 -->
             <HorizontalScrollView
+                android:id="@+id/scroll_recent"
                 android:layout_width="0dp"
                 android:layout_height="match_parent"
                 android:layout_weight="1"

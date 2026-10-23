@@ -64,6 +64,12 @@ class ScorpioImeService : InputMethodService() {
     private var predictionJob: Job? = null
 
     private var layoutIdleBar: View? = null
+
+    // 自動填入建議（簡訊驗證碼、密碼、地址）：由系統的自動填入服務提供，鍵盤只負責顯示；點了由系統填進輸入框
+    private var scrollInlineSuggestions: View? = null
+    private var layoutInlineSuggestions: LinearLayout? = null
+    private var scrollRecent: View? = null
+    private var inlineSuggestionViews: List<View> = emptyList()
     private var layoutCandidateActive: View? = null
 
     private var panelZhuyin: View? = null
@@ -122,6 +128,12 @@ class ScorpioImeService : InputMethodService() {
     private var keyboardRootView: View? = null
     private var keyPreview: com.p3dro.scorpio.ime.ui.KeyPreview? = null
     private var lastCommittedWord: String? = null
+
+    /**
+     * 畫面上游標前已經有的字的最後一個詞：還沒有「上一個送出的詞」時（剛點進輸入框、移動過游標、刪過字）當選字的上文。
+     * 每次開始打新的詞時讀一次（見 captureScreenContext）；只拿來排序，不拿來學習
+     */
+    private var screenContextWord: String? = null
     private var lastCommittedReading: String? = null
     private var lastCommitTime: Long = 0L
 
@@ -325,6 +337,10 @@ class ScorpioImeService : InputMethodService() {
 
         rvCandidates = root.findViewById(R.id.rv_candidates)
         layoutIdleBar = root.findViewById(R.id.layout_idle_bar)
+        scrollInlineSuggestions = root.findViewById(R.id.scroll_inline_suggestions)
+        layoutInlineSuggestions = root.findViewById(R.id.layout_inline_suggestions)
+        scrollRecent = root.findViewById(R.id.scroll_recent)
+        showInlineSuggestions(inlineSuggestionViews)
         layoutCandidateActive = root.findViewById(R.id.layout_candidate_active)
 
         panelZhuyin = root.findViewById(R.id.panel_zhuyin)
@@ -448,6 +464,7 @@ class ScorpioImeService : InputMethodService() {
         keyPreview?.enabled = prefs.getBoolean("key_preview", true)
         inlineSymbols = prefs.getBoolean("inline_emoji_kaomoji", true)
         lastCommittedWord = null
+        screenContextWord = null
         lastEnglishWord = null
         clearComposer()
         val methods = com.p3dro.scorpio.ime.engine.ChineseMethod.enabled(prefs)
@@ -465,6 +482,94 @@ class ScorpioImeService : InputMethodService() {
         super.onFinishInputView(finishingInput)
         finishEnglishWord(learn = false)
         keyPreview?.hideAll()
+        // 離開這個輸入框：上一個輸入框的自動填入建議不能留著（新的輸入框會再送一次）
+        showInlineSuggestions(emptyList())
+    }
+
+    // ---------- 自動填入建議（Android 11 以上的 Inline Suggestions） ----------
+
+    /**
+     * 跟系統說鍵盤可以顯示自動填入建議、要什麼樣式。建議由自動填入服務（例如 Google 自動填入的「簡訊驗證碼」）產生並畫好，
+     * 鍵盤拿到的是已經畫好的小視窗，看不到簡訊內容，也不需要任何權限。
+     * 膠囊在自動填入服務的行程裡畫，底色只能用一般顏色資源（日夜各一），字色用目前主題的顏色
+     */
+    @androidx.annotation.RequiresApi(Build.VERSION_CODES.R)
+    override fun onCreateInlineSuggestionsRequest(uiExtras: android.os.Bundle): android.view.inputmethod.InlineSuggestionsRequest {
+        val d = resources.displayMetrics.density
+        val style = androidx.autofill.inline.v1.InlineSuggestionUi.newStyleBuilder()
+            .setSingleIconChipStyle(
+                androidx.autofill.inline.common.ViewStyle.Builder()
+                    .setBackground(android.graphics.drawable.Icon.createWithResource(this, R.drawable.bg_inline_chip))
+                    .setPadding(0, 0, 0, 0)
+                    .build()
+            )
+            .setChipStyle(
+                androidx.autofill.inline.common.ViewStyle.Builder()
+                    .setBackground(android.graphics.drawable.Icon.createWithResource(this, R.drawable.bg_inline_chip))
+                    .setPadding((12 * d).toInt(), 0, (12 * d).toInt(), 0)
+                    .build()
+            )
+            .setTitleStyle(
+                androidx.autofill.inline.common.TextViewStyle.Builder()
+                    .setTextColor(ui.getColor(R.color.ime_text_primary))
+                    .setTextSize(15f)
+                    .build()
+            )
+            .setSubtitleStyle(
+                androidx.autofill.inline.common.TextViewStyle.Builder()
+                    .setTextColor(ui.getColor(R.color.ime_text_secondary))
+                    .setTextSize(12f)
+                    .build()
+            )
+            .build()
+        val styles = androidx.autofill.inline.UiVersions.newStylesBuilder().addStyle(style).build()
+        val spec = android.widget.inline.InlinePresentationSpec.Builder(
+            android.util.Size((48 * d).toInt(), (34 * d).toInt()),
+            android.util.Size((260 * d).toInt(), (34 * d).toInt())
+        ).setStyle(styles).build()
+        return android.view.inputmethod.InlineSuggestionsRequest.Builder(listOf(spec))
+            .setMaxSuggestionCount(6)
+            .build()
+    }
+
+    @androidx.annotation.RequiresApi(Build.VERSION_CODES.R)
+    override fun onInlineSuggestionsResponse(response: android.view.inputmethod.InlineSuggestionsResponse): Boolean {
+        val suggestions = response.inlineSuggestions
+        if (suggestions.isEmpty()) {
+            showInlineSuggestions(emptyList())
+            return true
+        }
+        // 每個建議各自非同步畫好；全部回來後依原本順序放，釘選的（通常是開自動填入設定的圖示）放最後
+        val views = arrayOfNulls<View>(suggestions.size)
+        var pending = suggestions.size
+        val size = android.util.Size(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        suggestions.forEachIndexed { i, s ->
+            s.inflate(this, size, mainExecutor) { v ->
+                views[i] = v
+                if (--pending == 0) {
+                    val order = suggestions.indices.sortedBy { if (suggestions[it].info.isPinned) 1 else 0 }
+                    showInlineSuggestions(order.mapNotNull { views[it] })
+                }
+            }
+        }
+        return true
+    }
+
+    /** 有自動填入建議時放在工具列中間（取代最近使用列），沒有就收起來 */
+    private fun showInlineSuggestions(views: List<View>) {
+        inlineSuggestionViews = views
+        val box = layoutInlineSuggestions ?: return
+        box.removeAllViews()
+        val d = resources.displayMetrics.density
+        for (v in views) {
+            (v.parent as? ViewGroup)?.removeView(v)
+            box.addView(v, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, (34 * d).toInt()).apply {
+                marginEnd = (6 * d).toInt()
+            })
+        }
+        val has = views.isNotEmpty()
+        scrollInlineSuggestions?.visibility = if (has) View.VISIBLE else View.GONE
+        scrollRecent?.visibility = if (has) View.GONE else View.VISIBLE
     }
 
     /** 使用者自己移動游標（點到別處）：英文暫存的字就地確定，不跟著游標跑 */
@@ -1197,6 +1302,7 @@ class ScorpioImeService : InputMethodService() {
 
     private fun onZhuyinKeyPressed(c: Char, offsetX: Float = 0f, offsetY: Float = 0f) {
         predictionJob?.cancel()
+        if (!composer.isComposing && lastCommittedWord == null) captureScreenContext()
         // 空間模型判定實際的鍵：落點 + 個人化偏移 + 音節是否拼得起來（保留原始落點供解碼回頭修正）
         val touch = dictManager.resolveZhuyinTap(c, offsetX, offsetY, composer.getTouchPoints())
         composer.append(touch)
@@ -1211,6 +1317,35 @@ class ScorpioImeService : InputMethodService() {
         lastActionWasBackspace = false
         updateComposingAndCandidates()
     }
+
+    /** 開始打一個新詞、又沒有上一個送出的詞時：讀游標前幾個字，找出最後一個詞當上文（密碼欄、無痕模式不讀） */
+    private fun captureScreenContext() {
+        screenContextWord = null
+        if (!screenContextAllowed()) return
+        val before = try {
+            currentInputConnection?.getTextBeforeCursor(8, 0)
+        } catch (e: Exception) {
+            null
+        } ?: return
+        screenContextWord = dictManager.lastWordOf(before)
+    }
+
+    /** 密碼欄、要求不要個人化學習的輸入框（瀏覽器無痕分頁等）不讀畫面上的字 */
+    private fun screenContextAllowed(): Boolean {
+        val info = currentInputEditorInfo ?: return false
+        if ((info.imeOptions and EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING) != 0) return false
+        val cls = info.inputType and EditorInfo.TYPE_MASK_CLASS
+        val variation = info.inputType and EditorInfo.TYPE_MASK_VARIATION
+        if (cls == EditorInfo.TYPE_CLASS_TEXT && variation in setOf(
+                EditorInfo.TYPE_TEXT_VARIATION_PASSWORD, EditorInfo.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD, EditorInfo.TYPE_TEXT_VARIATION_WEB_PASSWORD
+            )
+        ) return false
+        if (cls == EditorInfo.TYPE_CLASS_NUMBER && variation == EditorInfo.TYPE_NUMBER_VARIATION_PASSWORD) return false
+        return true
+    }
+
+    /** 選字用的上文：上一個送出的詞，沒有就用畫面上游標前的最後一個詞 */
+    private val contextWord: String? get() = lastCommittedWord ?: screenContextWord
 
     /** 大千注音鍵盤的觸控落點（供空間模型與鄰鍵修正）；字母鍵輸入法沒有注音落點 */
     private fun zhuyinTouches(): List<BopomofoComposer.TouchPoint>? =
@@ -1290,6 +1425,7 @@ class ScorpioImeService : InputMethodService() {
             onCodeKey(raw, offsetX, offsetY)
             return
         }
+        if (!composer.isComposing && lastCommittedWord == null) captureScreenContext()
         val decoder = composer.decoder
         val history = composer.keyHistory
         val resolved = if (decoder != null && decoder.isReady) {
@@ -1502,7 +1638,7 @@ class ScorpioImeService : InputMethodService() {
             val touchPoints = zhuyinTouches()
 
             candidateJob = serviceScope.launch {
-                val candidates = dictManager.getCandidates(segmentations, hasTone, lastCommittedWord, touchPoints, inlineSymbols)
+                val candidates = dictManager.getCandidates(segmentations, hasTone, contextWord, touchPoints, inlineSymbols)
                 candidateAdapter?.submitList(candidates)
                 candidateAdapter?.markUserWords(candidates, dictManager.userOnlyWords(candidates.take(40)))
                 rvCandidates?.scrollToPosition(0)
@@ -2221,7 +2357,7 @@ class ScorpioImeService : InputMethodService() {
                 showExpandedWords(rvGrid, candidateAdapter?.currentList ?: emptyList())
                 return@launch
             }
-            val groups = dictManager.getCandidateGroups(composer.getAllSegmentations(), composer.hasExplicitTone(), lastCommittedWord, zhuyinTouches())
+            val groups = dictManager.getCandidateGroups(composer.getAllSegmentations(), composer.hasExplicitTone(), contextWord, zhuyinTouches())
             if (inlineSymbols || (groups.emoji.isEmpty() && groups.kaomoji.isEmpty())) {
                 layoutExpandedHeader?.visibility = View.GONE
                 showExpandedWords(rvGrid, segmentCandidates(if (inlineSymbols) groups.inline else groups.words, syllables.size))
