@@ -1,0 +1,62 @@
+name: Android
+
+# push、PR：建置並跑單元測試
+# 推 v* tag：另外簽章、建立 GitHub Release 並附上 APK
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # 版本號用 git describe 與 commit 數
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: 還原簽章金鑰
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.keystore"
+            echo "SIGNING_KEYSTORE=$RUNNER_TEMP/release.keystore" >> "$GITHUB_ENV"
+          fi
+        env:
+          KEYSTORE_BASE64: ${{ secrets.SIGNING_KEYSTORE_BASE64 }}
+
+      - name: 建置與測試
+        run: ./gradlew assembleRelease testReleaseUnitTest
+        env:
+          SIGNING_STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
+          SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
+          SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apk
+          path: app/build/outputs/apk/release/app-release.apk
+
+      - name: 發佈 Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          T=${GITHUB_REF_NAME}
+          cp app/build/outputs/apk/release/app-release.apk "ScorpioIME-$T.apk"
+          if gh release view "$T" > /dev/null 2>&1; then
+            gh release upload "$T" "ScorpioIME-$T.apk" --clobber
+          else
+            gh release create "$T" "ScorpioIME-$T.apk" --title "Scorpio 智慧注音 ${T#v}" --generate-notes
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
