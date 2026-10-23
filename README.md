@@ -6,6 +6,15 @@
 
 <p align="center">Android 注音輸入法：整句選字、免聲調、打錯也猜得到，詞庫可以分開開關、匯入匯出。</p>
 
+<p align="center">
+  <img src="docs/screenshots/keyboard-zhuyin.png" width="32%" alt="注音鍵盤">
+  <img src="docs/screenshots/keyboard-english.png" width="32%" alt="英文鍵盤">
+  <img src="docs/screenshots/keyboard-kaomoji.png" width="32%" alt="顏文字面板">
+</p>
+<p align="center">
+  <img src="docs/screenshots/settings-methods.png" width="32%" alt="設定：輸入法">
+</p>
+
 ---
 
 ## 功能
