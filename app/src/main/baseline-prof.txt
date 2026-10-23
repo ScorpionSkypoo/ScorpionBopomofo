@@ -1,0 +1,8 @@
+# Baseline Profile：讓 ART 在安裝後把這些程式預先編譯成機器碼（側載安裝時由 androidx.profileinstaller 寫入）
+# 輸入法每按一鍵都要跑整句選字，直譯執行會多吃很多 CPU
+HSPLcom/p3dro/scorpio/ime/**;->**(**)**
+Lcom/p3dro/scorpio/ime/**;
+HSPLkotlinx/coroutines/**;->**(**)**
+Lkotlinx/coroutines/**;
+HSPLandroidx/recyclerview/widget/**;->**(**)**
+Landroidx/recyclerview/widget/**;

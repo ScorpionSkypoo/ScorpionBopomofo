@@ -15,6 +15,9 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.ScorpioIME">
 
+        <!-- 允許用 adb／simpleperf 量效能（只有接上電腦的 shell 能用，其他 App 讀不到） -->
+        <profileable android:shell="true" />
+
         <service
             android:name=".ScorpioImeService"
             android:label="@string/ime_service_name"

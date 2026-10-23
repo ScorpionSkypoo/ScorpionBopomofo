@@ -451,6 +451,12 @@ class ScorpioImeService : InputMethodService() {
         }
     }
 
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        // RUNNING_LOW(10)／RUNNING_CRITICAL(15)：前景但系統缺記憶體；UI_HIDDEN(20)：鍵盤收起；BACKGROUND(40) 以上：在背景、快被殺了
+        if (level >= android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) dictManager.trimMemory(level)
+    }
+
     override fun onWindowHidden() {
         super.onWindowHidden()
         keyPreview?.hideAll()
