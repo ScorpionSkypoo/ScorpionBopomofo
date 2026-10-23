@@ -83,6 +83,15 @@ class ScdFile private constructor(private val buf: ByteBuffer) {
 
     fun charAt(sid: Int, i: Int): Char = strChr.get(strOff.get(sid) + i)
 
+    /** 字串的字元直接從檔案讀（不複製、不產生 String），比對用 */
+    fun chars(sid: Int): CharSequence = Chars(strOff.get(sid), strOff.get(sid + 1) - strOff.get(sid))
+
+    private inner class Chars(private val start: Int, override val length: Int) : CharSequence {
+        override fun get(index: Int): Char = strChr.get(start + index)
+        override fun subSequence(startIndex: Int, endIndex: Int): CharSequence = Chars(start + startIndex, endIndex - startIndex)
+        override fun toString(): String = String(CharArray(length) { strChr.get(start + it) })
+    }
+
     /** 跟 String.compareTo 相同的比較（UTF-16 code unit），不產生字串 */
     fun compare(sid: Int, key: CharSequence): Int {
         val a = strOff.get(sid)
@@ -142,10 +151,25 @@ class ScdFile private constructor(private val buf: ByteBuffer) {
         /** 位置 pos（start..end）上的資料列 */
         fun row(pos: Int) = post?.get(pos) ?: pos
 
+        /**
+         * 每 [SAMPLE] 個鍵取一個放在記憶體（第一次用到時建，全部詞庫加起來幾百 KB）：
+         * 二分搜尋先在記憶體裡找到區段，再到檔案裡比幾次就好（原本每次比對都要從 mmap 一個字一個字讀）
+         */
+        private val sample: Array<String> by lazy { Array((size + SAMPLE - 1) / SAMPLE) { f.str(keys.get(it * SAMPLE)) } }
+
         /** 第一個 >= key 的鍵 */
         fun lowerBound(key: CharSequence): Int {
-            var lo = 0
-            var hi = size
+            val q = key.toString()
+            var a = 0
+            var b = sample.size
+            while (a < b) {
+                val mid = (a + b) ushr 1
+                if (sample[mid] < q) a = mid + 1 else b = mid
+            }
+            // sample[a-1] < key <= sample[a]：答案在 ((a-1)*SAMPLE, a*SAMPLE]
+            if (a == 0) return 0
+            var lo = (a - 1) * SAMPLE + 1
+            var hi = minOf(a * SAMPLE, size)
             while (lo < hi) {
                 val mid = (lo + hi) ushr 1
                 if (f.compare(keys.get(mid), key) < 0) lo = mid + 1 else hi = mid
@@ -167,6 +191,8 @@ class ScdFile private constructor(private val buf: ByteBuffer) {
         const val VERSION = 1
         const val NAME_LEN = 24
         const val DIR_ENTRY = 32
+        /** 索引的取樣間隔（見 Index.lowerBound） */
+        const val SAMPLE = 32
 
         fun open(file: File): ScdFile = RandomAccessFile(file, "r").use { raf ->
             ScdFile(raf.channel.map(FileChannel.MapMode.READ_ONLY, 0, raf.length()))

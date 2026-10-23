@@ -32,6 +32,7 @@ class WordTable(val f: ScdFile) {
     fun word(row: Int) = f.str(word.get(row))
     fun reading(row: Int) = f.str(read.get(row))
     fun toneless(row: Int) = f.str(tl.get(row))
+    fun tonelessSid(row: Int) = tl.get(row)
     fun hit(row: Int) = WordHit(word(row), score(row), reading(row))
     fun isSingleChar(row: Int) = f.isSingleCodePoint(word.get(row))
 
@@ -165,13 +166,16 @@ class WordStore(val tables: List<WordTable>) {
         val like = Like(pattern)
         for ((t, w) in tables.withIndex()) {
             val best = ArrayList<Ref>()
+            // 同一個無聲調讀音在這次查詢只比對一次（直接比對檔案裡的字元，不產生字串）
+            val memo = HashMap<Int, Boolean>()
             for (key in keys) {
                 val k = w.inIx.find(key)
                 if (k < 0) continue
                 var taken = 0
                 for (pos in w.inIx.start(k) until w.inIx.end(k)) {
                     val row = w.inIx.row(pos)
-                    if (!like.matches(w.toneless(row))) continue
+                    val sid = w.tonelessSid(row)
+                    if (!memo.getOrPut(sid) { like.matches(w.f.chars(sid)) }) continue
                     best.add(Ref(t, row, w.score(row), pos))
                     if (++taken >= limit) break
                 }
@@ -233,7 +237,35 @@ class WordStore(val tables: List<WordTable>) {
 class Like(pattern: String) {
     private val p = pattern.codePoints().toArray()
 
-    fun matches(s: String): Boolean {
+    /** 樣式沒有 _ 也沒有補充平面字元時，逐個 char 比對就等於逐個字比對，不必先轉 code point（選字時的簡拼樣式都是這種） */
+    private val fast: CharArray? = pattern.takeIf { s -> '_' !in s && s.none { it.isSurrogate() } }?.toCharArray()
+
+    fun matches(s: CharSequence): Boolean {
+        val q = fast ?: return matchesCodePoints(s.toString())
+        var i = 0
+        var j = 0
+        var star = -1
+        var mark = 0
+        val n = s.length
+        while (i < n) {
+            if (j < q.size && q[j] != '%' && eq(q[j].code, s[i].code)) {
+                i++
+                j++
+            } else if (j < q.size && q[j] == '%') {
+                star = j++
+                mark = i
+            } else if (star >= 0) {
+                j = star + 1
+                i = ++mark
+            } else {
+                return false
+            }
+        }
+        while (j < q.size && q[j] == '%') j++
+        return j == q.size
+    }
+
+    private fun matchesCodePoints(s: String): Boolean {
         val t = s.codePoints().toArray()
         // 經典的萬用字元比對：記住最後一個 % 的位置以便回溯
         var i = 0
