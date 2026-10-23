@@ -1,6 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
-<ripple xmlns:android="http://schemas.android.com/apk/res/android"
-    android:color="@color/ime_key_pressed">
+<!-- 功能鍵：按下瞬間變色、放開瞬間恢復（不用 ripple：漣漪動畫每按一鍵要多畫三四十幀，打字時 CPU 一大半花在重畫） -->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_pressed="true">
+        <shape android:shape="rectangle">
+            <solid android:color="@color/ime_key_pressed" />
+            <corners android:radius="8dp" />
+            <stroke android:width="?attr/imeKeyStroke" android:color="?attr/imeKeyStrokeColor" />
+        </shape>
+    </item>
     <item>
         <shape android:shape="rectangle">
             <solid android:color="@color/ime_key_function_bg" />
@@ -8,4 +15,4 @@
             <stroke android:width="?attr/imeKeyStroke" android:color="?attr/imeKeyStrokeColor" />
         </shape>
     </item>
-</ripple>
+</selector>

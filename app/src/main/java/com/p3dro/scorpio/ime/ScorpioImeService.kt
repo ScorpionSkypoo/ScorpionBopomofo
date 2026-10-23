@@ -323,7 +323,10 @@ class ScorpioImeService : InputMethodService() {
         rvCandidates?.apply {
             layoutManager = LinearLayoutManager(this@ScorpioImeService, LinearLayoutManager.HORIZONTAL, false)
             adapter = candidateAdapter
+            // 每按一鍵候選列就整個換一次，淡入、移動動畫只會多畫很多幀
+            itemAnimator = null
         }
+        root.findViewById<RecyclerView>(R.id.rv_expanded_grid)?.itemAnimator = null
 
         ivExpandChevron = root.findViewById(R.id.iv_expand_chevron)
         layoutExpandedHeader = root.findViewById(R.id.layout_expanded_header)
