@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <!-- 下載詞庫更新、擴充功能、App 更新，以及手寫辨識第一次下載 ML Kit 模型；打字內容不會上傳 -->
     <uses-permission android:name="android.permission.INTERNET" />
@@ -47,6 +48,12 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths" />
         </provider>
+
+        <!-- 隱私：拿掉 Google ML Kit 附帶的使用統計上傳後端（datatransport 的 ClearCut）。
+             排程元件留著（拿掉的話排程時會找不到 service 而出錯），但沒有後端可送，統計事件會直接丟掉；手寫辨識不受影響 -->
+        <service
+            android:name="com.google.android.datatransport.runtime.backends.TransportBackendDiscovery"
+            tools:node="remove" />
 
     </application>
 

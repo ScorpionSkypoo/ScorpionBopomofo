@@ -14,6 +14,8 @@
 | 台灣景點與地標 | 交通部觀光署〈[景點－觀光資訊資料庫](https://data.gov.tw/dataset/7777)〉 | 政府資料開放授權條款－第 1 版 |
 | 世界國家與城市 | [Unicode CLDR](https://cldr.unicode.org/) 地區與城市名稱、[Wikidata](https://www.wikidata.org/) | Unicode License v3、CC0 1.0 |
 | 世界地標與地理 | [Wikidata](https://www.wikidata.org/) | CC0 1.0 |
+| 教育部國語辭典（可下載，不內建） | 教育部《重編國語辭典修訂本》，經 [g0v 萌典 moedict-data](https://github.com/g0v/moedict-data) 整理 | CC BY-ND 3.0 台灣，著作權屬教育部；只取詞條與注音、未更動內容 |
+| 資訊工程術語（可下載，不內建） | 國家教育研究院〈[電子計算機學術名詞](https://data.gov.tw/dataset/15416)〉 | 政府資料開放授權條款－第 1 版 |
 | Emoji 關鍵字 | [Unicode CLDR](https://github.com/unicode-org/cldr) zh_Hant 註解（release 46） | Unicode License v3，見 [`licenses/Unicode-License-v3.txt`](licenses/Unicode-License-v3.txt) |
 | 顏文字 | [w33ble/emoticon-data](https://github.com/w33ble/emoticon-data)（英文標籤對應成中文分類，略過含簡體字的） | MIT License，著作權聲明見 [`licenses/emoticon-data-MIT.txt`](licenses/emoticon-data-MIT.txt) |
 | 倉頡、速成碼表 | [Unicode Unihan](https://www.unicode.org/Public/UCD/latest/ucd/) `kCangjie` | Unicode License v3 |
