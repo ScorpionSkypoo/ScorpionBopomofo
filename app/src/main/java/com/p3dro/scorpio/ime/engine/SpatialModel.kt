@@ -9,7 +9,8 @@ import kotlin.math.sqrt
  * 1. 每個鍵是一個二元高斯分佈：落點到鍵中心的距離（以鍵距為單位、x/y 各自的標準差）決定機率，
  *    懲罰 = 負對數機率差，與解碼器的 log 機率同一尺度
  * 2. 個人化偏移校正：每次確定選字後，用「想按的鍵」與實際落點更新該鍵的系統性偏移（例如習慣按在鍵的下緣），
- *    樣本少的鍵向全體平均收斂
+ *    樣本少的鍵向全體平均收斂；同時學每個鍵落點的散佈：按得比較散的鍵（相對於自己其他鍵）感應範圍放大、按得準的縮小，
+ *    以所有鍵的平均散佈為準，只調各鍵之間的相對大小
  * 3. 逐鍵音節合法性：按下當下若最近的鍵會讓目前音節拼不起來（ㄉㄨ + ㄠ），而旁邊的鍵可以（ㄛ），
  *    且落點本來就靠近兩鍵交界，就改判為旁邊的鍵；落點在鍵中央時尊重實際按下的鍵
  *
@@ -55,6 +56,11 @@ class SpatialModel {
         private const val MAX_BIAS = 0.35
         private const val MAX_SAMPLES = 300.0
 
+        // 個人化散佈：每鍵變異數向「所有鍵的平均變異數」收斂的強度（樣本少的鍵維持原本寬度），以及放寬／收窄的上下限
+        private const val SPREAD_PRIOR = 40.0
+        private const val MIN_SPREAD = 0.6
+        private const val MAX_SPREAD = 1.6
+
         private val POS: Map<Char, Pair<Int, Int>> = buildMap {
             for (r in GRID.indices) for (c in GRID[r].indices) put(GRID[r][c], r to c)
         }
@@ -62,12 +68,20 @@ class SpatialModel {
         fun isTone(c: Char) = BopomofoComposer.TONES.contains(c)
     }
 
-    /** 偏移統計：平均偏移（鍵距單位）與樣本數 */
-    class Bias(var dx: Double = 0.0, var dy: Double = 0.0, var n: Double = 0.0) {
+    /**
+     * 偏移統計：平均偏移（鍵距單位）與樣本數；vx/vy 是落點對平均的變異數，m 是算變異數用的樣本數
+     * （舊版存的資料沒有變異數，m 從 0 開始累積）。超過 MAX_SAMPLES 之後都變成移動平均，一直跟著使用者的習慣走
+     */
+    class Bias(var dx: Double = 0.0, var dy: Double = 0.0, var n: Double = 0.0, var vx: Double = 0.0, var vy: Double = 0.0, var m: Double = 0.0) {
         fun add(x: Double, y: Double) {
             n = minOf(n + 1.0, MAX_SAMPLES)
+            m = minOf(m + 1.0, MAX_SAMPLES)
+            val ox = dx
+            val oy = dy
             dx += (x - dx) / n
             dy += (y - dy) / n
+            vx += ((x - ox) * (x - dx) - vx) / m
+            vy += ((y - oy) * (y - dy) - vy) / m
         }
     }
 
@@ -85,6 +99,9 @@ class SpatialModel {
 
     private val keyBias = HashMap<Char, Bias>()
     private val globalBias = Bias()
+
+    /** 所有鍵落點變異數的平均（依樣本數加權），散佈比例的基準；學習、還原時重算 */
+    private var refVar: Pair<Double, Double>? = null
 
     /** 用來判斷音節是否拼得起來（含尚未打完的開頭）；未載入前不做合法性判斷 */
     @Volatile
@@ -139,13 +156,44 @@ class SpatialModel {
         return (x / len * MAX_BIAS) to (y / len * MAX_BIAS)
     }
 
-    /** 落點相對某鍵的高斯代價（負對數機率，未正規化）：先扣掉使用者瞄準該鍵時的習慣偏移 */
-    private fun cost(point: Pair<Double, Double>, key: Char): Double {
+    /**
+     * 這個鍵的散佈相對於使用者所有鍵的平均（x, y 各一個比例，1 = 跟平均一樣）：
+     * 樣本少的鍵向 1 收斂；沒有任何散佈資料時都是 1（跟沒有這個功能時完全一樣）
+     */
+    @Synchronized
+    fun spreadRatio(key: Char): Pair<Double, Double> {
+        val ref = refVar ?: computeRefVar().also { refVar = it }
+        val k = keyBias[key]
+        if (k == null || k.m <= 0.0) return 1.0 to 1.0
+        fun ratio(v: Double, r: Double) = if (r <= 0.0) 1.0 else ((k.m * v + SPREAD_PRIOR * r) / (k.m + SPREAD_PRIOR) / r).coerceIn(MIN_SPREAD, MAX_SPREAD)
+        return ratio(k.vx, ref.first) to ratio(k.vy, ref.second)
+    }
+
+    private fun computeRefVar(): Pair<Double, Double> {
+        var w = 0.0
+        var sx = 0.0
+        var sy = 0.0
+        for (b in keyBias.values) {
+            if (b.m <= 0.0) continue
+            w += b.m
+            sx += b.m * b.vx
+            sy += b.m * b.vy
+        }
+        return if (w > 0) (sx / w) to (sy / w) else 0.0 to 0.0
+    }
+
+    /**
+     * 落點相對某鍵的高斯代價（負對數機率）：先扣掉使用者瞄準該鍵時的習慣偏移，再依這個鍵的散佈放寬或收窄感應範圍
+     * （按得散的鍵範圍大、按得準的鍵範圍小；鍵中央的代價都是 0）。
+     * 不加常態分佈的正規化項：這裡的高斯寬度是調過的懲罰尺度（比手指實際的散佈寬很多），加了反而讓放寬的鍵在自己附近變貴
+     */
+    private fun cost(point: Pair<Double, Double>, key: Char, useSpread: Boolean = true): Double {
         val (r, c) = POS[key] ?: return Double.MAX_VALUE
         val (bx, by) = effectiveBias(key)
+        val (sx, sy) = if (useSpread) spreadRatio(key) else 1.0 to 1.0
         val dx = point.first - (c + bx)
         val dy = point.second - (r + by)
-        return 0.5 * (dx * dx / VAR_X + dy * dy / VAR_Y)
+        return 0.5 * (dx * dx / (VAR_X * sx) + dy * dy / (VAR_Y * sy))
     }
 
     private fun gridNeighbors(key: Char): List<Char> {
@@ -185,7 +233,9 @@ class SpatialModel {
         rawChar: Char,
         offsetX: Float,
         offsetY: Float,
-        history: List<BopomofoComposer.TouchPoint>
+        history: List<BopomofoComposer.TouchPoint>,
+        /** false：不看個人化散佈（只用來跟有散佈的版本比判對率） */
+        useSpread: Boolean = true
     ): BopomofoComposer.TouchPoint {
         val raw = BopomofoComposer.TouchPoint(rawChar, offsetX, offsetY)
         if (!POS.containsKey(rawChar)) return raw
@@ -193,7 +243,7 @@ class SpatialModel {
 
         val options = listOf(rawChar) + gridNeighbors(rawChar).filter { !isTone(it) }
         val priors = priorPenalties(history, options)
-        fun score(k: Char) = cost(point, k) + (priors[k] ?: 0.0)
+        fun score(k: Char) = cost(point, k, useSpread) + (priors[k] ?: 0.0)
 
         var best = rawChar
         var bestScore = score(rawChar)
@@ -274,6 +324,7 @@ class SpatialModel {
         if (abs(dx) > 1.5 || abs(dy) > 1.5) return
         keyBias.getOrPut(intended) { Bias() }.add(dx, dy)
         globalBias.add(dx, dy)
+        refVar = null
     }
 
     fun sampleCount(): Int = globalBias.n.toInt()
@@ -284,25 +335,31 @@ class SpatialModel {
         val sb = StringBuilder()
         fun put(k: Char, b: Bias) {
             if (sb.isNotEmpty()) sb.append(';')
-            sb.append(k).append(':').append("%.4f,%.4f,%.1f".format(java.util.Locale.ROOT, b.dx, b.dy, b.n))
+            sb.append(k).append(':').append("%.4f,%.4f,%.1f,%.5f,%.5f,%.1f".format(java.util.Locale.ROOT, b.dx, b.dy, b.n, b.vx, b.vy, b.m))
         }
         put('*', globalBias)
         for ((k, b) in keyBias) put(k, b)
         return sb.toString()
     }
 
+    /** 「鍵:dx,dy,n[,vx,vy,m]」；舊版只有前三個數字（沒有散佈資料，m 從 0 開始累積） */
     @Synchronized
     fun restore(data: String?) {
         keyBias.clear()
         globalBias.dx = 0.0; globalBias.dy = 0.0; globalBias.n = 0.0
+        globalBias.vx = 0.0; globalBias.vy = 0.0; globalBias.m = 0.0
+        refVar = null
         if (data.isNullOrBlank()) return
         for (part in data.split(';')) {
             val idx = part.indexOf(':')
             if (idx != 1) continue
             val nums = part.substring(2).split(',').mapNotNull { it.toDoubleOrNull() }
-            if (nums.size != 3) continue
+            if (nums.size != 3 && nums.size != 6) continue
             val b = if (part[0] == '*') globalBias else keyBias.getOrPut(part[0]) { Bias() }
             b.dx = nums[0]; b.dy = nums[1]; b.n = nums[2]
+            if (nums.size == 6) {
+                b.vx = nums[3]; b.vy = nums[4]; b.m = nums[5]
+            }
         }
     }
 }

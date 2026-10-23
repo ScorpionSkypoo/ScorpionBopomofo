@@ -47,6 +47,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
         private const val LITERAL_MARGIN = 1.5
         private const val PREF_USER_DICT_CANONICAL = "user_dict_canonical_v1"
         private const val PREF_SPATIAL_BIAS = "spatial_bias_v1"
+        private const val PREF_TAP_STATS = "tap_stats_v1"
 
         // 英文學習詞（key 為小寫，word 保留最近一次的大小寫，例如 iPhone）
         // 個人慣性打錯：打了 typed 音節、實際選的是 intended 讀音的字（例如 ㄉㄨㄠ → ㄉㄧㄠ）
@@ -275,6 +276,8 @@ class ScorpioDictManager private constructor(private val context: Context) {
      * SQLite 與設定裡的資料不動；兩次測試之間使用者打字造成的學習與校正變化就不會影響比對
      */
     fun <T> withoutUserData(block: () -> T): T {
+        // 測試中暫停按鍵偏移與慣性打錯的學習：使用者這時打字不會改到測試用的乾淨模型（也不會學到測試期間的東西）
+        learningPaused = true
         val saved = user
         val savedSpatial = spatial.serialize()
         user = UserStore()
@@ -286,6 +289,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
         } finally {
             user = saved
             spatial.restore(savedSpatial)
+            learningPaused = false
             loadTypoMemory()
             invalidateCandidateCaches()
         }
@@ -690,7 +694,12 @@ class ScorpioDictManager private constructor(private val context: Context) {
      * 個人化偏移學習：確定選字後，比對每個音節的按鍵與該字的正確讀音，
      * 打對的鍵與只錯一個鍵的音節都是「想按某鍵、實際落在某處」的樣本
      */
+    /** 基準測試（withoutUserData）進行中：不學按鍵偏移與慣性打錯 */
+    @Volatile
+    private var learningPaused = false
+
     suspend fun recordTouchSamples(points: List<BopomofoComposer.TouchPoint>, word: String) = withContext(Dispatchers.IO) {
+        if (learningPaused) return@withContext
         val parsed = BopomofoComposer.parseSyllables(points)
         val chars = ArrayList<String>()
         var i = 0
@@ -714,6 +723,16 @@ class ScorpioDictManager private constructor(private val context: Context) {
             for (j in typed.indices) {
                 val touch = parsed[k].touches[typed[j]] ?: continue
                 if (SpatialModel.isTone(touch.rawChar)) continue
+                // 學之前先拿這一下來比：有／沒有個人化散佈，按下當下各會判成哪個鍵（只記次數）
+                val idx = points.indexOfFirst { it === touch }
+                if (idx >= 0) {
+                    val history = points.subList(0, idx)
+                    val withSpread = spatial.resolveTap(touch.rawChar, touch.offsetX, touch.offsetY, history).char == intended[j]
+                    val without = spatial.resolveTap(touch.rawChar, touch.offsetX, touch.offsetY, history, useSpread = false).char == intended[j]
+                    tapStats[0]++
+                    if (withSpread) tapStats[1]++
+                    if (without) tapStats[2]++
+                }
                 spatial.learn(intended[j], touch)
                 added++
             }
@@ -721,14 +740,25 @@ class ScorpioDictManager private constructor(private val context: Context) {
         if (added > 0) {
             spatialDirty += added
             if (spatialDirty >= 8) {
-                spatialPrefs.edit().putString(PREF_SPATIAL_BIAS, spatial.serialize()).apply()
+                spatialPrefs.edit().putString(PREF_SPATIAL_BIAS, spatial.serialize())
+                    .putString(PREF_TAP_STATS, tapStats.joinToString(",")).apply()
                 spatialDirty = 0
             }
         }
     }
 
+    /**
+     * 按下當下判對的次數（確定選字時拿真的想按的鍵來對）：[總數, 有個人化散佈時判對, 沒有散佈時判對]。
+     * 用來看散佈學習有沒有讓按鍵判斷更準；只記次數，不記打了什麼
+     */
+    private val tapStats: LongArray = spatialPrefs.getString(PREF_TAP_STATS, null)?.split(',')?.mapNotNull { it.toLongOrNull() }
+        ?.takeIf { it.size == 3 }?.toLongArray() ?: LongArray(3)
+
+    fun tapAccuracy(): LongArray = tapStats.copyOf()
+
     /** 刪掉一個鍵後改按別的鍵：被刪的落點當作「想按 intended」的樣本 */
     fun learnRetypeCorrection(intended: Char, wrong: BopomofoComposer.TouchPoint) {
+        if (learningPaused) return
         if (SpatialModel.isTone(intended) || SpatialModel.isTone(wrong.rawChar)) return
         spatial.learn(intended, wrong)
         if (++spatialDirty >= 8) {

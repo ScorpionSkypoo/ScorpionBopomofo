@@ -141,4 +141,53 @@ class SpatialModelTest {
         c.consumeSyllables(1)
         assertEquals(listOf("ㄉㄚ"), c.getAllSyllables())
     }
+
+    // ---------- 個人化散佈 ----------
+
+    /** 想按 key、落點在鍵中央附近、x 方向的散佈約 spread 鍵距（固定序列，不靠亂數） */
+    private fun SpatialModel.teach(key: Char, spread: Double, times: Int) {
+        val r = SpatialModel.GRID.indexOfFirst { key in it }
+        val c = SpatialModel.GRID[r].indexOf(key)
+        for (i in 0 until times) {
+            val dx = if (i % 2 == 0) spread else -spread
+            // 半鍵單位：鍵距 × 每鍵距幾個半鍵
+            learn(key, TouchPoint(key, (dx * SpatialModel.HALF_KEYS_PER_PITCH_X).toFloat(), 0f))
+        }
+        assertEquals(r, SpatialModel.GRID.indexOfFirst { key in it })
+        assertEquals(c, SpatialModel.GRID[r].indexOf(key))
+    }
+
+    @Test
+    fun noSpreadDataKeepsDefaultWidth() {
+        val m = model()
+        assertEquals(1.0 to 1.0, m.spreadRatio('ㄨ'))
+        // 只有舊版格式（沒有散佈）的偏移資料：寬度不變
+        m.restore("*:0.0100,0.0200,50.0;ㄨ:0.0300,0.0100,40.0")
+        assertEquals(1.0 to 1.0, m.spreadRatio('ㄨ'))
+    }
+
+    @Test
+    fun sloppyKeyWidensAndPreciseKeyNarrows() {
+        val m = model()
+        m.teach('ㄨ', 0.30, 200)
+        m.teach('ㄚ', 0.10, 200)
+        val sloppy = m.spreadRatio('ㄨ').first
+        val precise = m.spreadRatio('ㄚ').first
+        assertTrue("按得散的鍵要放寬：$sloppy", sloppy > 1.2)
+        assertTrue("按得準的鍵要收窄：$precise", precise < 0.8)
+        // 落在 ㄨ 右邊 0.45 鍵距：ㄨ 放寬後，右鄰 ㄜ 比沒有散佈資料時貴
+        val wide = m.neighborPenalties(TouchPoint('ㄨ', (0.45 * SpatialModel.HALF_KEYS_PER_PITCH_X).toFloat(), 0f)).penaltyOf('ㄜ')
+        val plain = model().neighborPenalties(TouchPoint('ㄨ', (0.45 * SpatialModel.HALF_KEYS_PER_PITCH_X).toFloat(), 0f)).penaltyOf('ㄜ')
+        assertTrue("放寬的鍵附近，鄰鍵要比較貴：$wide vs $plain", wide > plain)
+    }
+
+    @Test
+    fun spreadSurvivesSerializeRestore() {
+        val m = model()
+        m.teach('ㄨ', 0.30, 120)
+        m.teach('ㄚ', 0.10, 120)
+        val back = model().apply { restore(m.serialize()) }
+        assertEquals(m.spreadRatio('ㄨ').first, back.spreadRatio('ㄨ').first, 1e-3)
+        assertEquals(m.spreadRatio('ㄚ').first, back.spreadRatio('ㄚ').first, 1e-3)
+    }
 }
