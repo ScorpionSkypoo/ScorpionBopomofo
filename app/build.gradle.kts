@@ -75,7 +75,7 @@ dependencies {
     // 詞庫線上更新：每天在背景檢查一次
     implementation("androidx.work:work-runtime-ktx:2.9.1")
     // 側載安裝時也套用 Baseline Profile（src/main/baseline-prof.txt），選字的程式預先編譯成機器碼
-    implementation("androidx.profileinstaller:profileinstaller:1.3.1")
+    implementation("androidx.profileinstaller:profileinstaller:1.4.1")
 
     testImplementation("junit:junit:4.13.2")
     // 單元測試裡 android.jar 的 org.json 只是空殼，換成真的實作
