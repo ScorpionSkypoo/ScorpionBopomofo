@@ -545,10 +545,14 @@ class ScorpioImeService : InputMethodService() {
         val size = android.util.Size(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         suggestions.forEachIndexed { i, s ->
             s.inflate(this, size, mainExecutor) { v ->
+                // 建議是嵌進來的小窗（SurfaceView）：預設疊在鍵盤畫面下面、被鍵盤底色蓋住，要疊到上面才看得到
+                v?.setZOrderedOnTop(true)
                 views[i] = v
                 if (--pending == 0) {
                     val order = suggestions.indices.sortedBy { if (suggestions[it].info.isPinned) 1 else 0 }
-                    showInlineSuggestions(order.mapNotNull { views[it] })
+                    val shown = order.mapNotNull { views[it] }
+                    android.util.Log.i("ScorpioIme", "自動填入建議 ${suggestions.size} 個，畫出 ${shown.size} 個")
+                    showInlineSuggestions(shown)
                 }
             }
         }
@@ -563,7 +567,9 @@ class ScorpioImeService : InputMethodService() {
         val d = resources.displayMetrics.density
         for (v in views) {
             (v.parent as? ViewGroup)?.removeView(v)
-            box.addView(v, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, (34 * d).toInt()).apply {
+            // 系統畫好建議後會把實際大小設成 layoutParams（這種嵌入的小窗自己不會量寬度，用「自動」放在可滑動的列裡會變成 0 寬）
+            val lp = v.layoutParams
+            box.addView(v, LinearLayout.LayoutParams(lp?.width ?: ViewGroup.LayoutParams.WRAP_CONTENT, lp?.height ?: (34 * d).toInt()).apply {
                 marginEnd = (6 * d).toInt()
             })
         }
