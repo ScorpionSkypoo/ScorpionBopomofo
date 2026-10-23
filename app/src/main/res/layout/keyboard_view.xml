@@ -70,34 +70,20 @@
                     android:src="@drawable/ic_ime_handwriting" />
             </FrameLayout>
 
-            <!-- 擴充功能（外掛）面板 -->
-            <FrameLayout
-                android:id="@+id/btn_idle_plugins"
-                android:layout_width="40dp"
-                android:layout_height="36dp"
-                android:layout_marginStart="8dp"
-                android:background="?android:attr/selectableItemBackgroundBorderless"
-                android:clickable="true"
-                android:focusable="true">
-                <ImageView
-                    android:layout_width="22dp"
-                    android:layout_height="22dp"
-                    android:layout_gravity="center"
-                    android:src="@drawable/ic_ime_extension" />
-            </FrameLayout>
-
-            <!-- 釘選到工具列的外掛按鈕（程式動態加入） -->
-            <LinearLayout
-                android:id="@+id/layout_pinned_plugins"
-                android:layout_width="wrap_content"
-                android:layout_height="match_parent"
-                android:orientation="horizontal"
-                android:gravity="center_vertical" />
-
-            <View
+            <!-- 安裝的擴充功能（外掛）直接排在工具列上，裝很多時可以左右滑；順序在設定裡調 -->
+            <HorizontalScrollView
                 android:layout_width="0dp"
-                android:layout_height="1dp"
-                android:layout_weight="1" />
+                android:layout_height="match_parent"
+                android:layout_weight="1"
+                android:scrollbars="none"
+                android:overScrollMode="never">
+                <LinearLayout
+                    android:id="@+id/layout_pinned_plugins"
+                    android:layout_width="wrap_content"
+                    android:layout_height="match_parent"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical" />
+            </HorizontalScrollView>
 
             <!-- 3. 設定 / 返回 向量圖示 (返回鍵覆蓋在設定按鈕上，按一下切換/返回) -->
             <FrameLayout

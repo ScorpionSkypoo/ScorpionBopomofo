@@ -1,6 +1,7 @@
 package com.p3dro.scorpio.ime.engine
 
 import android.content.Context
+import com.p3dro.scorpio.ime.R
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -134,13 +135,31 @@ object Plugins {
         File(dir(context), "$id.json").delete()
         prefs(context).edit()
             .putString("order", order(context).filter { it != id }.joinToString(","))
-            .remove("pin:$id")
             .apply()
     }
 
     private fun order(context: Context) = prefs(context).getString("order", "")!!.split(',').filter { it.isNotEmpty() }
 
-    /** 釘選到工具列：在工具列上直接有一顆按鈕 */
-    fun isPinned(context: Context, id: String) = prefs(context).getBoolean("pin:$id", false)
-    fun setPinned(context: Context, id: String, pinned: Boolean) = prefs(context).edit().putBoolean("pin:$id", pinned).apply()
+    /** 調整工具列上的順序：delta = -1 往前、1 往後 */
+    fun move(context: Context, id: String, delta: Int) {
+        val ids = installed(context).map { it.id }.toMutableList()
+        val i = ids.indexOf(id)
+        val j = i + delta
+        if (i < 0 || j !in ids.indices) return
+        ids[i] = ids[j].also { ids[j] = id }
+        prefs(context).edit().putString("order", ids.joinToString(",")).apply()
+    }
+
+    /** 外掛圖示：App 內建的向量圖示（跟工具列其他按鈕同風格），不認得的用通用圖示 */
+    fun iconRes(name: String): Int = when (name) {
+        "calendar" -> R.drawable.plugin_icon_calendar
+        "symbols" -> R.drawable.plugin_icon_symbols
+        "text" -> R.drawable.plugin_icon_text
+        "search" -> R.drawable.plugin_icon_search
+        "star" -> R.drawable.plugin_icon_star
+        "note" -> R.drawable.plugin_icon_note
+        "link" -> R.drawable.plugin_icon_link
+        "clipboard" -> R.drawable.plugin_icon_clipboard
+        else -> R.drawable.ic_ime_extension
+    }
 }

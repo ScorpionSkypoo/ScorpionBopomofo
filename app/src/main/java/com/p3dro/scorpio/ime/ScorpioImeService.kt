@@ -371,11 +371,6 @@ class ScorpioImeService : InputMethodService() {
             if (currentMode == KeyboardMode.HANDWRITING) collapseCandidates() else setKeyboardMode(KeyboardMode.HANDWRITING)
         }
 
-        // 閒置列捷徑：擴充功能（外掛）面板（再按一下收起）
-        root.findViewById<View>(R.id.btn_idle_plugins)?.setOnClickListener {
-            triggerHaptic(it)
-            if (currentMode == KeyboardMode.EXPANDED && currentExpandedType == ExpandedType.PLUGINS) collapseCandidates() else openPluginsPanel(root)
-        }
         refreshPinnedPlugins(root)
 
         // 下拉展開大候選區 ⌵ 點擊：展開或折疊
@@ -2036,32 +2031,39 @@ class ScorpioImeService : InputMethodService() {
 
     // ---------- 擴充功能（外掛） ----------
 
-    /** 釘選的外掛在工具列上各有一顆按鈕（顯示外掛的圖示字），點了直接開它的面板 */
+    private var openPluginId: String? = null
+
+    /** 安裝的外掛各有一顆工具列按鈕（依設定裡的順序），點了開它的面板、再點一下收起 */
     private fun refreshPinnedPlugins(root: View) {
         val box = root.findViewById<LinearLayout>(R.id.layout_pinned_plugins) ?: return
         box.removeAllViews()
-        for (p in com.p3dro.scorpio.ime.engine.Plugins.installed(this).filter { com.p3dro.scorpio.ime.engine.Plugins.isPinned(this, it.id) }.take(3)) {
-            box.addView(TextView(ui).apply {
-                text = p.icon.ifEmpty { p.name.take(1) }
-                textSize = 18f
-                gravity = Gravity.CENTER
-                setTextColor(ui.getColor(R.color.ime_text_primary))
+        for (p in com.p3dro.scorpio.ime.engine.Plugins.installed(this)) {
+            box.addView(FrameLayout(ui).apply {
                 contentDescription = p.name
                 val tv = android.util.TypedValue()
                 ui.theme.resolveAttribute(android.R.attr.selectableItemBackgroundBorderless, tv, true)
                 setBackgroundResource(tv.resourceId)
+                addView(ImageView(ui).apply {
+                    setImageResource(com.p3dro.scorpio.ime.engine.Plugins.iconRes(p.icon))
+                }, FrameLayout.LayoutParams(dpToPx(22), dpToPx(22), Gravity.CENTER))
                 setOnClickListener {
                     triggerHaptic(it)
-                    openPluginsPanel(root, p.id)
+                    if (currentMode == KeyboardMode.EXPANDED && currentExpandedType == ExpandedType.PLUGINS && openPluginId == p.id) {
+                        collapseCandidates()
+                    } else {
+                        openPluginPanel(root, p.id)
+                    }
                 }
             }, LinearLayout.LayoutParams(dpToPx(40), dpToPx(36)).apply { marginStart = dpToPx(8) })
         }
     }
 
-    /** 外掛面板：每個外掛的每個分頁是一個頁籤；沒裝外掛時提示到設定安裝 */
-    private fun openPluginsPanel(root: View, focusPlugin: String? = null) {
+    /** 外掛面板：一個分頁一個頁籤 */
+    private fun openPluginPanel(root: View, id: String) {
+        val plugin = com.p3dro.scorpio.ime.engine.Plugins.installed(this).firstOrNull { it.id == id } ?: return
         isCandidateExpanded = false
         currentExpandedType = ExpandedType.PLUGINS
+        openPluginId = id
         ivExpandChevron?.setImageResource(R.drawable.ic_ime_chevron_down)
         setKeyboardMode(KeyboardMode.EXPANDED)
         layoutExpandedHeader?.visibility = View.VISIBLE
@@ -2069,32 +2071,16 @@ class ScorpioImeService : InputMethodService() {
         val rvGrid = root.findViewById<RecyclerView>(R.id.rv_expanded_grid)
         rvGrid.layoutManager = GridLayoutManager(this, 4)
         setExpandedDividers(rvGrid, false)
-
-        val plugins = com.p3dro.scorpio.ime.engine.Plugins.installed(this)
-        if (plugins.isEmpty()) {
-            renderPillTabs(tabsLayout, listOf("擴充功能")) {}
-            rvGrid.layoutManager = GridLayoutManager(this, 1)
-            rvGrid.adapter = ExpandedGridAdapter(listOf("還沒有安裝擴充功能，點這裡到設定安裝"), {
-                startActivity(Intent(this, com.p3dro.scorpio.ime.ui.SettingsActivity::class.java).apply {
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    putExtra(com.p3dro.scorpio.ime.ui.SettingsActivity.EXTRA_PAGE, "plugins")
-                })
-            })
-            return
-        }
-        val tabs = plugins.flatMap { p -> p.tabs.map { t -> Triple(p, t, if (p.tabs.size == 1) p.name else "${p.name}・${t.name}") } }
-        val keys = tabs.map { it.third }
-        val initial = focusPlugin?.let { id -> tabs.indexOfFirst { it.first.id == id } }?.coerceAtLeast(0) ?: 0
-        fun show(label: String) {
-            val tab = tabs.firstOrNull { it.third == label }?.second ?: return
+        fun show(name: String) {
+            val tab = plugin.tabs.firstOrNull { it.name == name } ?: return
             val now = java.util.Date()
             val shown = tab.items.map { com.p3dro.scorpio.ime.engine.Plugins.expand(it.label, now) }
             rvGrid.adapter = ExpandedGridAdapter(shown, { picked ->
                 tab.items.getOrNull(shown.indexOf(picked))?.let { runPluginItem(it) }
             }, autoSizeText = true)
         }
-        renderPillTabs(tabsLayout, keys, initialIndex = initial) { show(it) }
-        show(keys[initial])
+        renderPillTabs(tabsLayout, plugin.tabs.map { it.name }) { show(it) }
+        plugin.tabs.firstOrNull()?.let { show(it.name) }
     }
 
     private fun runPluginItem(item: com.p3dro.scorpio.ime.engine.Plugins.Item) {

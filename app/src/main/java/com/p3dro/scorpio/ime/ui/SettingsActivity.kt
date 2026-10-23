@@ -1061,21 +1061,39 @@ class SettingsActivity : AppCompatActivity() {
     private fun buildPlugins() {
         val intro = card()
         infoRow(intro, "工具列的擴充功能",
-            "裝好後在鍵盤工具列的方塊按鈕裡使用，也可以釘選到工具列上。擴充功能只能插入文字、轉換你選取的文字、用選取的文字開網址；" +
+            "裝好後直接出現在鍵盤工具列上，順序可以在這裡調整。擴充功能只能插入文字、轉換你選取的文字、用選取的文字開網址；" +
                 "不含程式碼，也讀不到你打的字，只有你點了它的項目時才會用到目前選取的文字。")
         val installed = com.p3dro.scorpio.ime.engine.Plugins.installed(this)
         if (installed.isNotEmpty()) {
-            sectionTitle("已安裝")
+            sectionTitle("已安裝（工具列上的順序）")
             val c = card()
-            for (p in installed) {
-                switchRow(c, "${p.icon} ${p.name}".trim(), "${p.description}\n版本 ${p.version}・釘選到工具列",
-                    com.p3dro.scorpio.ime.engine.Plugins.isPinned(this, p.id)) { on ->
-                    com.p3dro.scorpio.ime.engine.Plugins.setPinned(this, p.id, on)
+            for ((i, p) in installed.withIndex()) {
+                val r = row(c, com.p3dro.scorpio.ime.engine.Plugins.iconRes(p.icon), clickable = false)
+                texts(textColumn(r), p.name, "${p.description}\n版本 ${p.version}".trim())
+                fun iconButton(res: Int, desc: String, enabled: Boolean, onClick: () -> Unit) = ImageView(this).apply {
+                    setImageResource(res)
+                    setColorFilter(if (enabled) cOnSurfaceVariant else (cOnSurfaceVariant and 0x00FFFFFF) or 0x40000000)
+                    contentDescription = desc
+                    isEnabled = enabled
+                    setPadding(dp(8), dp(8), dp(8), dp(8))
+                    val tv = android.util.TypedValue()
+                    theme.resolveAttribute(android.R.attr.selectableItemBackgroundBorderless, tv, true)
+                    setBackgroundResource(tv.resourceId)
+                    setOnClickListener { onClick() }
+                    r.addView(this, LinearLayout.LayoutParams(dp(40), dp(40)))
                 }
-                val r = row(c, null, clickable = false)
-                r.setPadding(dp(16), 0, dp(4), dp(4))
-                r.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
-                r.addView(TextView(this).apply {
+                iconButton(R.drawable.ic_set_arrow_up, "往前", i > 0) {
+                    com.p3dro.scorpio.ime.engine.Plugins.move(this, p.id, -1)
+                    render()
+                }
+                iconButton(R.drawable.ic_set_arrow_down, "往後", i < installed.size - 1) {
+                    com.p3dro.scorpio.ime.engine.Plugins.move(this, p.id, 1)
+                    render()
+                }
+                val rm = row(c, null, clickable = false)
+                rm.setPadding(dp(16), 0, dp(4), dp(4))
+                rm.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
+                rm.addView(TextView(this).apply {
                     text = "移除"
                     textSize = 14f
                     setTextColor(cError)
@@ -1100,8 +1118,8 @@ class SettingsActivity : AppCompatActivity() {
                 list == null -> infoRow(avail, "連不上擴充功能清單", "確認網路後再試一次。")
                 todo.isNullOrEmpty() -> infoRow(avail, "全部都裝好了", null)
                 else -> for (p in todo) {
-                    val r = row(avail, null, clickable = false)
-                    texts(textColumn(r), "${p.icon} ${p.name}".trim(), p.description.ifEmpty { null })
+                    val r = row(avail, com.p3dro.scorpio.ime.engine.Plugins.iconRes(p.icon), clickable = false)
+                    texts(textColumn(r), p.name, p.description.ifEmpty { null })
                     val b = MaterialButton(this@SettingsActivity, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
                         text = "安裝"
                         isAllCaps = false
@@ -1161,6 +1179,15 @@ class SettingsActivity : AppCompatActivity() {
     private fun buildAbout() {
         val a = card()
         infoRow(a, "Scorpio 智慧注音", "版本 ${versionName()}")
+        fun link(title: String, url: String) = navRow(a, null, title, url.removePrefix("https://")) {
+            try {
+                startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(url)))
+            } catch (e: Exception) {
+                android.widget.Toast.makeText(this, "沒有可以開啟網址的 App", android.widget.Toast.LENGTH_SHORT).show()
+            }
+        }
+        link("原始碼", "https://github.com/ScorpionSkypoo/ScorpionBopomofo")
+        link("詞庫與擴充功能", "https://github.com/ScorpionSkypoo/scorpio-ime-data")
         sectionTitle("資料來源")
         val d = card()
         infoRow(d, "英文單字頻率", "FrequencyWords（hermitdave，CC BY-SA 4.0）")
