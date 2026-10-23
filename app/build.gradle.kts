@@ -61,6 +61,10 @@ android {
     buildFeatures {
         viewBinding = true
     }
+    // 詞庫（assets/scd/*.scd）不壓縮進 APK，執行時直接 mmap，不必先解出來
+    androidResources {
+        noCompress += "scd"
+    }
 }
 
 dependencies {

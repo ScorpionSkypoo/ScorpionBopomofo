@@ -1,7 +1,6 @@
 package com.p3dro.scorpio.ime.engine
 
 import android.content.Context
-import android.database.sqlite.SQLiteDatabase
 import android.util.Log
 import androidx.work.Constraints
 import androidx.work.CoroutineWorker
@@ -19,7 +18,6 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
-import java.util.zip.GZIPInputStream
 
 /**
  * 詞庫線上更新：讀資料 repo 的 manifest.json，比 App 裡生效的版本新的資料包就下載、驗證 sha256、套用
@@ -34,6 +32,8 @@ object PackUpdater {
     const val PREFS = "scorpio_pack_update"
     const val PREF_AUTO = "auto_update"
     const val PREF_LAST_CHECK = "last_check"
+    /** 從舊版（SQLite 詞庫）升級上來：舊的下載資料包都不在了，要馬上檢查一次，把比內建新的資料包重新下載 */
+    const val PREF_REFETCH = "refetch_after_upgrade"
 
     data class ManifestPack(
         val id: String,
@@ -72,8 +72,10 @@ object PackUpdater {
         val root = JSONObject(json)
         if (root.optInt("schema", 0) > SUPPORTED_SCHEMA) return emptyList()
         val arr = root.optJSONArray("packs") ?: return emptyList()
-        return (0 until arr.length()).map { i ->
-            val o = arr.getJSONObject(i)
+        return (0 until arr.length()).map { i -> arr.getJSONObject(i) }
+            // 舊格式（SQLite，.db.gz）的資料包這版 App 讀不了，資料 repo 重建成 SCD（.scd.gz）之前先不列
+            .filter { it.optString("url").endsWith(".scd.gz") }
+            .map { o ->
             ManifestPack(
                 o.getString("id"), o.optString("group", "words"), o.optString("name", o.getString("id")),
                 o.getString("version"), o.optLong("size", -1), o.getString("sha256"), o.getString("url"),
@@ -116,13 +118,12 @@ object PackUpdater {
     /** 下載並套用一個資料包（開關打開時、或有新版時） */
     /** onProgress：下載進度 0～1；下載完、開始套用時回報 -1（不確定進度） */
     private fun installPack(context: Context, dict: ScorpioDictManager, p: ManifestPack, onProgress: ((Float) -> Unit)? = null): Boolean {
-        val part = File(dict.packDir, "${p.id}.part")
+        // 下載到暫存檔，驗證通過後交給詞庫管理員解壓、放進詞庫資料夾並重新載入
+        val part = File(context.cacheDir, "pack-${p.id}.part")
         return try {
             download(p.url, p.size, p.sha256, part, onProgress)
             onProgress?.invoke(-1f)
-            val target = File(dict.packDir, "${p.id}.db.gz")
-            if (!part.renameTo(target)) part.copyTo(target, overwrite = true)
-            dict.applyPack(target) != null
+            dict.applyPack(part) != null
         } catch (e: Exception) {
             Log.w(TAG, "更新 ${p.id} 失敗", e)
             false
@@ -241,23 +242,6 @@ object PackUpdater {
         return md.digest().joinToString("") { "%02x".format(it) }
     }
 
-    /** 讀資料包的 id、版本、group（不套用） */
-    fun readMeta(gz: File, cacheDir: File): Triple<String, String, String>? {
-        val tmp = File(cacheDir, "meta-${System.nanoTime()}.db")
-        return try {
-            GZIPInputStream(gz.inputStream()).use { input -> FileOutputStream(tmp).use { input.copyTo(it) } }
-            SQLiteDatabase.openDatabase(tmp.absolutePath, null, SQLiteDatabase.OPEN_READONLY).use { pack ->
-                val meta = HashMap<String, String>()
-                pack.rawQuery("SELECT key, value FROM meta", null).use { c -> while (c.moveToNext()) meta[c.getString(0)] = c.getString(1) }
-                Triple(meta["id"] ?: return null, meta["version"] ?: return null, meta["group"] ?: "words")
-            }
-        } catch (e: Exception) {
-            null
-        } finally {
-            tmp.delete()
-        }
-    }
-
     suspend fun checkAndUpdate(context: Context): Result = withContext(Dispatchers.IO) {
         val dict = ScorpioDictManager.getInstance(context.applicationContext)
         val appVersion = appVersion(context)
@@ -290,10 +274,19 @@ object PackUpdater {
     /** 依設定排程每天檢查一次（只在不計費網路，例如 Wi-Fi） */
     fun schedule(context: Context) {
         val wm = WorkManager.getInstance(context.applicationContext)
-        val auto = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(PREF_AUTO, true)
+        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val auto = prefs.getBoolean(PREF_AUTO, true)
         if (!auto) {
             wm.cancelUniqueWork(WORK_NAME)
             return
+        }
+        if (prefs.getBoolean(PREF_REFETCH, false)) {
+            prefs.edit().putBoolean(PREF_REFETCH, false).apply()
+            wm.enqueue(
+                androidx.work.OneTimeWorkRequestBuilder<Worker>()
+                    .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.UNMETERED).build())
+                    .build()
+            )
         }
         val req = PeriodicWorkRequestBuilder<Worker>(1, TimeUnit.DAYS)
             .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.UNMETERED).build())

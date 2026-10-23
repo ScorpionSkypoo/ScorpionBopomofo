@@ -5,28 +5,39 @@ import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.util.Log
 import android.util.LruCache
+import com.p3dro.scorpio.ime.engine.scd.BigramTable
+import com.p3dro.scorpio.ime.engine.scd.CangjieTable
+import com.p3dro.scorpio.ime.engine.scd.DictFiles
+import com.p3dro.scorpio.ime.engine.scd.EmojiTable
+import com.p3dro.scorpio.ime.engine.scd.EnglishTable
+import com.p3dro.scorpio.ime.engine.scd.KaomojiTable
+import com.p3dro.scorpio.ime.engine.scd.Like
+import com.p3dro.scorpio.ime.engine.scd.ScdFile
+import com.p3dro.scorpio.ime.engine.scd.ScdWriter
+import com.p3dro.scorpio.ime.engine.scd.WordStore
+import com.p3dro.scorpio.ime.engine.scd.WordTable
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
-import java.io.FileOutputStream
-import java.util.zip.GZIPInputStream
 import kotlin.math.roundToInt
 
 /**
  * 智慧選字、Emoji 聯想、英文自動補全與顏文字核心管理器
  * 支援模糊音／易混淆按錯鍵容錯、免聲調盲打與 Viterbi 最佳路徑解算
+ *
+ * 資料來源：
+ * - 詞庫（主詞庫、附加詞庫、接續詞、英文、倉頡、Emoji、顏文字）：唯讀的 SCD 二進位檔，mmap 直接查（見 engine/scd）
+ * - 匯入的詞庫：原文存在 scorpio_imports.db，開啟時在手機上轉成 SCD
+ * - 個人學習（選字、接續搭配、英文、慣性打錯）：存在 scorpio_user.db（SQLite），查詢走記憶體鏡像 [UserStore]
  */
 class ScorpioDictManager private constructor(private val context: Context) {
 
     companion object {
         private const val TAG = "ScorpioDictManager"
-        private const val DB_NAME = "scorpio_dict.db"
-        private const val DB_MIN_SIZE_BYTES = 18 * 1024 * 1024L
-        private const val CURRENT_DB_VERSION = 23
-        private const val PREF_DB_VERSION = "scorpio_dict_db_version"
-        private const val BIGRAM_DB_NAME = "scorpio_bigram.db"
-        private const val CURRENT_BIGRAM_VERSION = 5
-        private const val PREF_BIGRAM_VERSION = "scorpio_bigram_db_version"
+        private const val USER_DB_NAME = "scorpio_user.db"
+        // 舊版（SQLite 詞庫）的檔案：第一次啟動時把個人學習搬到 scorpio_user.db，之後刪掉
+        private const val OLD_DICT_DB_NAME = "scorpio_dict.db"
+        private const val OLD_BIGRAM_DB_NAME = "scorpio_bigram.db"
         private const val PREF_USER_DICT_CLEANUP = "user_dict_cleanup_v1"
         private const val PREF_USER_DICT_CANONICAL = "user_dict_canonical_v1"
         private const val PREF_SPATIAL_BIAS = "spatial_bias_v1"
@@ -246,57 +257,43 @@ class ScorpioDictManager private constructor(private val context: Context) {
         )
     }
 
+    /** 個人學習資料庫（scorpio_user.db） */
     private var db: SQLiteDatabase? = null
 
-    // 高速 LRU 記憶體快取：消弭重複 SQLite 磁碟/JNI 延遲
+    /** 個人學習的記憶體鏡像：每按一鍵的查詢走這裡 */
+    private val user = UserStore()
+
+    // 計算結果的快取（詞庫查詢本身直接讀 mmap，不必快取）
     private val subSyllableCache = LruCache<String, List<Pair<String, Double>>>(1500)
     private val candidatesCache = LruCache<String, CandidateGroups>(300)
 
-    /**
-     * 選字查詢的結果快取：打字是一個鍵一個鍵往上加，上一鍵查過的切分、讀音，下一鍵大多又會再查一次。
-     * 每次 rawQuery 都要配一塊 CursorWindow（native 記憶體）並跑一次 SQLite，快取起來能省下大部分 CPU 與記憶體翻攪。
-     * 跟 candidatesCache 一起清（學習、詞庫開關、套用資料包都會清）
-     */
-    private val queryCache = object : LruCache<String, List<Array<Any?>>>(4000) {}
+    // ---------- 詞庫檔（SCD） ----------
 
-    /** 查個人學習資料（user_ 開頭的表）的結果另外放：學一個詞只清這裡，字典的查詢快取留著，下一個詞的第一鍵不必重查 */
-    private val userQueryCache = object : LruCache<String, List<Array<Any?>>>(1500) {}
+    private val files = DictFiles(context)
 
-    /** 快取過的查詢結果，用法跟 Cursor 一樣（只支援選字會用到的方法） */
-    private class CachedCursor(private val rows: List<Array<Any?>>) : java.io.Closeable {
-        private var pos = -1
-        val count get() = rows.size
-        fun moveToNext(): Boolean = (++pos < rows.size)
-        fun moveToFirst(): Boolean { pos = 0; return rows.isNotEmpty() }
-        fun getString(i: Int): String = rows[pos][i]?.toString() ?: ""
-        fun getDouble(i: Int): Double = (rows[pos][i] as? Number)?.toDouble() ?: (rows[pos][i]?.toString()?.toDoubleOrNull() ?: 0.0)
-        fun getInt(i: Int): Int = (rows[pos][i] as? Number)?.toInt() ?: (rows[pos][i]?.toString()?.toIntOrNull() ?: 0)
-        fun getLong(i: Int): Long = (rows[pos][i] as? Number)?.toLong() ?: (rows[pos][i]?.toString()?.toLongOrNull() ?: 0L)
-        fun isNull(i: Int): Boolean = rows[pos][i] == null
-        override fun close() {}
-    }
+    /** 生效中的檔（id → 檔）；資料包安裝、移除時重新載入 */
+    @Volatile
+    private var loaded: Map<String, ScdFile> = emptyMap()
 
-    private fun cachedQuery(database: SQLiteDatabase, sql: String, args: Array<String>?): CachedCursor {
-        val key = sql + "\u0000" + (args?.joinToString("\u0001") ?: "")
-        val cache = if (sql.contains("user_")) userQueryCache else queryCache
-        cache.get(key)?.let { return CachedCursor(it) }
-        val rows = ArrayList<Array<Any?>>()
-        database.rawQuery(sql, args).use { c ->
-            val n = c.columnCount
-            while (c.moveToNext()) {
-                rows.add(Array(n) { i ->
-                    when (c.getType(i)) {
-                        android.database.Cursor.FIELD_TYPE_INTEGER -> c.getLong(i)
-                        android.database.Cursor.FIELD_TYPE_FLOAT -> c.getDouble(i)
-                        android.database.Cursor.FIELD_TYPE_NULL -> null
-                        else -> c.getString(i)
-                    }
-                })
-            }
-        }
-        cache.put(key, rows)
-        return CachedCursor(rows)
-    }
+    /** 依開關組好的查詢對象；開關、安裝、匯入變動時整份換掉（查詢中的執行緒繼續用舊的那份） */
+    private class Data(
+        /** 主詞庫＋開著的附加詞庫＋開著的匯入詞庫（等於舊版的 dict 表） */
+        val words: WordStore,
+        val core: WordTable?,
+        /** 選字加分用的接續詞：開著的接續詞資料包與流行用語 */
+        val scoreBigrams: List<BigramTable>,
+        /** 接續詞預測用：所有裝著的接續詞（id, 表），同舊版整個 bigram 表 */
+        val allBigrams: List<Pair<String, BigramTable>>,
+        val english: EnglishTable?,
+        val cangjie: CangjieTable?,
+        val emoji: EmojiTable?,
+        val kaomoji: KaomojiTable?
+    )
+
+    @Volatile
+    private var data = Data(WordStore(emptyList()), null, emptyList(), emptyList(), null, null, null, null)
+
+    private val words: WordStore get() = data.words
 
     /**
      * 候選結果分組：inline 為候選列預設排法（文字中穿插 emoji／顏文字）；
@@ -329,10 +326,10 @@ class ScorpioDictManager private constructor(private val context: Context) {
     var kaomojiEnabled = sourcePrefs.getBoolean("kaomoji", true)
         private set
 
-    /** 詞庫資訊（名稱、來源、授權、版本），來自主詞庫的 dict_packs 表（tools/data/packs.json） */
+    /** 詞庫資訊（名稱、來源、授權、版本），來自各 SCD 檔的 meta（資料 repo 的 packs.json） */
     data class Pack(
         val id: String,
-        /** words＝增加打得出的詞；bigram＝只影響詞與詞的接續 */
+        /** words＝增加打得出的詞；bigram＝只影響詞與詞的接續；kaomoji＝顏文字 */
         val group: String,
         val name: String,
         val description: String,
@@ -342,37 +339,57 @@ class ScorpioDictManager private constructor(private val context: Context) {
         val version: String
     )
 
-    @Volatile
-    private var packCache: List<Pack>? = null
-
-    fun packs(): List<Pack> {
-        packCache?.let { return it }
-        val out = ArrayList<Pack>()
-        try {
-            db?.rawQuery("SELECT id, grp, name, description, source, license, url, version FROM dict_packs ORDER BY sort", null)?.use { c ->
-                while (c.moveToNext()) {
-                    out.add(Pack(c.getString(0), c.getString(1), c.getString(2), c.getString(3), c.getString(4), c.getString(5), c.getString(6), c.getString(7)))
-                }
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "讀取詞庫資訊失敗", e)
-        }
-        if (out.isNotEmpty()) packCache = out
-        return out
+    /** 裝著的資料包（主詞庫、附加詞庫、接續詞、顏文字），依 packs.json 的順序 */
+    fun packs(): List<Pack> = packFiles().map { f ->
+        val m = f.meta
+        Pack(f.id, f.group, m.optString("name", f.id), m.optString("description"), m.optString("source"),
+            m.optString("license"), m.optString("url"), f.version)
     }
 
-    /** 可開關的附加詞庫（詞會插進主詞庫） */
+    private fun packFiles(): List<ScdFile> = loaded.values
+        .filter { it.group == "words" || it.group == "bigram" || it.group == "kaomoji" }
+        .sortedWith(compareBy({ it.meta.optInt("sort", 99) }, { it.id }))
+
+    /** 可開關的附加詞庫（詞會併進主詞庫） */
     private fun addonPacks() = packs().filter { it.group == "words" && it.id != "core" }
 
-    /** 使用者開啟的接續詞來源；null 表示還沒算 */
-    @Volatile
-    private var enabledBigramSources: List<String>? = null
+    /**
+     * 依開關組出查詢對象：主詞庫在前，再來是開著的附加詞庫（依 packs.json 順序）、開著的匯入詞庫（依匯入先後），
+     * 同分時的先後跟舊版依序插進 dict 表的順序一樣
+     */
+    private fun buildData(): Data {
+        val files = loaded
+        val core = files["core"]?.takeIf { it.has("w.word") }?.let { WordTable(it) }
+        val tables = ArrayList<WordTable>()
+        core?.let { tables.add(it) }
+        for (f in packFiles()) {
+            if (f.id != "core" && f.group == "words" && f.has("w.word") && addonEnabled(f.id)) tables.add(WordTable(f))
+        }
+        for ((id, enabled) in importList()) {
+            if (enabled) files["import:$id"]?.let { tables.add(WordTable(it)) }
+        }
+        val bigramFiles = packFiles().filter { it.has("b.prev") }
+        // 流行用語同時帶詞和搭配，跟著同一個開關
+        val scoring = bigramFiles.filter { (it.group == "bigram" || it.id == "trendy") && addonEnabled(it.id) }.map { BigramTable(it) }
+        return Data(
+            WordStore(tables), core, scoring, bigramFiles.map { it.id to BigramTable(it) },
+            files["en"]?.let { EnglishTable(it) }, files["cangjie"]?.let { CangjieTable(it) },
+            files["emoji"]?.let { EmojiTable(it) }, files["kaomoji"]?.let { KaomojiTable(it) }
+        )
+    }
 
-    private fun bigramSources(): List<String> =
-        enabledBigramSources ?: packs().filter { it.group == "bigram" && addonEnabled(it.id) }.map { it.id }
-            // 流行用語同時帶詞和搭配，跟著同一個開關
-            .plus(if (addonEnabled("trendy")) listOf("trendy") else emptyList())
-            .also { enabledBigramSources = it }
+    /** 重新載入詞庫檔（reload＝檔案有增減）並依開關重組；清掉跟詞庫有關的快取 */
+    @Synchronized
+    private fun remount(reload: Boolean, updateSpatial: Boolean = true) {
+        // 匯入詞庫先編好檔，再一起載入
+        val compiled = compileMissingImports()
+        if (reload || compiled || loaded.isEmpty()) loaded = files.load()
+        data = buildData()
+        bigramCache.evictAll()
+        invalidateCandidateCaches()
+        validSyllableSet = null
+        if (updateSpatial) spatial.setSyllableFrequencies(syllableFrequencies())
+    }
 
     /** 匯入的詞庫存在獨立的檔案，主詞庫改版覆蓋時不會不見 */
     private val importDb: SQLiteDatabase? by lazy {
@@ -389,194 +406,23 @@ class ScorpioDictManager private constructor(private val context: Context) {
     }
 
 
-    private fun initDatabase() {
+    /**
+     * 開個人學習資料庫（scorpio_user.db）。從舊版（SQLite 詞庫）升級上來時，把學習紀錄從舊的 scorpio_dict.db 搬過來，
+     * 再刪掉舊的詞庫檔（scorpio_dict.db 約 48 MB、scorpio_bigram.db 約 13 MB）與舊格式的下載資料包
+     */
+    private fun initUserDatabase() {
         try {
-            val dbFile = context.getDatabasePath(DB_NAME)
-            val dbDir = dbFile.parentFile
-            if (dbDir != null && !dbDir.exists()) {
-                dbDir.mkdirs()
-            }
-
-            val prefs = context.getSharedPreferences("scorpio_dict_prefs", Context.MODE_PRIVATE)
-            val installedVersion = prefs.getInt(PREF_DB_VERSION, 0)
-            val needsExtract = !dbFile.exists() || dbFile.length() < DB_MIN_SIZE_BYTES || installedVersion < CURRENT_DB_VERSION
-
-            if (needsExtract) {
-                // 1. 備份舊版個人學習詞庫與自定義字詞，避免字典更新後使用者詞彙被抹除
-                data class SavedDict(val r: String, val t: String, val i: String, val w: String, val c: Int, val lu: Long)
-                data class SavedBigram(val p: String, val n: String, val c: Int, val lu: Long)
-                data class SavedEnglish(val k: String, val w: String, val c: Int, val lu: Long)
-                data class SavedTypo(val t: String, val i: String, val c: Int, val lu: Long)
-                val backupTypo = mutableListOf<SavedTypo>()
-                val backupDict = mutableListOf<SavedDict>()
-                val backupBigram = mutableListOf<SavedBigram>()
-                val backupEnglish = mutableListOf<SavedEnglish>()
-
-                if (dbFile.exists()) {
-                    try {
-                        SQLiteDatabase.openDatabase(dbFile.absolutePath, null, SQLiteDatabase.OPEN_READONLY).use { oldDb ->
-                            try {
-                                oldDb.rawQuery("SELECT reading, toneless, initials, word, count, last_used FROM user_dict", null).use { cur ->
-                                    while (cur.moveToNext()) {
-                                        backupDict.add(SavedDict(cur.getString(0), cur.getString(1), cur.getString(2), cur.getString(3), cur.getInt(4), cur.getLong(5)))
-                                    }
-                                }
-                            } catch (e: Exception) { /* ignore */ }
-                            try {
-                                oldDb.rawQuery("SELECT prev_word, next_word, count, last_used FROM user_bigram", null).use { cur ->
-                                    while (cur.moveToNext()) {
-                                        backupBigram.add(SavedBigram(cur.getString(0), cur.getString(1), cur.getInt(2), cur.getLong(3)))
-                                    }
-                                }
-                            } catch (e: Exception) { /* ignore */ }
-                            try {
-                                oldDb.rawQuery("SELECT key, word, count, last_used FROM user_english", null).use { cur ->
-                                    while (cur.moveToNext()) {
-                                        backupEnglish.add(SavedEnglish(cur.getString(0), cur.getString(1), cur.getInt(2), cur.getLong(3)))
-                                    }
-                                }
-                            } catch (e: Exception) { /* ignore */ }
-                            try {
-                                oldDb.rawQuery("SELECT typed, intended, count, last_used FROM user_typo", null).use { cur ->
-                                    while (cur.moveToNext()) {
-                                        backupTypo.add(SavedTypo(cur.getString(0), cur.getString(1), cur.getInt(2), cur.getLong(3)))
-                                    }
-                                }
-                            } catch (e: Exception) { /* ignore */ }
-                        }
-                    } catch (e: Exception) {
-                        Log.w(TAG, "備份舊版個人詞庫略過: ${e.message}")
-                    }
-                }
-
-                try {
-                    SQLiteDatabase.deleteDatabase(dbFile)
-                } catch (e: Exception) {
-                    dbFile.delete()
-                }
-                File(dbFile.path + "-wal").delete()
-                File(dbFile.path + "-shm").delete()
-                File(dbFile.path + "-journal").delete()
-
-                val assetName = try {
-                    context.assets.open("scorpio_dict.db.gz").close()
-                    "scorpio_dict.db.gz"
-                } catch (e: Exception) {
-                    "scorpio_dict.db"
-                }
-
-                Log.i(TAG, "正在自資產載入詞庫 [$assetName] (版本 $CURRENT_DB_VERSION)...")
-                context.assets.open(assetName).use { inStream ->
-                    if (assetName.endsWith(".gz")) {
-                        GZIPInputStream(inStream).use { gzIn ->
-                            FileOutputStream(dbFile).use { outStream ->
-                                gzIn.copyTo(outStream)
-                            }
-                        }
-                    } else {
-                        FileOutputStream(dbFile).use { outStream ->
-                            inStream.copyTo(outStream)
-                        }
-                    }
-                }
-                prefs.edit().putInt(PREF_DB_VERSION, CURRENT_DB_VERSION).apply()
-                Log.i(TAG, "詞庫載入完成，大小: ${dbFile.length() / 1024 / 1024} MB，版本: $CURRENT_DB_VERSION")
-
-                // 2. 還原備份的個人學習詞庫
-                if (backupDict.isNotEmpty() || backupBigram.isNotEmpty() || backupEnglish.isNotEmpty() || backupTypo.isNotEmpty()) {
-                    try {
-                        SQLiteDatabase.openDatabase(dbFile.absolutePath, null, SQLiteDatabase.OPEN_READWRITE).use { restoredDb ->
-                            restoredDb.execSQL(
-                                """
-                                CREATE TABLE IF NOT EXISTS user_dict (
-                                    reading TEXT NOT NULL,
-                                    toneless TEXT NOT NULL DEFAULT '',
-                                    initials TEXT NOT NULL DEFAULT '',
-                                    word TEXT NOT NULL,
-                                    count INTEGER NOT NULL DEFAULT 1,
-                                    last_used INTEGER NOT NULL,
-                                    PRIMARY KEY(reading, word)
-                                )
-                                """.trimIndent()
-                            )
-                            restoredDb.execSQL(
-                                """
-                                CREATE TABLE IF NOT EXISTS user_bigram (
-                                    prev_word TEXT NOT NULL,
-                                    next_word TEXT NOT NULL,
-                                    count INTEGER NOT NULL DEFAULT 1,
-                                    last_used INTEGER NOT NULL,
-                                    PRIMARY KEY(prev_word, next_word)
-                                )
-                                """.trimIndent()
-                            )
-                            restoredDb.execSQL(USER_ENGLISH_DDL)
-                            restoredDb.execSQL(USER_TYPO_DDL)
-                            restoredDb.beginTransaction()
-                            try {
-                                val s1 = restoredDb.compileStatement("INSERT OR REPLACE INTO user_dict (reading, toneless, initials, word, count, last_used) VALUES (?, ?, ?, ?, ?, ?)")
-                                for (d in backupDict) {
-                                    s1.bindString(1, d.r)
-                                    s1.bindString(2, d.t)
-                                    s1.bindString(3, d.i)
-                                    s1.bindString(4, d.w)
-                                    s1.bindLong(5, d.c.toLong())
-                                    s1.bindLong(6, d.lu)
-                                    s1.executeInsert()
-                                }
-                                val s2 = restoredDb.compileStatement("INSERT OR REPLACE INTO user_bigram (prev_word, next_word, count, last_used) VALUES (?, ?, ?, ?)")
-                                for (b in backupBigram) {
-                                    s2.bindString(1, b.p)
-                                    s2.bindString(2, b.n)
-                                    s2.bindLong(3, b.c.toLong())
-                                    s2.bindLong(4, b.lu)
-                                    s2.executeInsert()
-                                }
-                                val s3 = restoredDb.compileStatement("INSERT OR REPLACE INTO user_english (key, word, count, last_used) VALUES (?, ?, ?, ?)")
-                                for (e in backupEnglish) {
-                                    s3.bindString(1, e.k)
-                                    s3.bindString(2, e.w)
-                                    s3.bindLong(3, e.c.toLong())
-                                    s3.bindLong(4, e.lu)
-                                    s3.executeInsert()
-                                }
-                                val s4 = restoredDb.compileStatement("INSERT OR REPLACE INTO user_typo (typed, intended, count, last_used) VALUES (?, ?, ?, ?)")
-                                for (t in backupTypo) {
-                                    s4.bindString(1, t.t)
-                                    s4.bindString(2, t.i)
-                                    s4.bindLong(3, t.c.toLong())
-                                    s4.bindLong(4, t.lu)
-                                    s4.executeInsert()
-                                }
-                                restoredDb.setTransactionSuccessful()
-                                Log.i(TAG, "已成功還原 ${backupDict.size} 條個人學習詞彙與 ${backupBigram.size} 條自訂關聯詞")
-                            } finally {
-                                restoredDb.endTransaction()
-                            }
-                        }
-                    } catch (e: Exception) {
-                        Log.e(TAG, "還原個人學習詞庫失敗", e)
-                    }
-                }
-            }
-
-            db = SQLiteDatabase.openDatabase(dbFile.absolutePath, null, SQLiteDatabase.OPEN_READWRITE)
-            // 依字查詞（自建詞判定、學習校正讀音）：一開就建，後面初始化步驟出錯也不會缺這個索引
+            val userFile = context.getDatabasePath(USER_DB_NAME)
+            userFile.parentFile?.mkdirs()
+            val fresh = !userFile.exists()
+            val database = SQLiteDatabase.openOrCreateDatabase(userFile, null)
             try {
-                db?.execSQL("CREATE INDEX IF NOT EXISTS idx_dict_word ON dict(word)")
-            } catch (e: Exception) {
-                Log.w(TAG, "建立 idx_dict_word 失敗: ${e.message}")
-            }
-            try {
-                db?.enableWriteAheadLogging()
-                db?.execSQL("PRAGMA synchronous = NORMAL")
-                db?.execSQL("PRAGMA cache_size = -16000")
+                database.enableWriteAheadLogging()
+                database.execSQL("PRAGMA synchronous = NORMAL")
             } catch (e: Exception) {
                 // Ignore
             }
-
-            // 使用者學習詞庫 (包含注音讀音、無聲調別名與聲母簡拼)
-            db?.execSQL(
+            database.execSQL(
                 """
                 CREATE TABLE IF NOT EXISTS user_dict (
                     reading TEXT NOT NULL,
@@ -589,24 +435,9 @@ class ScorpioDictManager private constructor(private val context: Context) {
                 )
                 """.trimIndent()
             )
-            try {
-                db?.execSQL("ALTER TABLE user_dict ADD COLUMN toneless TEXT NOT NULL DEFAULT ''")
-            } catch (e: Exception) {
-                // Ignore if column exists
-            }
-            try {
-                db?.execSQL("ALTER TABLE user_dict ADD COLUMN initials TEXT NOT NULL DEFAULT ''")
-            } catch (e: Exception) {
-                // Ignore if column exists
-            }
-            db?.execSQL("CREATE INDEX IF NOT EXISTS idx_user_dict_toneless ON user_dict(toneless)")
-            db?.execSQL("CREATE INDEX IF NOT EXISTS idx_user_dict_reading ON user_dict(reading)")
-            db?.execSQL("CREATE INDEX IF NOT EXISTS idx_user_dict_initials ON user_dict(initials)")
-            // userOnlyWords 每個候選詞都查一次 user_dict WHERE word = ?，沒索引就是整張表掃一遍
-            db?.execSQL("CREATE INDEX IF NOT EXISTS idx_user_dict_word ON user_dict(word)")
-
-            // 使用者智慧雙詞聯想預測庫 (Bigram)
-            db?.execSQL(
+            // 寫入時依詞讀回記憶體鏡像、userOnlyWords 依詞查
+            database.execSQL("CREATE INDEX IF NOT EXISTS idx_user_dict_word ON user_dict(word)")
+            database.execSQL(
                 """
                 CREATE TABLE IF NOT EXISTS user_bigram (
                     prev_word TEXT NOT NULL,
@@ -617,14 +448,17 @@ class ScorpioDictManager private constructor(private val context: Context) {
                 )
                 """.trimIndent()
             )
-            db?.execSQL("CREATE INDEX IF NOT EXISTS idx_user_bigram_prev ON user_bigram(prev_word)")
-            db?.execSQL(USER_ENGLISH_DDL)
-            db?.execSQL(USER_TYPO_DDL)
+            database.execSQL("CREATE INDEX IF NOT EXISTS idx_user_bigram_prev ON user_bigram(prev_word)")
+            database.execSQL(USER_ENGLISH_DDL)
+            database.execSQL(USER_TYPO_DDL)
+            db = database
+
+            val oldFile = context.getDatabasePath(OLD_DICT_DB_NAME)
+            if (fresh && oldFile.exists()) migrateFromOldDictDb(database, oldFile)
+            if (oldFile.exists() || context.getDatabasePath(OLD_BIGRAM_DB_NAME).exists()) deleteOldDictFiles()
+
             loadTypoMemory()
-
-            // 依字查讀音（學習時校正按錯／模糊音的讀音用）
-            db?.execSQL("CREATE INDEX IF NOT EXISTS idx_dict_word ON dict(word)")
-
+            val prefs = context.getSharedPreferences("scorpio_dict_prefs", Context.MODE_PRIVATE)
             if (!prefs.getBoolean(PREF_USER_DICT_CLEANUP, false)) {
                 purgeUnlearnableUserWords()
                 prefs.edit().putBoolean(PREF_USER_DICT_CLEANUP, true).apply()
@@ -633,11 +467,60 @@ class ScorpioDictManager private constructor(private val context: Context) {
                 canonicalizeUserWords()
                 prefs.edit().putBoolean(PREF_USER_DICT_CANONICAL, true).apply()
             }
-
-            Log.i(TAG, "ScorpioDictManager 初始化成功 (已就緒智慧學習與高速快取)！")
+            user.load(database)
+            Log.i(TAG, "個人學習資料庫就緒")
         } catch (e: Exception) {
-            Log.e(TAG, "資料庫初始化失敗", e)
+            Log.e(TAG, "個人學習資料庫初始化失敗", e)
         }
+    }
+
+    /** 舊版的學習紀錄（在 scorpio_dict.db 裡）依原本的順序搬到 scorpio_user.db */
+    private fun migrateFromOldDictDb(database: SQLiteDatabase, oldFile: File) {
+        try {
+            database.execSQL("ATTACH DATABASE ? AS old", arrayOf(oldFile.absolutePath))
+            try {
+                val copies = listOf(
+                    "INSERT OR IGNORE INTO user_dict (reading, toneless, initials, word, count, last_used) SELECT reading, toneless, initials, word, count, last_used FROM old.user_dict ORDER BY rowid",
+                    "INSERT OR IGNORE INTO user_bigram (prev_word, next_word, count, last_used) SELECT prev_word, next_word, count, last_used FROM old.user_bigram ORDER BY rowid",
+                    "INSERT OR IGNORE INTO user_english (key, word, count, last_used) SELECT key, word, count, last_used FROM old.user_english ORDER BY rowid",
+                    "INSERT OR IGNORE INTO user_typo (typed, intended, count, last_used) SELECT typed, intended, count, last_used FROM old.user_typo ORDER BY rowid"
+                )
+                database.beginTransaction()
+                try {
+                    for (sql in copies) {
+                        try {
+                            database.execSQL(sql)
+                        } catch (e: Exception) {
+                            // 很舊的版本可能還沒有這張表
+                        }
+                    }
+                    database.setTransactionSuccessful()
+                } finally {
+                    database.endTransaction()
+                }
+            } finally {
+                database.execSQL("DETACH DATABASE old")
+            }
+            // 舊版下載的資料包是 SQLite 格式，用不到了；開著的會由線上更新重新下載新格式
+            context.getSharedPreferences(PackUpdater.PREFS, Context.MODE_PRIVATE).edit().putBoolean(PackUpdater.PREF_REFETCH, true).apply()
+            Log.i(TAG, "已把學習紀錄搬到新的個人資料庫")
+        } catch (e: Exception) {
+            Log.e(TAG, "搬移學習紀錄失敗", e)
+        }
+    }
+
+    private fun deleteOldDictFiles() {
+        for (name in listOf(OLD_DICT_DB_NAME, OLD_BIGRAM_DB_NAME)) {
+            val f = context.getDatabasePath(name)
+            SQLiteDatabase.deleteDatabase(f)
+            for (suffix in listOf("-wal", "-shm", "-journal")) File(f.path + suffix).delete()
+        }
+        File(context.filesDir, "packs").deleteRecursively()
+        val e = sourcePrefs.edit()
+        for (k in sourcePrefs.all.keys) if (k.startsWith("ver:") || k.startsWith("file:") || k.startsWith("filegrp:")) e.remove(k)
+        e.apply()
+        context.getSharedPreferences("scorpio_dict_prefs", Context.MODE_PRIVATE).edit()
+            .remove("scorpio_dict_db_version").remove("scorpio_bigram_db_version").apply()
     }
 
     /** 一次性清除舊版寫入的錯位學習紀錄（例如「ㄖㄤ → 然後我想要」、「ㄐㄧㄢˋ → 鍵盤」、顏文字） */
@@ -672,7 +555,6 @@ class ScorpioDictManager private constructor(private val context: Context) {
      * 打得對的音節（含簡拼）保留原樣；字典查不到的字（自造字）也保留原樣
      */
     private fun canonicalReading(reading: String, word: String): String {
-        val database = db ?: return reading
         val syls = reading.split("-")
         val chars = ArrayList<String>()
         var i = 0
@@ -686,14 +568,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
         for (k in syls.indices) {
             val typed = syls[k]
             val tl = toToneless(typed)
-            val readings = ArrayList<String>()
-            try {
-                database.rawQuery("SELECT reading FROM dict WHERE word = ? ORDER BY score DESC LIMIT 8", arrayOf(chars[k])).use { c ->
-                    while (c.moveToNext()) readings.add(c.getString(0))
-                }
-            } catch (e: Exception) {
-                // Ignore
-            }
+            val readings = words.byWord(chars[k], 8).map { it.reading }
             // 打的是正確讀音或其開頭（聲母簡拼 ㄐ、懶人音 ㄨ→我）都算打對
             val compatible = readings.isEmpty() || readings.any { r -> toToneless(r).startsWith(tl) }
             out.add(if (compatible) typed else readings.minByOrNull { editDistance(toToneless(it), tl) } ?: typed)
@@ -766,18 +641,10 @@ class ScorpioDictManager private constructor(private val context: Context) {
 
     /** 從候選中挑出使用者自建詞（系統詞典沒有、後天選字學到的），供候選列標示小鉛筆、開放長按刪除 */
     suspend fun userOnlyWords(words: Collection<String>): Set<String> = withContext(Dispatchers.IO) {
-        val database = db ?: return@withContext emptySet()
         val out = HashSet<String>()
         for (w in words) {
             if (!isHanWord(w)) continue
-            val cached = userOnlyCache.get(w)
-            val isUser = cached ?: try {
-                val inUser = database.rawQuery("SELECT 1 FROM user_dict WHERE word = ? LIMIT 1", arrayOf(w)).use { it.moveToFirst() }
-                val inDict = inUser && database.rawQuery("SELECT 1 FROM dict WHERE word = ? LIMIT 1", arrayOf(w)).use { it.moveToFirst() }
-                (inUser && !inDict).also { userOnlyCache.put(w, it) }
-            } catch (e: Exception) {
-                false
-            }
+            val isUser = userOnlyCache.get(w) ?: (user.hasWord(w) && !this@ScorpioDictManager.words.hasWord(w)).also { userOnlyCache.put(w, it) }
             if (isUser) out.add(w)
         }
         out
@@ -796,7 +663,6 @@ class ScorpioDictManager private constructor(private val context: Context) {
      * 打對的鍵與只錯一個鍵的音節都是「想按某鍵、實際落在某處」的樣本
      */
     suspend fun recordTouchSamples(points: List<BopomofoComposer.TouchPoint>, word: String) = withContext(Dispatchers.IO) {
-        val database = db ?: return@withContext
         val parsed = BopomofoComposer.parseSyllables(points)
         val chars = ArrayList<String>()
         var i = 0
@@ -809,14 +675,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
         var added = 0
         for (k in parsed.indices) {
             val typed = toToneless(parsed[k].text)
-            val readings = ArrayList<String>()
-            try {
-                database.rawQuery("SELECT DISTINCT toneless FROM dict WHERE word = ?", arrayOf(chars[k])).use { c ->
-                    while (c.moveToNext()) readings.add(c.getString(0))
-                }
-            } catch (e: Exception) {
-                // Ignore
-            }
+            val readings = words.tonelessOfWord(chars[k])
             val intended = when {
                 // 打對或打了正確讀音的開頭（簡拼）
                 readings.any { it.startsWith(typed) } -> typed
@@ -903,48 +762,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
         return true
     }
 
-    // ---------- 英文補全：記憶體前綴索引 + QWERTY 鄰鍵容錯 + 個人學習 ----------
-    private class EnglishIndex(val words: Array<String>, val scores: IntArray) {
-        /** 前綴區間 [from, to) */
-        fun range(prefix: String): IntRange {
-            var lo = 0
-            var hi = words.size
-            while (lo < hi) {
-                val mid = (lo + hi) ushr 1
-                if (words[mid] < prefix) lo = mid + 1 else hi = mid
-            }
-            val from = lo
-            hi = words.size
-            val end = prefix + "\uffff"
-            while (lo < hi) {
-                val mid = (lo + hi) ushr 1
-                if (words[mid] < end) lo = mid + 1 else hi = mid
-            }
-            return from until lo
-        }
-    }
-
-    @Volatile
-    private var englishIndex: EnglishIndex? = null
-
-    private fun englishIndex(): EnglishIndex? {
-        englishIndex?.let { return it }
-        val database = db ?: return null
-        return try {
-            val words = ArrayList<String>(50000)
-            val scores = ArrayList<Int>(50000)
-            database.rawQuery("SELECT word, score FROM english_dict ORDER BY word", null).use { c ->
-                while (c.moveToNext()) {
-                    words.add(c.getString(0))
-                    scores.add(c.getInt(1))
-                }
-            }
-            EnglishIndex(words.toTypedArray(), scores.toIntArray()).also { englishIndex = it }
-        } catch (e: Exception) {
-            Log.e(TAG, "載入英文字典失敗", e)
-            null
-        }
-    }
+    // ---------- 英文補全：英文詞庫（SCD，依字母排）前綴查詢 + QWERTY 鄰鍵容錯 + 個人學習 ----------
 
     /**
      * QWERTY 鄰鍵與懲罰：以按鍵寬為 1 的座標估計手指落點，懲罰隨「落點到鄰鍵距離²−落點到目前判定鍵距離²」增加。
@@ -1015,7 +833,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
      * - 字典還沒載入：照按的鍵
      */
     fun resolveEnglishTap(raw: Char, offsetX: Float, offsetY: Float, prefix: String): Char {
-        val index = englishIndex ?: return raw
+        val index = data.english ?: return raw
         val rawPos = QWERTY_POS[raw] ?: return raw
         if (!prefix.all { it in 'a'..'z' }) return raw
         val px = rawPos.first + offsetX * 0.5
@@ -1026,7 +844,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
         val mass = HashMap<Char, Double>(options.size)
         for (k in options.keys) {
             var m = 0.0
-            for (i in index.range(prefix + k)) m += Math.pow(10.0, index.scores[i] / 1000.0)
+            for (i in index.range(prefix + k)) m += Math.pow(10.0, index.score(i) / 1000.0)
             mass[k] = m
         }
         val best = mass.values.maxOrNull() ?: 0.0
@@ -1062,7 +880,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
     ): List<String> = withContext(Dispatchers.IO) {
         if (prefix.isBlank()) return@withContext emptyList()
         val lower = prefix.lowercase()
-        val index = englishIndex()
+        val index = data.english
         val scored = HashMap<String, Double>()
         val display = HashMap<String, String>()
 
@@ -1073,18 +891,9 @@ class ScorpioDictManager private constructor(private val context: Context) {
 
         // 1. 個人學習的英文字（前綴吻合）
         val learned = HashMap<String, Int>()
-        try {
-            db?.rawQuery(
-                "SELECT key, word, count FROM user_english WHERE key >= ? AND key < ? ORDER BY count DESC LIMIT 20",
-                arrayOf(lower, lower + "\uffff")
-            )?.use { c ->
-                while (c.moveToNext()) {
-                    learned[c.getString(0)] = c.getInt(2)
-                    display[c.getString(0)] = c.getString(1)
-                }
-            }
-        } catch (e: Exception) {
-            // Ignore
+        for (e in user.englishPrefix(lower, lower + "\uffff", 20)) {
+            learned[e.key] = e.count
+            display[e.key] = e.word
         }
         // 打出來的就是一個正確的字（字典有或學過）：放第一個，跟中文一樣「打對就是第一候選」
         var exact = learned.containsKey(lower)
@@ -1097,12 +906,12 @@ class ScorpioDictManager private constructor(private val context: Context) {
             // 2. 前綴完全吻合
             val r = index.range(lower)
             for (i in r) {
-                val w = index.words[i]
+                val w = index.word(i)
                 if (w == lower) {
                     exact = true
                     continue
                 }
-                add(w, index.scores[i] + minOf(800.0 + (learned[w] ?: -2) * 400.0, 2800.0).coerceAtLeast(0.0))
+                add(w, index.score(i) + minOf(800.0 + (learned[w] ?: -2) * 400.0, 2800.0).coerceAtLeast(0.0))
             }
 
             // 3. 鄰鍵容錯：每次替換一個字母，懲罰 1 單位約等於詞頻差 10 倍
@@ -1115,10 +924,10 @@ class ScorpioDictManager private constructor(private val context: Context) {
                         val vr = index.range(variant)
                         var taken = 0
                         // 區間內依詞頻取前幾名
-                        val top = vr.sortedByDescending { index.scores[it] }
+                        val top = vr.sortedByDescending { index.score(it) }
                         for (j in top) {
                             if (taken >= 4) break
-                            add(index.words[j], index.scores[j] - pen * 1000.0)
+                            add(index.word(j), index.score(j) - pen * 1000.0)
                             taken++
                         }
                     }
@@ -1152,20 +961,9 @@ class ScorpioDictManager private constructor(private val context: Context) {
     suspend fun getEnglishPredictions(prevWord: String): List<String> = withContext(Dispatchers.IO) {
         val prev = prevWord.lowercase()
         if (prev.isBlank() || !prev.all { it in 'a'..'z' || it == '\'' }) return@withContext emptyList()
-        val database = db ?: return@withContext emptyList()
         val list = LinkedHashSet<String>()
-        try {
-            database.rawQuery(
-                "SELECT next_word FROM user_bigram WHERE prev_word = ? AND next_word != prev_word ORDER BY count DESC, last_used DESC LIMIT 4",
-                arrayOf(prev)
-            ).use { c -> while (c.moveToNext()) list.add(c.getString(0)) }
-            database.rawQuery(
-                "SELECT next FROM english_bigram WHERE prev = ? ORDER BY score DESC LIMIT 12",
-                arrayOf(prev)
-            ).use { c -> while (c.moveToNext()) list.add(c.getString(0)) }
-        } catch (e: Exception) {
-            // Ignore
-        }
+        list.addAll(user.nextRecent(prev, 4) { it.next != it.prev })
+        data.english?.let { list.addAll(it.next(prev, 12)) }
         return@withContext list.take(10).map { if (it == "i" || it.startsWith("i'")) it.replaceFirstChar { c -> c.uppercase() } else it }
     }
 
@@ -1183,6 +981,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
                     "ON CONFLICT(key) DO UPDATE SET count = count + 1, word = excluded.word, last_used = excluded.last_used",
                 arrayOf(key, stored, now)
             )
+            user.reloadEnglish(database, key)
         } catch (e: Exception) {
             Log.e(TAG, "更新 user_english 失敗", e)
         }
@@ -1192,21 +991,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
      * 取得所有收錄的 Emoji 清單（供 Emoji 面板瀏覽）
      */
     suspend fun getAllEmojis(): List<String> = withContext(Dispatchers.IO) {
-        val database = db ?: return@withContext emptyList()
-        val list = mutableListOf<String>()
-        try {
-            database.rawQuery(
-                "SELECT DISTINCT emoji FROM emoji_dict ORDER BY priority ASC",
-                null
-            ).use { cursor ->
-                while (cursor.moveToNext()) {
-                    list.add(cursor.getString(0))
-                }
-            }
-        } catch (e: Exception) {
-            // Ignore
-        }
-        return@withContext list
+        data.emoji?.all() ?: emptyList()
     }
 
     /**
@@ -1232,7 +1017,9 @@ class ScorpioDictManager private constructor(private val context: Context) {
         touchPoints: List<BopomofoComposer.TouchPoint>? = null
     ): CandidateGroups = withContext(Dispatchers.IO) {
         if (allSegmentations.isEmpty()) return@withContext CandidateGroups.EMPTY
-        val database = db ?: return@withContext CandidateGroups.EMPTY
+        val d = data
+        val words = d.words
+        if (words.tables.isEmpty()) return@withContext CandidateGroups.EMPTY
         val startNs = System.nanoTime()
 
         // 每個音節各自的觸控點（同一符號重複出現時不互相覆蓋）
@@ -1299,19 +1086,8 @@ class ScorpioDictManager private constructor(private val context: Context) {
         // 查詢 user_bigram 上下文即時加權
         val bigramBoostMap = mutableMapOf<String, Double>()
         if (!prevWord.isNullOrBlank()) {
-            try {
-                cachedQuery(database, 
-                    "SELECT next_word, count FROM user_bigram WHERE prev_word = ? ORDER BY count DESC LIMIT 20",
-                    arrayOf(prevWord)
-                ).use { cursor ->
-                    while (cursor.moveToNext()) {
-                        val nextWord = cursor.getString(0)
-                        val count = cursor.getInt(1)
-                        bigramBoostMap[nextWord] = minOf(25.0 + count * 4.0, 45.0)
-                    }
-                }
-            } catch (e: Exception) {
-                // Ignore
+            for (p in user.next(prevWord, 20)) {
+                bigramBoostMap[p.next] = minOf(25.0 + p.count * 4.0, 45.0)
             }
         }
 
@@ -1400,21 +1176,8 @@ class ScorpioDictManager private constructor(private val context: Context) {
                 val likePattern = subSyls.joinToString("-") { syl ->
                     if (syl.length == 1 && BopomofoComposer.INITIALS.contains(syl[0])) "$syl%" else syl
                 }
-                try {
-                    cachedQuery(database, 
-                        "SELECT word, score FROM dict WHERE (initials = ? OR initials = ? OR initials = ?) AND toneless LIKE ? ORDER BY score DESC LIMIT 15",
-                        arrayOf(initKey1, initKey2, initKey3, likePattern)
-                    ).use { cursor ->
-                        var rank = 0
-                        while (cursor.moveToNext()) {
-                            val word = cursor.getString(0)
-                            val score = cursor.getDouble(1)
-                            addScoredWord(word, score + 96.0 - (rank * 0.5))
-                            rank++
-                        }
-                    }
-                } catch (e: Exception) {
-                    // Ignore
+                for ((rank, h) in words.byInitialsLike(listOf(initKey1, initKey2, initKey3), likePattern, 15).withIndex()) {
+                    addScoredWord(h.word, h.score + 96.0 - (rank * 0.5))
                 }
             }
 
@@ -1422,58 +1185,28 @@ class ScorpioDictManager private constructor(private val context: Context) {
             val isAllFinals = syllables.all { it.all { c -> BopomofoComposer.FINALS.contains(c) || BopomofoComposer.MEDIALS.contains(c) } }
             if (isAllFinals) {
                 val finKey = syllables.joinToString("-")
-                try {
-                    cachedQuery(database, 
-                        "SELECT word, score FROM dict WHERE finals = ? ORDER BY score DESC LIMIT 15",
-                        arrayOf(finKey)
-                    ).use { cursor ->
-                        while (cursor.moveToNext()) {
-                            addScoredWord(cursor.getString(0), cursor.getDouble(1) + 60.0)
-                        }
-                    }
-                } catch (e: Exception) {
-                    // Ignore
+                for (h in words.byFinals(finKey, 15)) {
+                    addScoredWord(h.word, h.score + 60.0)
                 }
             }
 
             // Step 2: 個人學習詞庫 —— 只當加分，不再以固定高分蓋過字典
             // (a) 讀音完全吻合、字數一致、聲調不衝突：字典已收錄者只加學習分（交由 Step 3 依聲調評分），自創詞直接放入精準層
-            try {
-                cachedQuery(database, 
-                    "SELECT word, count, reading FROM user_dict WHERE toneless = ? OR reading = ? ORDER BY count DESC, last_used DESC LIMIT 12",
-                    arrayOf(fullTonelessKey, fullRawKey)
-                ).use { cursor ->
-                    while (cursor.moveToNext()) {
-                        val word = cursor.getString(0)
-                        if (!isHanWord(word) || hanLength(word) != syllables.size) continue
-                        if (toneConflictCount(syllables, cursor.getString(2)) > 0) continue
-                        val bonus = learnBonus(cursor.getInt(1))
-                        if (bonus > (learnBoostMap[word] ?: 0.0)) learnBoostMap[word] = bonus
-                        val inDict = cachedQuery(database, 
-                            "SELECT 1 FROM dict WHERE toneless = ? AND word = ? LIMIT 1",
-                            arrayOf(fullTonelessKey, word)
-                        ).use { it.moveToFirst() }
-                        if (!inDict) addScoredWord(word, (if (isPrimary) 104.0 else 94.0) - 4.5)
-                    }
-                }
-            } catch (e: Exception) {
-                // Ignore
+            for (u in user.matches(fullTonelessKey, fullRawKey, 12)) {
+                val word = u.word
+                if (!isHanWord(word) || hanLength(word) != syllables.size) continue
+                if (toneConflictCount(syllables, u.reading) > 0) continue
+                val bonus = learnBonus(u.count)
+                if (bonus > (learnBoostMap[word] ?: 0.0)) learnBoostMap[word] = bonus
+                val inDict = words.hasTonelessWord(fullTonelessKey, word)
+                if (!inDict) addScoredWord(word, (if (isPrimary) 104.0 else 94.0) - 4.5)
             }
             // (b) 學過的較長詞作為前綴補全（與字典前綴補全同層級）
-            try {
-                cachedQuery(database, 
-                    "SELECT word, count FROM user_dict WHERE toneless > ? AND toneless < ? ORDER BY count DESC, last_used DESC LIMIT 5",
-                    arrayOf("$fullTonelessKey-", "$fullTonelessKey-\uffff")
-                ).use { cursor ->
-                    while (cursor.moveToNext()) {
-                        val word = cursor.getString(0)
-                        if (isHanWord(word) && hanLength(word) > syllables.size) {
-                            addScoredWord(word, 68.0 - 4.5 + learnBonus(cursor.getInt(1)))
-                        }
-                    }
+            for (u in user.tonelessBetween("$fullTonelessKey-", "$fullTonelessKey-\uffff", 5)) {
+                val word = u.word
+                if (isHanWord(word) && hanLength(word) > syllables.size) {
+                    addScoredWord(word, 68.0 - 4.5 + learnBonus(u.count))
                 }
-            } catch (e: Exception) {
-                // Ignore
             }
             // (c) 簡拼輸入（含單聲母音節）時，比對學過的同聲母、同字數詞
             if (isAbbrev) {
@@ -1481,99 +1214,44 @@ class ScorpioDictManager private constructor(private val context: Context) {
                     val tl = toToneless(syl)
                     if (tl.length == 1 && BopomofoComposer.INITIALS.contains(tl[0])) "$tl%" else tl
                 }
-                try {
-                    cachedQuery(database, 
-                        "SELECT word, count FROM user_dict WHERE initials = ? AND toneless LIKE ? ORDER BY count DESC, last_used DESC LIMIT 5",
-                        arrayOf(getInitialsFromReading(fullTonelessKey), likeUser)
-                    ).use { cursor ->
-                        while (cursor.moveToNext()) {
-                            val word = cursor.getString(0)
-                            if (isHanWord(word) && hanLength(word) == syllables.size) {
-                                addScoredWord(word, 96.0 - 4.5 + learnBonus(cursor.getInt(1)))
-                            }
-                        }
+                for (u in user.initialsLike(getInitialsFromReading(fullTonelessKey), likeUser, 5)) {
+                    val word = u.word
+                    if (isHanWord(word) && hanLength(word) == syllables.size) {
+                        addScoredWord(word, 96.0 - 4.5 + learnBonus(u.count))
                     }
-                } catch (e: Exception) {
-                    // Ignore
                 }
             }
 
             // Step 3a: 精準匹配（若使用者有打聲調，精確匹配平滑遞減加權）
             if (hasTone) {
-                try {
-                    cachedQuery(database, 
-                        "SELECT word, score FROM dict WHERE reading = ? ORDER BY score DESC LIMIT 20",
-                        arrayOf(fullRawKey)
-                    ).use { cursor ->
-                        var rank = 0
-                        while (cursor.moveToNext()) {
-                            val baseBoost = if (isPrimary) 112.0 else 100.0
-                            val boost = maxOf(baseBoost - (rank * 0.8), 88.0)
-                            addScoredWord(cursor.getString(0), cursor.getDouble(1) + boost)
-                            rank++
-                        }
-                    }
-                } catch (e: Exception) {
-                    // Ignore
+                for ((rank, h) in words.byReading(fullRawKey, 20).withIndex()) {
+                    val baseBoost = if (isPrimary) 112.0 else 100.0
+                    val boost = maxOf(baseBoost - (rank * 0.8), 88.0)
+                    addScoredWord(h.word, h.score + boost)
                 }
             }
 
             // Step 3b: 無聲調匹配 + 聲調一致性重排（使用者已輸入聲調的音節若與字典讀音不符則大幅扣分；未輸入聲調的音節視為萬用）
-            try {
-                cachedQuery(database, 
-                    "SELECT word, score, reading FROM dict WHERE toneless = ? ORDER BY score DESC LIMIT 40",
-                    arrayOf(fullTonelessKey)
-                ).use { cursor ->
-                    var rank = 0
-                    while (cursor.moveToNext()) {
-                        val baseBoost = if (isPrimary) 104.0 else 94.0
-                        val boost = maxOf(baseBoost - (rank * 0.8), 85.0)
-                        val mismatch = toneMismatchCount(syllables, cursor.getString(2))
-                        addScoredWord(cursor.getString(0), cursor.getDouble(1) + boost - mismatch * 14.0)
-                        rank++
-                    }
-                }
-            } catch (e: Exception) {
-                // Ignore
+            for ((rank, h) in words.byToneless(fullTonelessKey, 40).withIndex()) {
+                val baseBoost = if (isPrimary) 104.0 else 94.0
+                val boost = maxOf(baseBoost - (rank * 0.8), 85.0)
+                val mismatch = toneMismatchCount(syllables, h.reading)
+                addScoredWord(h.word, h.score + boost - mismatch * 14.0)
             }
 
             // Step 3c: 前綴預測匹配（例如輸入 ㄏㄠ-ㄏㄠ-ㄒ 補全「好好笑」；同字數 90.0，長詞 68.0）
-            try {
-                val nextKey = fullTonelessKey + "\uffff"
-                cachedQuery(database, 
-                    "SELECT word, score FROM dict WHERE toneless >= ? AND toneless < ? ORDER BY score DESC LIMIT 15",
-                    arrayOf(fullTonelessKey, nextKey)
-                ).use { cursor ->
-                    while (cursor.moveToNext()) {
-                        val word = cursor.getString(0)
-                        val baseScore = cursor.getDouble(1)
-                        val boost = if (word.length == syllables.size) 90.0 else 68.0
-                        addScoredWord(word, baseScore + boost)
-                    }
-                }
-            } catch (e: Exception) {
-                // Ignore
+            for (h in words.byTonelessPrefix(fullTonelessKey, 15)) {
+                val boost = if (h.word.length == syllables.size) 90.0 else 68.0
+                addScoredWord(h.word, h.score + boost)
             }
 
             // Step 3d: 模糊音與鄰鍵容錯 toneless IN (...) (多字詞 84.0，單字 50.0)
             if (isPrimary) {
                 val fuzzyKeys = generateFuzzyVariants(fullTonelessKey)
                 if (fuzzyKeys.isNotEmpty()) {
-                    val placeholders = fuzzyKeys.joinToString(",") { "?" }
-                    try {
-                        cachedQuery(database, 
-                            "SELECT word, score FROM dict WHERE toneless IN ($placeholders) ORDER BY score DESC LIMIT 10",
-                            fuzzyKeys.toTypedArray()
-                        ).use { cursor ->
-                            while (cursor.moveToNext()) {
-                                val word = cursor.getString(0)
-                                val baseScore = cursor.getDouble(1)
-                                val boost = if (word.length >= 2) 84.0 else 50.0
-                                addScoredWord(word, baseScore + boost)
-                            }
-                        }
-                    } catch (e: Exception) {
-                        // Ignore
+                    for (h in words.byTonelessIn(fuzzyKeys, 10)) {
+                        val boost = if (h.word.length >= 2) 84.0 else 50.0
+                        addScoredWord(h.word, h.score + boost)
                     }
                 }
             }
@@ -1589,67 +1267,29 @@ class ScorpioDictManager private constructor(private val context: Context) {
             val firstHasTone = firstSyllable.any { BopomofoComposer.TONES.contains(it) }
 
             // 1. 先查個人學習庫中首音節的單字 (若曾自選過高頻單字優先加權)
-            try {
-                cachedQuery(database, 
-                    "SELECT word, count FROM user_dict WHERE (toneless = ? OR reading = ?) AND length(word) = 1 ORDER BY count DESC, last_used DESC LIMIT 5",
-                    arrayOf(tonelessFirst, firstReading)
-                ).use { cursor ->
-                    while (cursor.moveToNext()) {
-                        val word = cursor.getString(0)
-                        if (!isHanWord(word)) continue
-                        val count = cursor.getInt(1)
-                        addScoredWord(word, 78.0 + minOf(count * 1.5, 12.0))
-                    }
-                }
-            } catch (e: Exception) {
-                // Ignore
+            for (u in user.matches(tonelessFirst, firstReading, 5, singleChar = true)) {
+                if (!isHanWord(u.word)) continue
+                addScoredWord(u.word, 78.0 + minOf(u.count * 1.5, 12.0))
             }
 
             // 2. 精確聲調單字 (若首音節有標聲調，如 ㄏㄠˇ 出 好、郝)
             if (firstHasTone) {
-                try {
-                    cachedQuery(database, 
-                        "SELECT word, score FROM dict WHERE reading = ? AND length(word) = 1 ORDER BY score DESC LIMIT 20",
-                        arrayOf(firstReading)
-                    ).use { cursor ->
-                        while (cursor.moveToNext()) {
-                            addScoredWord(cursor.getString(0), cursor.getDouble(1) + 75.0)
-                        }
-                    }
-                } catch (e: Exception) {
-                    // Ignore
+                for (h in words.byReading(firstReading, 20, singleChar = true)) {
+                    addScoredWord(h.word, h.score + 75.0)
                 }
             }
 
             // 3. 完整列出該首音節的所有單字候選字（如 ㄏㄠ 列出 好、號、豪、毫、耗、浩、郝、皓、壕、鎬...）
-            try {
-                cachedQuery(database, 
-                    "SELECT word, score FROM dict WHERE toneless = ? AND length(word) = 1 ORDER BY score DESC LIMIT 30",
-                    arrayOf(tonelessFirst)
-                ).use { cursor ->
-                    while (cursor.moveToNext()) {
-                        val boost = if (firstHasTone) 65.0 else 70.0
-                        addScoredWord(cursor.getString(0), cursor.getDouble(1) + boost)
-                    }
-                }
-            } catch (e: Exception) {
-                // Ignore
+            for (h in words.byToneless(tonelessFirst, 30, singleChar = true)) {
+                val boost = if (firstHasTone) 65.0 else 70.0
+                addScoredWord(h.word, h.score + boost)
             }
 
             // 4. 若輸入 3 音節以上（例如 ㄏㄠ-ㄏㄠ-ㄎㄢ），額外補上前 2 音節的雙字前綴詞（例如「好好」）
             if (primarySyllables.size >= 3) {
                 val prefix2Toneless = toToneless(primarySyllables.take(2).joinToString("-"))
-                try {
-                    cachedQuery(database, 
-                        "SELECT word, score FROM dict WHERE toneless = ? ORDER BY score DESC LIMIT 10",
-                        arrayOf(prefix2Toneless)
-                    ).use { cursor ->
-                        while (cursor.moveToNext()) {
-                            addScoredWord(cursor.getString(0), cursor.getDouble(1) + 82.0)
-                        }
-                    }
-                } catch (e: Exception) {
-                    // Ignore
+                for (h in words.byToneless(prefix2Toneless, 10)) {
+                    addScoredWord(h.word, h.score + 82.0)
                 }
             }
         }
@@ -1661,36 +1301,16 @@ class ScorpioDictManager private constructor(private val context: Context) {
         val kaomojis = mutableListOf<String>()
         val distinctReadings = if (kaomojiEnabled) allReadingsForKaomoji.distinct().take(3) else emptyList()
         for (rKey in distinctReadings) {
-            try {
-                cachedQuery(database, 
-                    "SELECT kaomoji FROM kaomoji_dict WHERE reading = ? ORDER BY priority ASC LIMIT 3",
-                    arrayOf(rKey)
-                ).use { cursor ->
-                    while (cursor.moveToNext()) {
-                        val km = cursor.getString(0)
-                        if (!kaomojis.contains(km)) kaomojis.add(km)
-                    }
-                }
-            } catch (e: Exception) {
-                // Ignore
+            for (km in d.kaomoji?.byReading(rKey, 3).orEmpty()) {
+                if (!kaomojis.contains(km)) kaomojis.add(km)
             }
         }
 
         // 4b. 依候選詞語意關鍵字穿插顏文字（例如打「笑臉」→ 開心類顏文字）
         for (w in (if (kaomojiEnabled) textCandidates.take(6) else emptyList()).map { it.word }) {
             val cat = KAOMOJI_KEYWORDS[w] ?: continue
-            try {
-                cachedQuery(database, 
-                    "SELECT kaomoji FROM kaomoji_dict WHERE category = ? ORDER BY priority ASC LIMIT 4",
-                    arrayOf(cat)
-                ).use { cursor ->
-                    while (cursor.moveToNext()) {
-                        val km = cursor.getString(0)
-                        if (!kaomojis.contains(km)) kaomojis.add(km)
-                    }
-                }
-            } catch (e: Exception) {
-                // Ignore
+            for (km in d.kaomoji?.byCategory(cat, 4).orEmpty()) {
+                if (!kaomojis.contains(km)) kaomojis.add(km)
             }
             if (kaomojis.size >= 6) break
         }
@@ -1699,21 +1319,9 @@ class ScorpioDictManager private constructor(private val context: Context) {
         val emojiCandidates = mutableListOf<String>()
         val emojiMore = LinkedHashSet<String>()
         for ((wi, w) in (if (emojiEnabled) textCandidates.take(8) else emptyList()).map { it.word }.withIndex()) {
-            try {
-                cachedQuery(database, 
-                    "SELECT emoji FROM emoji_dict WHERE keyword = ? ORDER BY priority ASC LIMIT 8",
-                    arrayOf(w)
-                ).use { cursor ->
-                    var n = 0
-                    while (cursor.moveToNext()) {
-                        val emo = cursor.getString(0)
-                        emojiMore.add(emo)
-                        if (wi < 4 && n < 3 && !emojiCandidates.contains(emo)) emojiCandidates.add(emo)
-                        n++
-                    }
-                }
-            } catch (e: Exception) {
-                // Ignore
+            for ((n, emo) in d.emoji?.byKeyword(w, 8).orEmpty().withIndex()) {
+                emojiMore.add(emo)
+                if (wi < 4 && n < 3 && !emojiCandidates.contains(emo)) emojiCandidates.add(emo)
             }
         }
 
@@ -1739,9 +1347,9 @@ class ScorpioDictManager private constructor(private val context: Context) {
 
         // 分組：字典裡本身就是符號的候選（例如 ⌨️）也歸到 emoji
         val kaomojiSet = kaomojis.toHashSet()
-        val words = result.filter { it !in kaomojiSet && !isSymbolOnly(it) }
+        val wordItems = result.filter { it !in kaomojiSet && !isSymbolOnly(it) }
         val emojiGroup = (result.filter { it !in kaomojiSet && isSymbolOnly(it) } + emojiMore).distinct()
-        val groups = CandidateGroups(result.toList(), words, emojiGroup, kaomojis.toList())
+        val groups = CandidateGroups(result.toList(), wordItems, emojiGroup, kaomojis.toList())
         candidatesCache.put(cacheKey, groups)
         Log.d(TAG, "選字耗時 ${(System.nanoTime() - startNs) / 1_000_000}ms（${allSegmentations.first().size} 個音節）")
         return@withContext groups
@@ -1774,64 +1382,21 @@ class ScorpioDictManager private constructor(private val context: Context) {
     private fun validSyllables(): Set<String> {
         validSyllableSet?.let { return it }
         val set = HashSet<String>(1600)
-        try {
-            db?.rawQuery("SELECT DISTINCT toneless FROM dict WHERE instr(toneless, '-') = 0", null)?.use { c ->
-                while (c.moveToNext()) set.add(c.getString(0))
+        // SELECT DISTINCT toneless FROM dict WHERE instr(toneless, '-') = 0
+        for (w in words.tables) {
+            for (k in 0 until w.tlIx.size) {
+                val sid = w.tlIx.keySid(k)
+                if ((0 until w.f.strLength(sid)).none { w.f.charAt(sid, it) == '-' }) set.add(w.f.str(sid))
             }
-        } catch (e: Exception) {
-            Log.w(TAG, "載入合法音節表失敗: ${e.message}")
         }
-        validSyllableSet = set
+        if (words.tables.isNotEmpty()) validSyllableSet = set
         return set
     }
 
     // ---------- 倉頡／速成 ----------
 
-    /** 倉頡碼表（記憶體索引）：依碼排序，前綴查詢用二分搜尋；速成碼另建對照 */
-    private class CangjieIndex(val codes: Array<String>, val chars: Array<String>, val freqs: DoubleArray, val quick: Map<String, List<Int>>) {
-        fun range(prefix: String): IntRange {
-            var lo = 0
-            var hi = codes.size
-            while (lo < hi) {
-                val mid = (lo + hi) ushr 1
-                if (codes[mid] < prefix) lo = mid + 1 else hi = mid
-            }
-            val from = lo
-            hi = codes.size
-            val end = prefix + "\uffff"
-            while (lo < hi) {
-                val mid = (lo + hi) ushr 1
-                if (codes[mid] < end) lo = mid + 1 else hi = mid
-            }
-            return from until lo
-        }
-    }
-
-    @Volatile
-    private var cangjieIndex: CangjieIndex? = null
-
-    private fun cangjieIndex(): CangjieIndex? {
-        cangjieIndex?.let { return it }
-        val database = db ?: return null
-        return try {
-            val codes = ArrayList<String>(28000)
-            val chars = ArrayList<String>(28000)
-            val freqs = ArrayList<Double>(28000)
-            val quick = HashMap<String, MutableList<Int>>()
-            database.rawQuery("SELECT code, quick, char, freq FROM cangjie ORDER BY code, freq DESC", null).use { c ->
-                while (c.moveToNext()) {
-                    quick.getOrPut(c.getString(1)) { ArrayList() }.add(codes.size)
-                    codes.add(c.getString(0))
-                    chars.add(c.getString(2))
-                    freqs.add(c.getDouble(3))
-                }
-            }
-            CangjieIndex(codes.toTypedArray(), chars.toTypedArray(), freqs.toDoubleArray(), quick).also { cangjieIndex = it }
-        } catch (e: Exception) {
-            Log.e(TAG, "載入倉頡碼表失敗", e)
-            null
-        }
-    }
+    /** 倉頡碼表（SCD，依碼排序，前綴查詢用二分搜尋；速成碼對照表第一次用到時建） */
+    private fun cangjieIndex(): CangjieTable? = data.cangjie
 
     /**
      * 倉頡／速成候選字：碼完全相符的依字頻排前面，再接上「再多打幾碼」的常用字（打一半也看得到）
@@ -1844,22 +1409,22 @@ class ScorpioDictManager private constructor(private val context: Context) {
             index.quick[code]?.let { exact.addAll(it) }
             if (code.length == 1) for ((q, ids) in index.quick) if (q.length == 2 && q[0] == code[0]) more.addAll(ids)
         } else {
-            for (i in index.range(code)) if (index.codes[i] == code) exact.add(i) else more.add(i)
+            for (i in index.range(code)) if (index.codeEquals(i, code)) exact.add(i) else more.add(i)
         }
         val out = LinkedHashSet<String>()
-        exact.sortedByDescending { index.freqs[it] }.forEach { out.add(index.chars[it]) }
-        more.sortedByDescending { index.freqs[it] }.take(40).forEach { out.add(index.chars[it]) }
+        exact.sortedByDescending { index.freq(it) }.forEach { out.add(index.char(it)) }
+        more.sortedByDescending { index.freq(it) }.take(40).forEach { out.add(index.char(it)) }
         out.filter { isRenderable(it) }.take(60)
     }
 
     /** 倉頡碼前綴的使用量（自然對數），供按鍵當下的動態感應區；沒有任何字以此為開頭時為 null */
     fun codePrefixLogMass(prefix: String, quick: Boolean): Double? {
-        val index = cangjieIndex ?: return 0.0
+        val index = data.cangjie ?: return 0.0
         var m = 0.0
         if (quick) {
-            for ((q, ids) in index.quick) if (q.startsWith(prefix)) for (i in ids) m += Math.pow(10.0, index.freqs[i])
+            for ((q, ids) in index.quick) if (q.startsWith(prefix)) for (i in ids) m += Math.pow(10.0, index.freq(i))
         } else {
-            for (i in index.range(prefix)) m += Math.pow(10.0, index.freqs[i])
+            for (i in index.range(prefix)) m += Math.pow(10.0, index.freq(i))
         }
         return if (m > 0) kotlin.math.ln(m) else null
     }
@@ -1877,17 +1442,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
     }
 
     private fun computeSyllableFrequencies(): Map<String, Double> {
-        val freq = HashMap<String, Double>(1600)
-        try {
-            db?.rawQuery("SELECT toneless, score FROM dict WHERE instr(toneless, '-') = 0 AND toneless <> ''", null)?.use { c ->
-                while (c.moveToNext()) {
-                    val s = c.getString(0)
-                    freq[s] = (freq[s] ?: 0.0) + Math.pow(10.0, c.getDouble(1))
-                }
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "載入音節字頻失敗: ${e.message}")
-        }
+        val freq = words.syllableFrequencies()
         if (freq.isEmpty()) return validSyllables().associateWith { 1.0 }
         return freq
     }
@@ -1953,16 +1508,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
         return found.values.sortedBy { it.penalty }.take(5)
     }
 
-    private fun topDictScore(tonelessKey: String): Double {
-        try {
-            db?.rawQuery("SELECT max(score) FROM dict WHERE toneless = ?", arrayOf(tonelessKey))?.use { c ->
-                if (c.moveToFirst() && !c.isNull(0)) return c.getDouble(0)
-            }
-        } catch (e: Exception) {
-            // Ignore
-        }
-        return -20.0
-    }
+    private fun topDictScore(tonelessKey: String): Double = words.maxScore(tonelessKey) ?: -20.0
 
     /**
      * 產生台灣注音常見混淆／實體按錯鍵之容錯讀音變體
@@ -2046,68 +1592,15 @@ class ScorpioDictManager private constructor(private val context: Context) {
     )
 
     // ---------- 靜態 Bigram（詞與詞搭配機率，ln P(next | prev)） ----------
-    private var bigramDb: SQLiteDatabase? = null
     private val bigramCache = LruCache<String, Map<String, Double>>(600)
 
-    private fun initBigramDb() {
-        try {
-            val file = context.getDatabasePath(BIGRAM_DB_NAME)
-            val prefs = context.getSharedPreferences("scorpio_dict_prefs", Context.MODE_PRIVATE)
-            if (!file.exists() || prefs.getInt(PREF_BIGRAM_VERSION, 0) < CURRENT_BIGRAM_VERSION) {
-                file.parentFile?.mkdirs()
-                File(file.path + "-wal").delete()
-                File(file.path + "-shm").delete()
-                try {
-                    val isGz = try {
-                        context.assets.open("$BIGRAM_DB_NAME.gz").close()
-                        true
-                    } catch (e: Exception) {
-                        false
-                    }
-                    val assetName = if (isGz) "$BIGRAM_DB_NAME.gz" else BIGRAM_DB_NAME
-                    context.assets.open(assetName).use { input ->
-                        if (isGz) {
-                            GZIPInputStream(input).use { gz ->
-                                FileOutputStream(file).use { out -> gz.copyTo(out) }
-                            }
-                        } else {
-                            FileOutputStream(file).use { out -> input.copyTo(out) }
-                        }
-                    }
-                    prefs.edit().putInt(PREF_BIGRAM_VERSION, CURRENT_BIGRAM_VERSION).apply()
-                    Log.i(TAG, "Bigram 詞庫載入完成: ${file.length() / 1024} KB")
-                } catch (e: Exception) {
-                    Log.e(TAG, "Bigram 資產解壓縮失敗", e)
-                    return
-                }
-            }
-            // 可寫入：線上更新的接續詞資料包直接換掉同來源的資料
-            bigramDb = SQLiteDatabase.openDatabase(file.absolutePath, null, SQLiteDatabase.OPEN_READWRITE)
-            Log.i(TAG, "Bigram 詞庫開啟成功: ${file.absolutePath}")
-        } catch (e: Exception) {
-            Log.e(TAG, "Bigram 詞庫載入失敗", e)
-            bigramDb = null
-        }
-    }
-
+    /** SELECT next, MAX(score) FROM bigram WHERE prev = ? AND source IN (開著的來源) GROUP BY next */
     private fun bigramsFor(prev: String): Map<String, Double> {
         bigramCache.get(prev)?.let { return it }
         val map = HashMap<String, Double>()
-        val bdb = bigramDb
-        val sources = bigramSources()
-        if (bdb != null && sources.isNotEmpty()) {
-            try {
-                // 多個來源都有同一組搭配時取最強的那個
-                val marks = sources.joinToString(",") { "?" }
-                bdb.rawQuery(
-                    "SELECT next, MAX(score) FROM bigram WHERE prev = ? AND source IN ($marks) GROUP BY next",
-                    arrayOf(prev) + sources
-                ).use { c ->
-                    while (c.moveToNext()) map[c.getString(0)] = c.getDouble(1)
-                }
-            } catch (e: Exception) {
-                // Ignore
-            }
+        // 多個來源都有同一組搭配時取最強的那個
+        for (t in data.scoreBigrams) {
+            t.forEach(prev) { next, score -> if (score > (map[next] ?: Double.NEGATIVE_INFINITY)) map[next] = score }
         }
         bigramCache.put(prev, map)
         return map
@@ -2130,7 +1623,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
         prevWord: String? = null
     ): LatticeResult {
         val n = syllables.size
-        val database = db ?: return LatticeResult("", emptyList(), emptyList())
+        if (words.tables.isEmpty()) return LatticeResult("", emptyList(), emptyList())
 
         data class Node(val score: Double, val text: String, val last: String)
         val beam = 6
@@ -2171,48 +1664,30 @@ class ScorpioDictManager private constructor(private val context: Context) {
                         val list = ArrayList<Pair<String, Double>>()
                         // 1. 個人學習庫與自選詞融入 Viterbi 網格：字數須與區間音節數一致
                         val learned = LinkedHashMap<String, Pair<Int, String>>()
-                        try {
-                            cachedQuery(database, 
-                                "SELECT word, count, reading FROM user_dict WHERE toneless = ? OR reading = ? ORDER BY count DESC, last_used DESC LIMIT 3",
-                                arrayOf(key, key)
-                            ).use { cursor ->
-                                while (cursor.moveToNext()) {
-                                    val uw = cursor.getString(0)
-                                    if (!isHanWord(uw) || hanLength(uw) != len) continue
-                                    if (!learned.containsKey(uw)) learned[uw] = Pair(cursor.getInt(1), cursor.getString(2))
-                                }
-                            }
-                        } catch (e: Exception) {
-                            // Ignore
+                        for (u in user.matches(key, key, 3)) {
+                            val uw = u.word
+                            if (!isHanWord(uw) || hanLength(uw) != len) continue
+                            if (!learned.containsKey(uw)) learned[uw] = Pair(u.count, u.reading)
                         }
 
                         // 2. 查詢內建詞典
-                        try {
-                            cachedQuery(database, 
-                                "SELECT word, score, reading FROM dict WHERE toneless = ? ORDER BY score DESC LIMIT 12",
-                                arrayOf(key)
-                            ).use { cursor ->
-                                // 聲調一致性：已輸入聲調的音節與字典讀音不符則扣分，讓打得明確的詞優先
-                                while (cursor.moveToNext()) {
-                                    val cw = cursor.getString(0)
-                                    if (cw.startsWith("MACRO@")) continue
-                                    val tonePenalty = toneMismatchCount(spanTyped, cursor.getString(2)) * 6.0
-                                    var adj = cursor.getDouble(1) - tonePenalty
-                                    // 字典裡已有的學習詞只在字典分數上小幅加分，避免選過幾次的單字（例如「排」）蓋過常用詞「不太」
-                                    learned[cw]?.let { (cnt, _) ->
-                                        adj = if (len == 1) {
-                                            val bonus = minOf(cnt * 0.3, 1.2)
-                                            // 字典裡很少見但常用的字（例如「屌」）至少給到一般常用字的水準
-                                            maxOf(adj, -4.5 - tonePenalty) + bonus
-                                        } else {
-                                            adj + minOf(cnt * 0.6, 2.4)
-                                        }
-                                    }
-                                    list.add(Pair(cw, adj))
+                        // 聲調一致性：已輸入聲調的音節與字典讀音不符則扣分，讓打得明確的詞優先
+                        for (h in words.byToneless(key, 12)) {
+                            val cw = h.word
+                            if (cw.startsWith("MACRO@")) continue
+                            val tonePenalty = toneMismatchCount(spanTyped, h.reading) * 6.0
+                            var adj = h.score - tonePenalty
+                            // 字典裡已有的學習詞只在字典分數上小幅加分，避免選過幾次的單字（例如「排」）蓋過常用詞「不太」
+                            learned[cw]?.let { (cnt, _) ->
+                                adj = if (len == 1) {
+                                    val bonus = minOf(cnt * 0.3, 1.2)
+                                    // 字典裡很少見但常用的字（例如「屌」）至少給到一般常用字的水準
+                                    maxOf(adj, -4.5 - tonePenalty) + bonus
+                                } else {
+                                    adj + minOf(cnt * 0.6, 2.4)
                                 }
                             }
-                        } catch (e: Exception) {
-                            // Ignore
+                            list.add(Pair(cw, adj))
                         }
                         // 字典沒有的自選詞（新詞、人名）：與字典同一 log 機率尺度給基礎分
                         val dictWords = list.mapTo(HashSet()) { it.first }
@@ -2246,24 +1721,15 @@ class ScorpioDictManager private constructor(private val context: Context) {
                         val likePattern = subSyls.joinToString("-") { syl ->
                             if (syl.length == 1 && BopomofoComposer.INITIALS.contains(syl[0])) "$syl%" else syl
                         }
-                        try {
-                            cachedQuery(database, 
-                                "SELECT word, score FROM dict WHERE (initials = ? OR initials = ? OR initials = ?) AND toneless LIKE ? ORDER BY score DESC LIMIT 3",
-                                arrayOf(initKey1, initKey2, initKey3, likePattern)
-                            ).use { cursor ->
-                                var first = true
-                                while (cursor.moveToNext()) {
-                                    val w = cursor.getString(0)
-                                    if (w.startsWith("MACRO@")) continue
-                                    val initScore = cursor.getDouble(1) - 1.5
-                                    val cur = spanCands[w]
-                                    if (cur == null || initScore > cur) spanCands[w] = initScore
-                                    if (first && i == 0 && !spanWords.contains(w)) spanWords.add(w)
-                                    first = false
-                                }
-                            }
-                        } catch (e: Exception) {
-                            // Ignore
+                        var first = true
+                        for (h in words.byInitialsLike(listOf(initKey1, initKey2, initKey3), likePattern, 3)) {
+                            val w = h.word
+                            if (w.startsWith("MACRO@")) continue
+                            val initScore = h.score - 1.5
+                            val cur = spanCands[w]
+                            if (cur == null || initScore > cur) spanCands[w] = initScore
+                            if (first && i == 0 && !spanWords.contains(w)) spanWords.add(w)
+                            first = false
                         }
                     }
                 }
@@ -2436,8 +1902,9 @@ class ScorpioDictManager private constructor(private val context: Context) {
                 "UPDATE user_dict SET count = count + 1, last_used = ?, toneless = ?, initials = ? WHERE (reading = ? OR toneless = ?) AND word = ?",
                 arrayOf(now, toneless, initials, reading, toneless, word)
             )
+            // 寫進 SQLite 之後，把這個詞的列讀回記憶體鏡像
+            user.reloadWord(database, word)
             candidatesCache.evictAll()
-        userQueryCache.evictAll()  // 只動到個人學習資料
             userOnlyCache.evictAll()
             Log.i(TAG, "智慧學習新紀錄（${word.length} 字）")
         } catch (e: Exception) {
@@ -2465,12 +1932,12 @@ class ScorpioDictManager private constructor(private val context: Context) {
                 "UPDATE user_bigram SET count = count + 1, last_used = ? WHERE prev_word = ? AND next_word = ?",
                 arrayOf(now, prevWord, nextWord)
             )
+            user.reloadBigrams(database, prevWord)
             Log.i(TAG, "智慧學習一組關聯詞")
         } catch (e: Exception) {
             Log.e(TAG, "更新 user_bigram 失敗", e)
         }
-        // 個人搭配變了：查 user_bigram 的快取與候選快取要重算
-        userQueryCache.evictAll()
+        // 個人搭配變了：候選快取要重算
         candidatesCache.evictAll()
     }
 
@@ -2488,8 +1955,8 @@ class ScorpioDictManager private constructor(private val context: Context) {
             } finally {
                 database.endTransaction()
             }
+            user.forgetWord(word)
             candidatesCache.evictAll()
-        userQueryCache.evictAll()  // 只動到個人學習資料
             userOnlyCache.evictAll()
             subSyllableCache.evictAll()
             Log.i(TAG, "已自個人學習庫刪除一個詞")
@@ -2559,137 +2026,90 @@ class ScorpioDictManager private constructor(private val context: Context) {
     /**
      * 系統要回收記憶體時釋放快取：鍵盤收起（UI_HIDDEN）放掉候選快取與 SQLite 頁面快取；
      * 真的缺記憶體（RUNNING_LOW、BACKGROUND 以上）時全部清掉。行程越小越不容易被系統殺掉
+     * （詞庫是 mmap 的唯讀檔案頁，系統自己會丟，不必處理）
      */
     fun trimMemory(level: Int) {
         candidatesCache.evictAll()
-        userQueryCache.evictAll()
         subSyllableCache.trimToSize(subSyllableCache.maxSize() / 2)
         SQLiteDatabase.releaseMemory()
         if (level != android.content.ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN) {
-            queryCache.evictAll()
             subSyllableCache.evictAll()
             bigramCache.evictAll()
             userOnlyCache.evictAll()
         }
     }
 
-    /** 資料包預設開不開（dict_packs.default_on；舊版詞庫沒有這欄就當作開） */
-    private fun packDefaultOn(id: String): Boolean = try {
-        db?.rawQuery("SELECT default_on FROM dict_packs WHERE id = ?", arrayOf(id))?.use { !it.moveToFirst() || it.getInt(0) != 0 } ?: true
-    } catch (e: Exception) {
-        true
-    }
-
-    private fun sourcePresent(source: String): Boolean = try {
-        db?.rawQuery("SELECT 1 FROM dict WHERE source = ? LIMIT 1", arrayOf(source))?.use { it.moveToFirst() } ?: false
-    } catch (e: Exception) {
-        false
-    }
+    /**
+     * 資料包預設開不開：已安裝的看檔案 meta 的 default；還沒安裝的（只能線上安裝的資料包）一律不開，
+     * 免得每日更新自己把沒裝的資料包下載下來
+     */
+    private fun packDefaultOn(id: String): Boolean = loaded[id]?.meta?.optBoolean("default", true) ?: false
 
     private fun invalidateCandidateCaches() {
         candidatesCache.evictAll()
-        queryCache.evictAll()
-        userQueryCache.evictAll()
         userOnlyCache.evictAll()
         subSyllableCache.evictAll()
         syllableFreqCache = null
     }
 
-    /** 依開關把附加／匯入詞庫加進或移出主詞庫 */
-    @Synchronized
-    fun syncDictionarySources() {
-        val database = db ?: return
-        var changed = false
+    /** 開關、安裝、匯入有變動：依目前的開關重組查詢對象 */
+    fun syncDictionarySources() = remount(false)
+
+    // ---------- 匯入的詞庫（原文存在 scorpio_imports.db，在手機上編成 SCD） ----------
+
+    /** 匯入的詞庫（編號, 開著嗎），依匯入先後 */
+    private fun importList(): List<Pair<Long, Boolean>> {
+        val out = ArrayList<Pair<Long, Boolean>>()
         try {
-            database.execSQL("ALTER TABLE dict ADD COLUMN source TEXT")
-        } catch (e: Exception) {
-            // 已經有欄位
-        }
-        try {
-            database.execSQL("CREATE INDEX IF NOT EXISTS idx_dict_source ON dict(source)")
-            for (pack in addonPacks()) {
-                val id = pack.id
-                val want = addonEnabled(id)
-                var has = sourcePresent(id)
-                // 詞庫改版：已套用的舊版先移掉再插新版
-                if (want && has && sourcePrefs.getString("ver:$id", null) != pack.version) {
-                    database.delete("dict", "source = ?", arrayOf(id))
-                    has = false
-                }
-                if (want && !has) {
-                    database.execSQL(
-                        "INSERT INTO dict (reading, toneless, word, score, initials, finals, source) " +
-                            "SELECT reading, toneless, word, score, initials, finals, source FROM addon_dict WHERE source = ?",
-                        arrayOf(id)
-                    )
-                    sourcePrefs.edit().putString("ver:$id", pack.version).apply()
-                    changed = true
-                } else if (!want && has) {
-                    database.delete("dict", "source = ?", arrayOf(id))
-                    changed = true
-                }
-            }
-            val imports = importDb
-            if (imports != null) {
-                val dicts = ArrayList<Pair<Long, Boolean>>()
-                imports.rawQuery("SELECT id, enabled FROM import_dicts", null).use { c ->
-                    while (c.moveToNext()) dicts.add(c.getLong(0) to (c.getInt(1) != 0))
-                }
-                val known = dicts.map { "import:${it.first}" }.toSet()
-                // 已刪除的匯入詞庫殘留在主詞庫的詞
-                database.rawQuery("SELECT DISTINCT source FROM dict WHERE source LIKE 'import:%'", null).use { c ->
-                    val stale = ArrayList<String>()
-                    while (c.moveToNext()) if (c.getString(0) !in known) stale.add(c.getString(0))
-                    for (src in stale) {
-                        database.delete("dict", "source = ?", arrayOf(src))
-                        changed = true
-                    }
-                }
-                for ((id, enabled) in dicts) {
-                    val src = "import:$id"
-                    val has = sourcePresent(src)
-                    if (enabled && !has) {
-                        insertImportedEntries(database, imports, id)
-                        changed = true
-                    } else if (!enabled && has) {
-                        database.delete("dict", "source = ?", arrayOf(src))
-                        changed = true
-                    }
-                }
+            importDb?.rawQuery("SELECT id, enabled FROM import_dicts ORDER BY created, id", null)?.use { c ->
+                while (c.moveToNext()) out.add(c.getLong(0) to (c.getInt(1) != 0))
             }
         } catch (e: Exception) {
-            Log.e(TAG, "同步詞庫來源失敗", e)
+            Log.e(TAG, "讀取匯入詞庫清單失敗", e)
         }
-        if (changed) {
-            invalidateCandidateCaches()
-            spatial.setSyllableFrequencies(syllableFrequencies())
-        }
+        return out
     }
 
-    private fun insertImportedEntries(database: SQLiteDatabase, imports: SQLiteDatabase, id: Long) {
-        database.beginTransaction()
+    /**
+     * 還沒編成 SCD 的匯入詞庫現在編（舊版升級、檔案被清掉時），已刪除的匯入詞庫留下的檔案刪掉。
+     * 回傳檔案有沒有增減（要重新載入）
+     */
+    private fun compileMissingImports(): Boolean {
+        val imports = importDb ?: return false
+        var changed = false
         try {
-            val st = database.compileStatement(
-                "INSERT INTO dict (reading, toneless, word, score, initials, finals, source) VALUES (?, ?, ?, ?, ?, ?, ?)"
-            )
-            imports.rawQuery("SELECT word, reading, score FROM import_entries WHERE dict_id = ?", arrayOf(id.toString())).use { c ->
-                while (c.moveToNext()) {
-                    val reading = c.getString(1)
-                    val parts = reading.split('-').map { splitSyllable(it) }
-                    st.bindString(1, reading)
-                    st.bindString(2, parts.joinToString("-") { it.first })
-                    st.bindString(3, c.getString(0))
-                    st.bindDouble(4, c.getDouble(2))
-                    st.bindString(5, parts.joinToString("-") { it.second })
-                    st.bindString(6, parts.joinToString("-") { it.third })
-                    st.bindString(7, "import:$id")
-                    st.executeInsert()
+            val dicts = ArrayList<Pair<Long, String>>()
+            imports.rawQuery("SELECT id, name FROM import_dicts", null).use { c ->
+                while (c.moveToNext()) dicts.add(c.getLong(0) to c.getString(1))
+            }
+            val known = dicts.map { it.first }.toSet()
+            for ((id, name) in dicts) {
+                if (files.importFile(id).exists()) continue
+                val rows = ArrayList<ScdWriter.Word>()
+                imports.rawQuery("SELECT word, reading, score FROM import_entries WHERE dict_id = ? ORDER BY rowid", arrayOf(id.toString())).use { c ->
+                    while (c.moveToNext()) {
+                        val reading = c.getString(1)
+                        val parts = reading.split('-').map { splitSyllable(it) }
+                        rows.add(ScdWriter.Word(
+                            reading, parts.joinToString("-") { it.first }, c.getString(0), c.getDouble(2),
+                            parts.joinToString("-") { it.second }, parts.joinToString("-") { it.third }
+                        ))
+                    }
+                }
+                files.writeImport(id, ScdWriter.words(mapOf("id" to "import:$id", "group" to "import", "name" to name, "version" to "1"), rows))
+                changed = true
+            }
+            for (f in files.dir.listFiles { f -> f.name.startsWith("import_") && f.name.endsWith(".scd") }.orEmpty()) {
+                val id = f.name.removePrefix("import_").removeSuffix(".scd").toLongOrNull()
+                if (id == null || id !in known) {
+                    f.delete()
+                    changed = true
                 }
             }
-            database.setTransactionSuccessful()
-        } finally {
-            database.endTransaction()
+        } catch (e: Exception) {
+            Log.e(TAG, "編譯匯入詞庫失敗", e)
         }
+        return changed
     }
 
     /** 音節 → （去聲調、聲母、韻母），沒有聲母／韻母記成 _（同主詞庫格式） */
@@ -2703,33 +2123,28 @@ class ScorpioDictManager private constructor(private val context: Context) {
     /** available：manifest 裡的資料包，還沒安裝、只能線上安裝的也列出來（關著，顯示下載大小） */
     suspend fun dictionaries(available: List<PackUpdater.ManifestPack> = emptyList()): List<DictionaryInfo> = withContext(Dispatchers.IO) {
         val out = ArrayList<DictionaryInfo>()
-        fun count(database: SQLiteDatabase?, sql: String, id: String) = try {
-            database?.rawQuery(sql, arrayOf(id))?.use { if (it.moveToFirst()) it.getInt(0) else 0 } ?: 0
-        } catch (e: Exception) {
-            0
-        }
         var kaomojiPack: Pack? = null
         for (p in packs()) {
             val source = "${p.source}（${p.license}）"
-            val version = installedPackVersion(p.id, p.group).ifEmpty { p.version }
+            val f = loaded[p.id]
             when {
                 p.id == "core" -> out.add(
                     DictionaryInfo(
-                        p.id, p.name, p.description, countOf("SELECT count(*) FROM dict WHERE source IS NULL"),
+                        p.id, p.name, p.description, f?.rows("w") ?: 0,
                         enabled = true, source = source, version = p.version, toggleable = false
                     )
                 )
                 p.group == "kaomoji" -> kaomojiPack = p
                 p.group == "bigram" -> out.add(
                     DictionaryInfo(
-                        p.id, p.name, p.description, count(bigramDb, "SELECT count(*) FROM bigram WHERE source = ?", p.id),
-                        addonEnabled(p.id), group = "bigram", source = source, version = version
+                        p.id, p.name, p.description, f?.rows("b") ?: 0,
+                        addonEnabled(p.id), group = "bigram", source = source, version = p.version
                     )
                 )
                 else -> out.add(
                     DictionaryInfo(
-                        p.id, p.name, p.description, count(db, "SELECT count(*) FROM addon_dict WHERE source = ?", p.id),
-                        addonEnabled(p.id), source = source, version = version
+                        p.id, p.name, p.description, f?.rows("w") ?: 0,
+                        addonEnabled(p.id), source = source, version = p.version
                     )
                 )
             }
@@ -2745,16 +2160,17 @@ class ScorpioDictManager private constructor(private val context: Context) {
                 )
             )
         }
+        val d = data
         out.add(
             DictionaryInfo(
-                "emoji", "Emoji", "打字時依詞意穿插 Emoji 候選", countOf("SELECT count(DISTINCT emoji) FROM emoji_dict"), emojiEnabled,
+                "emoji", "Emoji", "打字時依詞意穿插 Emoji 候選", d.emoji?.all()?.size ?: 0, emojiEnabled,
                 source = "Unicode CLDR 繁中註解（Unicode License v3）"
             )
         )
         out.add(DictionaryInfo(
-                "kaomoji", "顏文字", "打字時穿插顏文字候選", countOf("SELECT count(DISTINCT kaomoji) FROM kaomoji_dict"), kaomojiEnabled,
+                "kaomoji", "顏文字", "打字時穿插顏文字候選", d.kaomoji?.let { k -> (0 until k.size).map { k.kaomoji(it) }.toSet().size } ?: 0, kaomojiEnabled,
                 source = kaomojiPack?.let { "${it.source}（${it.license}）" } ?: "w33ble/emoticon-data（MIT License）",
-                version = kaomojiPack?.let { installedPackVersion(it.id, it.group).ifEmpty { it.version } }
+                version = kaomojiPack?.version
             ))
         try {
             importDb?.rawQuery(
@@ -2779,152 +2195,27 @@ class ScorpioDictManager private constructor(private val context: Context) {
         else -> addonEnabled(id)
     }
 
-    /** 下載的資料包存在這裡（<id>.db.gz），App 改版覆蓋詞庫檔後用來重新套用 */
-    val packDir: File get() = File(context.filesDir, "packs").apply { mkdirs() }
+    /** 目前生效的資料包版本（內建與下載的取新的那個）；沒裝是空字串 */
+    fun installedPackVersion(id: String, @Suppress("UNUSED_PARAMETER") group: String): String = loaded[id]?.version ?: ""
 
     /**
-     * 目前生效的資料包版本：看資料實際存放的那個資料庫
-     * 詞與顏文字在主詞庫（dict_packs），接續詞在 bigram 庫（pack_versions）；流行用語兩邊都有，取舊的那邊
-     */
-    fun installedPackVersion(id: String, group: String): String {
-        fun fromDict() = try {
-            db?.rawQuery("SELECT version FROM dict_packs WHERE id = ?", arrayOf(id))?.use { if (it.moveToFirst()) it.getString(0) else null }
-        } catch (e: Exception) {
-            null
-        } ?: ""
-        fun fromBigram() = try {
-            bigramDb?.rawQuery("SELECT version FROM pack_versions WHERE id = ?", arrayOf(id))?.use { if (it.moveToFirst()) it.getString(0) else null }
-        } catch (e: Exception) {
-            null
-        } ?: ""
-        return when {
-            group == "bigram" -> fromBigram()
-            id == "trendy" -> minOf(fromDict(), fromBigram(), PackVersion.comparator)
-            else -> fromDict()
-        }
-    }
-
-    /**
-     * 套用一個資料包（gzip 壓縮的 SQLite，格式見資料 repo 的 tools/make_packs.py）：
-     * 依 meta.id 把同來源的舊資料換成新的，並記下版本。回傳套用的版本，失敗回傳 null
+     * 套用一個資料包（gzip 壓縮的 SCD，格式見資料 repo 的 tools/scd.py）：
+     * 解壓後放進 files/scd/<id>.scd，重新載入。回傳套用的版本，失敗（格式不對）回傳 null
      */
     @Synchronized
     fun applyPack(gz: File): String? {
-        val database = db ?: return null
-        val tmp = File(context.cacheDir, "pack-${System.nanoTime()}.db")
-        try {
-            GZIPInputStream(gz.inputStream()).use { input -> FileOutputStream(tmp).use { input.copyTo(it) } }
-            val meta = HashMap<String, String>()
-            val tables = HashSet<String>()
-            SQLiteDatabase.openDatabase(tmp.absolutePath, null, SQLiteDatabase.OPEN_READONLY).use { pack ->
-                pack.rawQuery("SELECT key, value FROM meta", null).use { c -> while (c.moveToNext()) meta[c.getString(0)] = c.getString(1) }
-                pack.rawQuery("SELECT name FROM sqlite_master WHERE type = 'table'", null).use { c -> while (c.moveToNext()) tables.add(c.getString(0)) }
-            }
-            val id = meta["id"] ?: return null
-            val version = meta["version"] ?: return null
-
-            if ("addon_dict" in tables || "kaomoji_dict" in tables) {
-                database.execSQL("ATTACH DATABASE ? AS pack", arrayOf(tmp.absolutePath))
-                try {
-                    database.beginTransaction()
-                    try {
-                        if ("addon_dict" in tables) {
-                            database.delete("addon_dict", "source = ?", arrayOf(id))
-                            database.execSQL("INSERT INTO addon_dict SELECT reading, toneless, word, score, initials, finals, source FROM pack.addon_dict")
-                        }
-                        if ("kaomoji_dict" in tables) {
-                            database.delete("kaomoji_dict", null, null)
-                            database.execSQL("INSERT INTO kaomoji_dict (reading, kaomoji, category, priority) SELECT reading, kaomoji, category, priority FROM pack.kaomoji_dict")
-                        }
-                        val v = android.content.ContentValues().apply {
-                            put("id", id)
-                            put("grp", meta["group"] ?: "words")
-                            put("name", meta["name"] ?: id)
-                            put("description", meta["description"] ?: "")
-                            put("source", meta["source"] ?: "")
-                            put("license", meta["license"] ?: "")
-                            put("url", meta["url"] ?: "")
-                            put("version", version)
-                        }
-                        if (database.update("dict_packs", v, "id = ?", arrayOf(id)) == 0) {
-                            v.put("sort", 99)
-                            database.insert("dict_packs", null, v)
-                        }
-                        database.setTransactionSuccessful()
-                    } finally {
-                        database.endTransaction()
-                    }
-                } finally {
-                    database.execSQL("DETACH DATABASE pack")
-                }
-            }
-            if ("bigram" in tables) {
-                val bdb = bigramDb ?: return null
-                bdb.execSQL("CREATE TABLE IF NOT EXISTS pack_versions (id TEXT PRIMARY KEY, version TEXT NOT NULL)")
-                bdb.execSQL("ATTACH DATABASE ? AS pack", arrayOf(tmp.absolutePath))
-                try {
-                    bdb.beginTransaction()
-                    try {
-                        bdb.delete("bigram", "source = ?", arrayOf(id))
-                        bdb.execSQL("INSERT OR REPLACE INTO bigram (prev, next, score, source) SELECT prev, next, score, source FROM pack.bigram")
-                        bdb.execSQL("INSERT OR REPLACE INTO pack_versions (id, version) VALUES (?, ?)", arrayOf(id, version))
-                        bdb.setTransactionSuccessful()
-                    } finally {
-                        bdb.endTransaction()
-                    }
-                } finally {
-                    bdb.execSQL("DETACH DATABASE pack")
-                }
-            }
-            packCache = null
-            enabledBigramSources = null
-            bigramCache.evictAll()
-            invalidateCandidateCaches()
-            syncDictionarySources()
-            // 記下下載檔的版本與類型：啟動時比對用，不必每次都解壓縮資料包讀 meta
-            sourcePrefs.edit().putString("file:$id", version).putString("filegrp:$id", meta["group"] ?: "words").apply()
-            Log.i(TAG, "已套用資料包 $id $version")
-            return version
-        } catch (e: Exception) {
-            Log.e(TAG, "套用資料包失敗：${gz.name}", e)
-            return null
-        } finally {
-            tmp.delete()
-        }
+        val f = files.installPack(gz) ?: return null
+        remount(true)
+        Log.i(TAG, "已套用資料包 ${f.id} ${f.version}")
+        return f.version
     }
 
-    /** 移除只能線上安裝的資料包：資料整個刪掉，清單上回到「未安裝」 */
+    /** 移除只能線上安裝的資料包：檔案刪掉，清單上回到「未安裝」 */
     @Synchronized
     fun uninstallPack(id: String) {
-        File(packDir, "$id.db.gz").delete()
-        try {
-            db?.delete("dict", "source = ?", arrayOf(id))
-            db?.delete("addon_dict", "source = ?", arrayOf(id))
-            db?.delete("dict_packs", "id = ?", arrayOf(id))
-            bigramDb?.delete("bigram", "source = ?", arrayOf(id))
-            bigramDb?.delete("pack_versions", "id = ?", arrayOf(id))
-        } catch (e: Exception) {
-            Log.e(TAG, "移除資料包失敗：$id", e)
-        }
-        sourcePrefs.edit().remove(id).remove("ver:$id").remove("file:$id").remove("filegrp:$id").apply()
-        packCache = null
-        enabledBigramSources = null
-        bigramCache.evictAll()
-        invalidateCandidateCaches()
-    }
-
-    /**
-     * 下載過、比目前生效的版本新的資料包重新套用（App 內建詞庫改版覆蓋後）
-     * 版本與類型套用時就記在設定裡；只有舊版沒記到的才解壓縮讀 meta（輸入法常被系統重啟，啟動要快）
-     */
-    private fun reapplyDownloadedPacks() {
-        for (f in packDir.listFiles { f -> f.name.endsWith(".db.gz") } ?: return) {
-            val id = f.name.removeSuffix(".db.gz")
-            val known = sourcePrefs.getString("file:$id", null)
-            val info = if (known != null) Triple(id, known, sourcePrefs.getString("filegrp:$id", "words")!!)
-            else PackUpdater.readMeta(f, context.cacheDir) ?: continue
-            if (PackVersion.compare(info.second, installedPackVersion(info.first, info.third)) > 0) applyPack(f)
-        }
+        files.deletePack(id)
+        sourcePrefs.edit().remove(id).apply()
+        remount(true)
     }
 
     /**
@@ -2932,39 +2223,52 @@ class ScorpioDictManager private constructor(private val context: Context) {
      * 一般詞庫列「詞, 注音」；接續詞列「前詞 → 後詞」；Emoji 列「emoji, 關鍵字」；顏文字列「顏文字, 分類」
      */
     suspend fun browseDictionary(id: String, query: String, offset: Int, limit: Int): List<Pair<String, String>> = withContext(Dispatchers.IO) {
-        val like = "%${query.trim()}%"
-        val q = query.isNotBlank()
-        fun rows(database: SQLiteDatabase?, sql: String, args: Array<String>): List<Pair<String, String>> = try {
-            database?.rawQuery(sql, args)?.use { c ->
-                val out = ArrayList<Pair<String, String>>()
-                while (c.moveToNext()) out.add(c.getString(0) to (c.getString(1) ?: "").replace('-', ' '))
-                out
-            } ?: emptyList()
+        val q = query.trim()
+        fun String.has() = q.isEmpty() || contains(q, ignoreCase = true)
+        fun <T> page(rows: Sequence<T>) = rows.drop(offset).take(limit).toList()
+        val d = data
+        try {
+            when {
+                id == "emoji" -> {
+                    val e = d.emoji ?: return@withContext emptyList()
+                    val byEmoji = LinkedHashMap<String, MutableList<String>>()
+                    val order = ArrayList<Triple<String, String, Int>>((0 until e.size).map { e.row(it) })
+                    order.sortBy { it.third }
+                    for ((kw, emoji, _) in order) byEmoji.getOrPut(emoji) { ArrayList() }.add(kw)
+                    page(byEmoji.asSequence().filter { (emoji, kws) -> q.isEmpty() || emoji == q || kws.any { it.has() } }
+                        .map { (emoji, kws) -> emoji to kws.joinToString("、") })
+                }
+                id == "kaomoji" -> {
+                    val k = d.kaomoji ?: return@withContext emptyList()
+                    val order = (0 until k.size).sortedBy { k.priority(it) }
+                    val byKao = LinkedHashMap<String, MutableList<String>>()
+                    for (i in order) byKao.getOrPut(k.kaomoji(i)) { ArrayList() }.add(k.category(i))
+                    page(byKao.asSequence().filter { (kao, cats) -> q.isEmpty() || kao.has() || cats.any { it.has() } }
+                        .map { (kao, cats) -> kao to cats.joinToString("、") })
+                }
+                else -> {
+                    val f = loaded[id] ?: return@withContext emptyList()
+                    if (f.has("b.prev") && f.group == "bigram") {
+                        val b = BigramTable(f)
+                        page((0 until b.size).asSequence().map { b.byScore(it) }
+                            .filter { (prev, next) -> prev.has() || next.has() }
+                            .map { (prev, next) -> "$prev → $next" to "" })
+                    } else {
+                        val w = WordTable(f)
+                        page((0 until w.size).asSequence().map { w.scoreOrder(it) }
+                            .filter { !(id == "core" && w.word(it).startsWith("MACRO@")) }
+                            .filter { w.word(it).has() || w.reading(it).has() }
+                            .map { w.word(it) to w.reading(it).replace('-', ' ') })
+                    }
+                }
+            }
         } catch (e: Exception) {
             Log.e(TAG, "讀取詞庫內容失敗：$id", e)
             emptyList()
         }
-        val page = "LIMIT $limit OFFSET $offset"
-        when {
-            id == "core" -> rows(db, "SELECT word, reading FROM dict WHERE source IS NULL AND word NOT LIKE 'MACRO@%'" +
-                (if (q) " AND (word LIKE ? OR reading LIKE ?)" else "") + " ORDER BY score DESC $page", if (q) arrayOf(like, like) else emptyArray())
-            id == "emoji" -> rows(db, "SELECT emoji, group_concat(keyword, '、') FROM emoji_dict" +
-                (if (q) " WHERE keyword LIKE ? OR emoji = ?" else "") + " GROUP BY emoji ORDER BY MIN(priority) $page", if (q) arrayOf(like, query.trim()) else emptyArray())
-            id == "kaomoji" -> rows(db, "SELECT kaomoji, group_concat(category, '、') FROM kaomoji_dict" +
-                (if (q) " WHERE category LIKE ? OR kaomoji LIKE ?" else "") + " GROUP BY kaomoji ORDER BY MIN(priority) $page", if (q) arrayOf(like, like) else emptyArray())
-            id.startsWith("import:") -> rows(importDb, "SELECT word, reading FROM import_entries WHERE dict_id = ?" +
-                (if (q) " AND (word LIKE ? OR reading LIKE ?)" else "") + " ORDER BY score DESC $page",
-                if (q) arrayOf(id.removePrefix("import:"), like, like) else arrayOf(id.removePrefix("import:")))
-            packs().any { it.id == id && it.group == "bigram" } -> rows(bigramDb, "SELECT prev || ' → ' || next, '' FROM bigram WHERE source = ?" +
-                (if (q) " AND (prev LIKE ? OR next LIKE ?)" else "") + " ORDER BY score DESC $page", if (q) arrayOf(id, like, like) else arrayOf(id))
-            else -> rows(db, "SELECT word, reading FROM addon_dict WHERE source = ?" +
-                (if (q) " AND (word LIKE ? OR reading LIKE ?)" else "") + " ORDER BY score DESC $page", if (q) arrayOf(id, like, like) else arrayOf(id))
-        }
     }
 
     suspend fun setDictionaryEnabled(id: String, enabled: Boolean) = withContext(Dispatchers.IO) {
-        // 開關就是安裝：關掉時刪掉下載的新版資料包（省空間；再打開會重新下載最新版）
-        if (!enabled) File(packDir, "$id.db.gz").delete()
         when {
             id == "emoji" -> {
                 emojiEnabled = enabled
@@ -2976,26 +2280,15 @@ class ScorpioDictManager private constructor(private val context: Context) {
                 sourcePrefs.edit().putBoolean(id, enabled).apply()
                 invalidateCandidateCaches()
             }
-            packs().any { it.id == id && it.group == "bigram" } -> {
-                sourcePrefs.edit().putBoolean(id, enabled).apply()
-                enabledBigramSources = null
-                bigramCache.evictAll()
-                invalidateCandidateCaches()
-            }
-            addonPacks().any { it.id == id } -> {
-                sourcePrefs.edit().putBoolean(id, enabled).commit()
-                enabledBigramSources = null
-                bigramCache.evictAll()
-                syncDictionarySources()
-            }
-            !id.startsWith("import:") -> {
-                // 還沒安裝的線上資料包：先記住開關，下載套用後就照這個生效
-                sourcePrefs.edit().putBoolean(id, enabled).commit()
-            }
-            else -> {
+            id.startsWith("import:") -> {
                 val v = android.content.ContentValues().apply { put("enabled", if (enabled) 1 else 0) }
                 importDb?.update("import_dicts", v, "id = ?", arrayOf(id.removePrefix("import:")))
-                syncDictionarySources()
+                remount(false)
+            }
+            else -> {
+                // 附加詞庫、接續詞：存開關再重組。還沒安裝的線上資料包先記住開關，下載套用後就照這個生效
+                sourcePrefs.edit().putBoolean(id, enabled).commit()
+                if (loaded.containsKey(id)) remount(false)
             }
         }
     }
@@ -3004,7 +2297,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
         val n = id.removePrefix("import:")
         importDb?.delete("import_entries", "dict_id = ?", arrayOf(n))
         importDb?.delete("import_dicts", "id = ?", arrayOf(n))
-        syncDictionarySources()
+        remount(true)
     }
 
     data class ImportResult(val added: Int, val skipped: Int)
@@ -3058,25 +2351,19 @@ class ScorpioDictManager private constructor(private val context: Context) {
         } finally {
             imports.endTransaction()
         }
-        syncDictionarySources()
+        remount(false)
         ImportResult(entries.size, skipped)
     }
 
     /** 依主詞庫推讀音：最少切段（長詞優先，破音字跟著詞走），同段數取詞頻高的 */
     private fun guessReading(word: String, cache: HashMap<String, String?>): String? {
-        val database = db ?: return null
+        if (words.tables.isEmpty()) return null
         val cps = word.codePoints().toArray().map { String(Character.toChars(it)) }
         val n = cps.size
         if (n == 0) return null
         fun lookup(w: String): Pair<String, Double>? {
             if (cache.containsKey(w)) return cache[w]?.let { it.substringBefore('|') to it.substringAfter('|').toDouble() }
-            val hit = try {
-                database.rawQuery("SELECT reading, score FROM dict WHERE word = ? ORDER BY score DESC LIMIT 1", arrayOf(w)).use {
-                    if (it.moveToFirst()) it.getString(0) to it.getDouble(1) else null
-                }
-            } catch (e: Exception) {
-                null
-            }
+            val hit = words.byWord(w, 1).firstOrNull()?.let { it.reading to it.score }
             cache[w] = hit?.let { "${it.first}|${it.second}" }
             return hit
         }
@@ -3122,7 +2409,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
     suspend fun learningStats(): LearningStats = withContext(Dispatchers.IO) {
         LearningStats(
             words = countOf("SELECT count(DISTINCT word) FROM user_dict"),
-            userCreated = countOf("SELECT count(DISTINCT word) FROM user_dict WHERE word NOT IN (SELECT word FROM dict)"),
+            userCreated = user.words().count { !words.hasWord(it) },
             bigrams = countOf("SELECT count(*) FROM user_bigram"),
             englishWords = countOf("SELECT count(*) FROM user_english"),
             typos = countOf("SELECT count(*) FROM user_typo"),
@@ -3134,11 +2421,12 @@ class ScorpioDictManager private constructor(private val context: Context) {
     suspend fun userCreatedWords(limit: Int = 2000): List<Pair<String, Int>> = withContext(Dispatchers.IO) {
         val out = ArrayList<Pair<String, Int>>()
         try {
-            db?.rawQuery(
-                "SELECT word, sum(count) AS c, max(last_used) AS lu FROM user_dict u " +
-                    "WHERE word NOT IN (SELECT word FROM dict) GROUP BY word ORDER BY lu DESC LIMIT ?",
-                arrayOf(limit.toString())
-            )?.use { c -> while (c.moveToNext()) out.add(c.getString(0) to c.getInt(1)) }
+            db?.rawQuery("SELECT word, sum(count) AS c, max(last_used) AS lu FROM user_dict GROUP BY word ORDER BY lu DESC", null)?.use { c ->
+                while (c.moveToNext() && out.size < limit) {
+                    val w = c.getString(0)
+                    if (!words.hasWord(w)) out.add(w to c.getInt(1))
+                }
+            }
         } catch (e: Exception) {
             Log.e(TAG, "讀取自建詞失敗", e)
         }
@@ -3156,9 +2444,9 @@ class ScorpioDictManager private constructor(private val context: Context) {
             } finally {
                 database.endTransaction()
             }
+            user.clear()
             synchronized(typoMemory) { typoMemory.clear() }
             candidatesCache.evictAll()
-        userQueryCache.evictAll()  // 只動到個人學習資料
             userOnlyCache.evictAll()
             subSyllableCache.evictAll()
             true
@@ -3202,42 +2490,25 @@ class ScorpioDictManager private constructor(private val context: Context) {
         val list = mutableListOf<String>()
 
         // 1. 個人學習的接續詞（最優先）
-        val database = db
-        if (database != null) {
-            try {
-                database.rawQuery(
-                    // 不預測跟上一個詞一樣的多字詞（連點兩下同一個候選留下的紀錄，會讓候選看起來按了沒消失）；
-                    // 單字疊字（哈→哈）照常
-                    "SELECT next_word FROM user_bigram WHERE prev_word = ? AND (next_word != prev_word OR length(next_word) = 1) " +
-                        "ORDER BY count DESC, last_used DESC LIMIT 6",
-                    arrayOf(prevWord)
-                ).use { cursor ->
-                    while (cursor.moveToNext()) list.add(cursor.getString(0))
-                }
-            } catch (e: Exception) {
-                // Ignore
-            }
-        }
+        // 不預測跟上一個詞一樣的多字詞（連點兩下同一個候選留下的紀錄，會讓候選看起來按了沒消失）；單字疊字（哈→哈）照常
+        list.addAll(user.nextRecent(prevWord, 6) { it.next != it.prev || it.next.codePointCount(0, it.next.length) == 1 })
 
         // 2. 靜態 Bigram 語料接續詞（依搭配機率排序）；整詞查不到時退回以最後一字查詢
-        val bdb = bigramDb
-        if (bdb != null) {
+        val tables = data.allBigrams
+        if (tables.isNotEmpty()) {
             val keys = LinkedHashSet<String>()
             keys.add(prevWord)
             if (prevWord.length > 1) keys.add(prevWord.takeLast(1))
             for (key in keys) {
-                try {
-                    bdb.rawQuery(
-                        "SELECT next FROM bigram WHERE prev = ? ORDER BY score DESC LIMIT 14",
-                        arrayOf(key)
-                    ).use { cursor ->
-                        while (cursor.moveToNext()) {
-                            val w = cursor.getString(0)
-                            if (!list.contains(w) && isRenderable(w)) list.add(w)
-                        }
-                    }
-                } catch (e: Exception) {
-                    // Ignore
+                val hits = ArrayList<Pair<String, Double>>()
+                for ((_, t) in tables) t.forEach(key, 14) { next, score -> hits.add(next to score) }
+                hits.sortByDescending { it.second }
+                var taken = 0
+                val seen = HashSet<String>()
+                for ((w, _) in hits) {
+                    if (!seen.add(w)) continue
+                    if (++taken > 14) break
+                    if (!list.contains(w) && isRenderable(w)) list.add(w)
                 }
                 if (list.size >= 10) break
             }
@@ -3246,85 +2517,34 @@ class ScorpioDictManager private constructor(private val context: Context) {
     }
 
     suspend fun getEmojiCategories(): List<String> = withContext(Dispatchers.IO) {
-        val database = db ?: return@withContext emptyList()
-        val list = mutableListOf<String>()
-        try {
-            database.rawQuery("SELECT DISTINCT category FROM emoji_category_dict ORDER BY rowid ASC", null).use { cursor ->
-                while (cursor.moveToNext()) {
-                    list.add(cursor.getString(0))
-                }
-            }
-        } catch (e: Exception) {
-            // Ignore
-        }
-        return@withContext list
+        data.emoji?.categories() ?: emptyList()
     }
 
     suspend fun getEmojisByCategory(category: String): List<String> = withContext(Dispatchers.IO) {
-        val database = db ?: return@withContext emptyList()
-        val list = mutableListOf<String>()
-        try {
-            database.rawQuery(
-                "SELECT emoji FROM emoji_category_dict WHERE category = ? ORDER BY priority ASC",
-                arrayOf(category)
-            ).use { cursor ->
-                while (cursor.moveToNext()) {
-                    list.add(cursor.getString(0))
-                }
-            }
-        } catch (e: Exception) {
-            // Ignore
-        }
-        return@withContext list
+        data.emoji?.byCategory(category) ?: emptyList()
     }
 
     suspend fun getKaomojiCategories(): List<String> = withContext(Dispatchers.IO) {
-        val database = db ?: return@withContext emptyList()
-        val list = mutableListOf<String>()
-        try {
-            database.rawQuery("SELECT category FROM kaomoji_dict GROUP BY category ORDER BY MIN(priority)", null).use { cursor ->
-                while (cursor.moveToNext()) {
-                    list.add(cursor.getString(0))
-                }
-            }
-        } catch (e: Exception) {
-            // Ignore
-        }
-        return@withContext list
+        data.kaomoji?.categories() ?: emptyList()
     }
 
     suspend fun getKaomojisByCategory(category: String): List<String> = withContext(Dispatchers.IO) {
-        val database = db ?: return@withContext emptyList()
-        val list = mutableListOf<String>()
-        try {
-            database.rawQuery("SELECT kaomoji FROM kaomoji_dict WHERE category = ? ORDER BY priority ASC", arrayOf(category)).use { cursor ->
-                while (cursor.moveToNext()) {
-                    list.add(cursor.getString(0))
-                }
-            }
-        } catch (e: Exception) {
-            // Ignore
-        }
-        return@withContext list
+        data.kaomoji?.byCategory(category) ?: emptyList()
     }
 
     // 放在類別最後：所有欄位都初始化完才開資料庫與背景執行緒
     // （放前面時 loadTypoMemory 等會碰到還沒建好的欄位而中斷初始化，後面的索引與整理都沒做到）
     init {
-        initDatabase()
-        initBigramDb()
+        // 詞庫檔（mmap）先掛上來：學習紀錄校正讀音要查主詞庫
+        remount(true, updateSpatial = false)
+        initUserDatabase()
         spatial.restore(spatialPrefs.getString(PREF_SPATIAL_BIAS, null))
-        // 背景預先載入按鍵當下要用的資料：第一個按鍵就有音節先驗與英文字母先驗
+        // 背景預先載入按鍵當下要用的資料：第一個按鍵就有音節先驗
         Thread {
-            // 詞庫檔被 App 內建的新版覆蓋時，之前下載、比內建新的資料包要重新套用
-            reapplyDownloadedPacks()
-            // 附加／匯入詞庫依開關套進主詞庫（新版詞庫檔覆蓋後要重新套）
-            syncDictionarySources()
             if (spatial.syllablePrefixes == null) spatial.setSyllableFrequencies(syllableFrequencies())
-            englishIndex()
-            // 倉頡碼表 2.8 萬筆，只有開了倉頡或速成才預先載入（沒開就等第一次用到）
+            // 倉頡碼表只有開了倉頡或速成才預先把速成對照表建好（沒開就等第一次用到）
             val methods = ChineseMethod.enabled(context.getSharedPreferences("scorpio_ime_prefs", Context.MODE_PRIVATE))
-            if (ChineseMethod.CANGJIE in methods || ChineseMethod.QUICK in methods) cangjieIndex()
+            if (ChineseMethod.CANGJIE in methods || ChineseMethod.QUICK in methods) data.cangjie?.quick?.size
             warmFirstKeys()
         }.start()
     }

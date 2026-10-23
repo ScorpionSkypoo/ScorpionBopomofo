@@ -18,11 +18,11 @@ class PackUpdaterTest {
     private val manifest = """
         {"schema": 1, "packs": [
           {"id": "trendy", "group": "words", "name": "流行與口語用語", "version": "2026.10.30", "size": 10,
-           "sha256": "ab", "url": "https://example.com/trendy.db.gz", "minAppVersion": 103},
+           "sha256": "ab", "url": "https://example.com/trendy.scd.gz", "minAppVersion": 103},
           {"id": "bg_wiki", "group": "bigram", "name": "維基百科", "version": "2026.10.23", "size": 20,
-           "sha256": "cd", "url": "https://example.com/bg_wiki.db.gz", "minAppVersion": 103},
+           "sha256": "cd", "url": "https://example.com/bg_wiki.scd.gz", "minAppVersion": 103},
           {"id": "layout_x", "group": "layout", "name": "未來的版面", "version": "2027.1.1", "size": 1,
-           "sha256": "ef", "url": "https://example.com/x", "minAppVersion": 999}
+           "sha256": "ef", "url": "https://example.com/x.scd.gz", "minAppVersion": 999}
         ], "layouts": []}
     """.trimIndent()
 
@@ -40,6 +40,12 @@ class PackUpdaterTest {
         val installed = mapOf("trendy" to "2026.10.23", "bg_wiki" to "2026.10.23")
         val p = PackUpdater.pending(packs, 105) { installed[it.id] ?: "" }
         assertEquals(listOf("trendy"), p.map { it.id })
+    }
+
+    @Test
+    fun legacySqlitePacksAreIgnored() {
+        val legacy = """{"schema": 1, "packs": [{"id": "old", "version": "1", "sha256": "ab", "url": "https://example.com/old.db.gz"}]}"""
+        assertEquals(emptyList<PackUpdater.ManifestPack>(), PackUpdater.parseManifest(legacy))
     }
 
     @Test
