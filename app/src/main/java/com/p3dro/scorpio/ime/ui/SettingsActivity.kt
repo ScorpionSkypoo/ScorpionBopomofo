@@ -46,6 +46,8 @@ class SettingsActivity : AppCompatActivity() {
         ENGINE("選字引擎"),
         DICTIONARY("字典與學習"),
         USER_WORDS("自建詞"),
+        DICT_DETAIL("詞庫內容"),
+        PLUGINS("擴充功能"),
         ABOUT("關於")
     }
 
@@ -152,7 +154,18 @@ class SettingsActivity : AppCompatActivity() {
 
         val needsSetup = !isImeEnabled() || !isImeSelected()
         stack.add(if (needsSetup && !prefs.getBoolean("onboarding_skipped", false)) Page.ONBOARDING else Page.HOME)
+        if (intent?.getStringExtra(EXTRA_PAGE) == "plugins") stack.add(Page.PLUGINS)
         render(1)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        // 從鍵盤的擴充功能面板點過來
+        if (intent.getStringExtra(EXTRA_PAGE) == "plugins" && stack.lastOrNull() != Page.PLUGINS) open(Page.PLUGINS)
+    }
+
+    companion object {
+        const val EXTRA_PAGE = "page"
     }
 
     override fun onResume() {
@@ -309,6 +322,8 @@ class SettingsActivity : AppCompatActivity() {
             Page.ENGINE -> buildEngine()
             Page.DICTIONARY -> buildDictionary()
             Page.USER_WORDS -> buildUserWords()
+            Page.DICT_DETAIL -> buildDictDetail()
+            Page.PLUGINS -> buildPlugins()
             Page.ABOUT -> buildAbout()
         }
         if (direction == 0) {
@@ -422,7 +437,11 @@ class SettingsActivity : AppCompatActivity() {
         texts(textColumn(row(parent, icon, clickable = false)), title, summary)
     }
 
-    private fun switchRow(parent: LinearLayout, title: String, summary: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+    /** onRowClick 有給時，點列本身做那件事（例如看詞庫內容），只有開關切換開關 */
+    private fun switchRow(
+        parent: LinearLayout, title: String, summary: String, checked: Boolean,
+        onRowClick: (() -> Unit)? = null, onChange: (Boolean) -> Unit
+    ) {
         val row = row(parent, null, clickable = true)
         texts(textColumn(row), title, summary)
         val sw = com.google.android.material.materialswitch.MaterialSwitch(this).apply { isChecked = checked }
@@ -430,7 +449,7 @@ class SettingsActivity : AppCompatActivity() {
         row.addView(sw, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
             marginStart = dp(16)
         })
-        row.setOnClickListener { sw.toggle() }
+        row.setOnClickListener { if (onRowClick != null) onRowClick() else sw.toggle() }
     }
 
     private fun boolSwitch(parent: LinearLayout, title: String, summary: String, key: String, default: Boolean) =
@@ -612,6 +631,7 @@ class SettingsActivity : AppCompatActivity() {
         navRow(nav, R.drawable.ic_set_engine, "輸入與按鍵", "震動、空白鍵、長按功能") { open(Page.INPUT) }
         navRow(nav, R.drawable.ic_set_book, "選字引擎", "整句選字、動態感應區、按鍵校正") { open(Page.ENGINE) }
         navRow(nav, R.drawable.ic_set_book, "字典與學習", "詞庫開關、匯入匯出、學習統計、自建詞") { open(Page.DICTIONARY) }
+        navRow(nav, R.drawable.ic_set_extension, "擴充功能", "工具列的日期時間、常用符號、文字工具等，可以線上安裝") { open(Page.PLUGINS) }
         navRow(nav, R.drawable.ic_set_info, "關於", "版本與資料來源") { open(Page.ABOUT) }
     }
 
@@ -863,38 +883,65 @@ class SettingsActivity : AppCompatActivity() {
             }
         }
 
-        sectionTitle("接續詞語料")
-        val phrases = card()
-        infoRow(phrases, "詞與詞怎麼接", "影響整句選字與選完字後聯想的下一個詞，不影響打得出哪些詞。開了多個來源時取搭配最強的那個。")
-        val phrasesLoading = loadingText(phrases)
-
-        // 詞庫清單會隨匯入一直變長，放在頁面最下面，免得把其他區塊擠下去
-        sectionTitle("詞庫")
-        val io = card()
-        navRow(io, null, "匯入詞庫", "每行一個詞的文字檔，也能直接匯入小麥注音、新酷音、RIME、Gboard 的詞庫檔；沒寫注音會自動推") {
-            importDict.launch(arrayOf("text/*", "application/octet-stream"))
+        // 詞庫分組列出；匯入的詞庫會一直變多，放在最下面
+        // 開關就是安裝：打開時馬上抓線上最新版，之後自動更新；關掉就停用並刪掉下載的資料。點一下可以看詞庫內容
+        val groups = linkedMapOf(
+            "basic" to ("基本" to null),
+            "places" to ("地名與地標" to null),
+            "symbols" to ("表情符號" to null),
+            "bigram" to ("接續詞語料" to "影響整句選字與選完字後聯想的下一個詞，不影響打得出哪些詞。開了多個來源時取搭配最強的那個。"),
+            "import" to ("匯入的詞庫" to null)
+        )
+        val cards = HashMap<String, LinearLayout>()
+        val loadings = HashMap<String, View>()
+        for ((key, v) in groups) {
+            sectionTitle(v.first)
+            val c = card()
+            if (v.second != null) infoRow(c, "詞與詞怎麼接", v.second)
+            if (key == "import") {
+                navRow(c, null, "匯入詞庫", "每行一個詞的文字檔，也能直接匯入小麥注音、新酷音、RIME、Gboard 的詞庫檔；沒寫注音會自動推") {
+                    importDict.launch(arrayOf("text/*", "application/octet-stream"))
+                }
+                navRow(c, null, "匯出個人詞庫", "把學過的詞與自建詞存成文字檔，換手機或備份時可以再匯入") {
+                    exportDict.launch("scorpio_個人詞庫.txt")
+                }
+            }
+            cards[key] = c
+            loadings[key] = loadingText(c)
         }
-        navRow(io, null, "匯出個人詞庫", "把學過的詞與自建詞存成文字檔，換手機或備份時可以再匯入") {
-            exportDict.launch("scorpio_個人詞庫.txt")
+        fun groupOf(d: ScorpioDictManager.DictionaryInfo) = when {
+            d.group == "bigram" -> "bigram"
+            d.removable -> "import"
+            d.id in setOf("emoji", "kaomoji") -> "symbols"
+            d.id.contains("places") || d.id.contains("landmarks") -> "places"
+            else -> "basic"
         }
-        val wordList = card()
-        val listLoading = loadingText(wordList)
         lifecycleScope.launch {
             val dicts = dict.dictionaries()
             if (stack.lastOrNull() != Page.DICTIONARY) return@launch
-            wordList.removeView(listLoading)
-            phrases.removeView(phrasesLoading)
+            for ((key, c) in cards) c.removeView(loadings[key])
             for (d in dicts) {
+                val list = cards.getValue(groupOf(d))
                 val bigram = d.group == "bigram"
-                val list = if (bigram) phrases else wordList
                 val summary = "${d.description}・${"%,d".format(d.count)} ${if (bigram) "組" else "個"}" +
                     (d.source?.let { "\n來源：$it" } ?: "") + (d.version?.let { "\n版本 $it" } ?: "")
+                val openDetail = {
+                    detailDict = d
+                    open(Page.DICT_DETAIL)
+                }
                 if (!d.toggleable) {
-                    infoRow(list, d.name, summary)
+                    navRow(list, null, d.name, summary) { openDetail() }
                     continue
                 }
-                switchRow(list, d.name, summary, d.enabled) { on ->
-                    lifecycleScope.launch { dict.setDictionaryEnabled(d.id, on) }
+                switchRow(list, d.name, summary, d.enabled, onRowClick = openDetail) { on ->
+                    lifecycleScope.launch {
+                        dict.setDictionaryEnabled(d.id, on)
+                        // 打開時抓線上最新版（匯入的、Emoji 沒有線上版本）
+                        if (on && !d.removable && d.id != "emoji" && com.p3dro.scorpio.ime.engine.PackUpdater.ensureLatest(this@SettingsActivity, d.id)) {
+                            android.widget.Toast.makeText(this@SettingsActivity, "已更新「${d.name}」到最新版", android.widget.Toast.LENGTH_SHORT).show()
+                            if (stack.lastOrNull() == Page.DICTIONARY) render()
+                        }
+                    }
                 }
                 if (d.removable) {
                     val r = row(list, null, clickable = false)
@@ -914,6 +961,149 @@ class SettingsActivity : AppCompatActivity() {
                             }
                         }
                     })
+                }
+            }
+        }
+    }
+
+    // ---------- 詞庫內容 ----------
+
+    private var detailDict: ScorpioDictManager.DictionaryInfo? = null
+
+    private fun buildDictDetail() {
+        val d = detailDict ?: return
+        titleView.text = d.name
+        val head = card()
+        infoRow(head, d.name, "${d.description}・${"%,d".format(d.count)} ${if (d.group == "bigram") "組" else "個"}" +
+            (d.source?.let { "\n來源：$it" } ?: "") + (d.version?.let { "\n版本 $it" } ?: ""))
+        val searchCard = card()
+        val layout = com.google.android.material.textfield.TextInputLayout(
+            this, null, com.google.android.material.R.attr.textInputOutlinedStyle
+        ).apply {
+            hint = "搜尋詞或注音"
+            setBoxCornerRadii(dp(16).toFloat(), dp(16).toFloat(), dp(16).toFloat(), dp(16).toFloat())
+            setStartIconDrawable(android.R.drawable.ic_menu_search)
+        }
+        val input = com.google.android.material.textfield.TextInputEditText(layout.context).apply {
+            isSingleLine = true
+            imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH
+        }
+        layout.addView(input)
+        searchCard.addView(layout, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            setMargins(dp(16), dp(12), dp(16), dp(12))
+        })
+        val results = card()
+        val pageSize = 100
+        var offset = 0
+        var query = ""
+        var job: kotlinx.coroutines.Job? = null
+        var more: View? = null
+
+        fun load(reset: Boolean) {
+            job?.cancel()
+            if (reset) {
+                offset = 0
+                results.removeAllViews()
+            }
+            more?.let { results.removeView(it) }
+            val loading = loadingText(results)
+            job = lifecycleScope.launch {
+                val rows = dict.browseDictionary(d.id, query, offset, pageSize)
+                results.removeView(loading)
+                if (rows.isEmpty() && offset == 0) {
+                    infoRow(results, if (query.isBlank()) "這個詞庫是空的" else "找不到「$query」", null)
+                    return@launch
+                }
+                for ((main, sub) in rows) {
+                    val r = row(results, null, clickable = false)
+                    r.minimumHeight = dp(48)
+                    r.setPadding(dp(20), dp(8), dp(20), dp(8))
+                    texts(textColumn(r), main, sub.ifEmpty { null })
+                }
+                offset += rows.size
+                if (rows.size == pageSize) {
+                    more = button(results, "載入更多", filled = false) { load(false) }
+                }
+            }
+        }
+        input.addTextChangedListener(object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+            override fun afterTextChanged(s: android.text.Editable?) {
+                val q = s?.toString().orEmpty()
+                content.removeCallbacks(searchRunnable)
+                searchRunnable = Runnable {
+                    query = q
+                    load(true)
+                }
+                content.postDelayed(searchRunnable, 300)
+            }
+        })
+        load(true)
+    }
+
+    private var searchRunnable: Runnable? = null
+
+    // ---------- 擴充功能 ----------
+
+    private fun buildPlugins() {
+        val intro = card()
+        infoRow(intro, "工具列的擴充功能",
+            "裝好後在鍵盤工具列的方塊按鈕裡使用，也可以釘選到工具列上。擴充功能只能插入文字、轉換你選取的文字、用選取的文字開網址；" +
+                "不含程式碼，也讀不到你打的字，只有你點了它的項目時才會用到目前選取的文字。")
+        val installed = com.p3dro.scorpio.ime.engine.Plugins.installed(this)
+        if (installed.isNotEmpty()) {
+            sectionTitle("已安裝")
+            val c = card()
+            for (p in installed) {
+                switchRow(c, "${p.icon} ${p.name}".trim(), "${p.description}\n版本 ${p.version}・釘選到工具列",
+                    com.p3dro.scorpio.ime.engine.Plugins.isPinned(this, p.id)) { on ->
+                    com.p3dro.scorpio.ime.engine.Plugins.setPinned(this, p.id, on)
+                }
+                val r = row(c, null, clickable = false)
+                r.setPadding(dp(16), 0, dp(4), dp(4))
+                r.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
+                r.addView(TextView(this).apply {
+                    text = "移除"
+                    textSize = 14f
+                    setTextColor(cError)
+                    setPadding(dp(16), dp(8), dp(16), dp(8))
+                    setOnClickListener {
+                        com.p3dro.scorpio.ime.engine.Plugins.uninstall(this@SettingsActivity, p.id)
+                        render()
+                    }
+                })
+            }
+        }
+        sectionTitle("可以安裝")
+        val avail = card()
+        val loading = loadingText(avail)
+        lifecycleScope.launch {
+            val list = com.p3dro.scorpio.ime.engine.PackUpdater.availablePlugins(this@SettingsActivity)
+            if (stack.lastOrNull() != Page.PLUGINS) return@launch
+            avail.removeView(loading)
+            val ids = installed.map { it.id }.toSet()
+            val todo = list?.filter { it.id !in ids }
+            when {
+                list == null -> infoRow(avail, "連不上擴充功能清單", "確認網路後再試一次。")
+                todo.isNullOrEmpty() -> infoRow(avail, "全部都裝好了", null)
+                else -> for (p in todo) {
+                    val r = row(avail, null, clickable = false)
+                    texts(textColumn(r), "${p.icon} ${p.name}".trim(), p.description.ifEmpty { null })
+                    val b = MaterialButton(this@SettingsActivity, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+                        text = "安裝"
+                        isAllCaps = false
+                    }
+                    b.setOnClickListener {
+                        b.isEnabled = false
+                        b.text = "安裝中…"
+                        lifecycleScope.launch {
+                            val ok = com.p3dro.scorpio.ime.engine.PackUpdater.installPlugin(this@SettingsActivity, p)
+                            android.widget.Toast.makeText(this@SettingsActivity, if (ok) "已安裝「${p.name}」" else "安裝失敗", android.widget.Toast.LENGTH_SHORT).show()
+                            if (stack.lastOrNull() == Page.PLUGINS) render()
+                        }
+                    }
+                    r.addView(b, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = dp(12) })
                 }
             }
         }

@@ -46,6 +46,18 @@ object PackUpdater {
         val minAppVersion: Int
     )
 
+    data class ManifestPlugin(
+        val id: String,
+        val name: String,
+        val icon: String,
+        val description: String,
+        val version: String,
+        val size: Long,
+        val sha256: String,
+        val url: String,
+        val minAppVersion: Int
+    )
+
     data class Result(val updated: List<Pair<String, String>>, val failed: List<String>, val error: String? = null)
 
     fun parseManifest(json: String): List<ManifestPack> {
@@ -59,6 +71,88 @@ object PackUpdater {
                 o.getString("version"), o.optLong("size", -1), o.getString("sha256"), o.getString("url"),
                 o.optInt("minAppVersion", 0)
             )
+        }
+    }
+
+    fun parsePlugins(json: String): List<ManifestPlugin> {
+        val root = JSONObject(json)
+        if (root.optInt("schema", 0) > SUPPORTED_SCHEMA) return emptyList()
+        val arr = root.optJSONArray("plugins") ?: return emptyList()
+        return (0 until arr.length()).map { i ->
+            val o = arr.getJSONObject(i)
+            ManifestPlugin(
+                o.getString("id"), o.optString("name", o.getString("id")), o.optString("icon", ""),
+                o.optString("description", ""), o.getString("version"), o.optLong("size", -1),
+                o.getString("sha256"), o.getString("url"), o.optInt("minAppVersion", 0)
+            )
+        }
+    }
+
+    private fun appVersion(context: Context): Long = try {
+        androidx.core.content.pm.PackageInfoCompat.getLongVersionCode(context.packageManager.getPackageInfo(context.packageName, 0))
+    } catch (e: Exception) {
+        0L
+    }
+
+    /** 下載到 part 檔並驗證大小與 sha256；不符就丟例外 */
+    private fun download(url: String, size: Long, sha: String, part: File) {
+        fetch(url, part)
+        if ((size >= 0 && part.length() != size) || !sha256(part).equals(sha, ignoreCase = true)) {
+            part.delete()
+            throw java.io.IOException("檔案校驗不符")
+        }
+    }
+
+    /** 下載並套用一個資料包（開關打開時、或有新版時） */
+    private fun installPack(context: Context, dict: ScorpioDictManager, p: ManifestPack): Boolean {
+        val part = File(dict.packDir, "${p.id}.part")
+        return try {
+            download(p.url, p.size, p.sha256, part)
+            val target = File(dict.packDir, "${p.id}.db.gz")
+            if (!part.renameTo(target)) part.copyTo(target, overwrite = true)
+            dict.applyPack(target) != null
+        } catch (e: Exception) {
+            Log.w(TAG, "更新 ${p.id} 失敗", e)
+            false
+        } finally {
+            part.delete()
+        }
+    }
+
+    /** 開關打開時呼叫：線上有比手機上新的版本就馬上下載套用；連不上就沿用手機上的資料 */
+    suspend fun ensureLatest(context: Context, id: String): Boolean = withContext(Dispatchers.IO) {
+        val dict = ScorpioDictManager.getInstance(context.applicationContext)
+        val p = try {
+            parseManifest(fetch(MANIFEST_URL) ?: "").firstOrNull { it.id == id }
+        } catch (e: Exception) {
+            null
+        } ?: return@withContext false
+        if (p.minAppVersion > appVersion(context) || PackVersion.compare(p.version, dict.installedPackVersion(p.id, p.group)) <= 0) {
+            return@withContext false
+        }
+        installPack(context, dict, p)
+    }
+
+    /** 設定頁列出可以安裝的外掛 */
+    suspend fun availablePlugins(context: Context): List<ManifestPlugin>? = withContext(Dispatchers.IO) {
+        try {
+            val v = appVersion(context)
+            parsePlugins(fetch(MANIFEST_URL) ?: "").filter { it.minAppVersion <= v }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    suspend fun installPlugin(context: Context, p: ManifestPlugin): Boolean = withContext(Dispatchers.IO) {
+        val part = File(context.cacheDir, "plugin-${p.id}.part")
+        try {
+            download(p.url, p.size, p.sha256, part)
+            Plugins.install(context, part.readText()) != null
+        } catch (e: Exception) {
+            Log.w(TAG, "安裝外掛 ${p.id} 失敗", e)
+            false
+        } finally {
+            part.delete()
         }
     }
 
@@ -117,13 +211,11 @@ object PackUpdater {
 
     suspend fun checkAndUpdate(context: Context): Result = withContext(Dispatchers.IO) {
         val dict = ScorpioDictManager.getInstance(context.applicationContext)
-        val appVersion = try {
-            androidx.core.content.pm.PackageInfoCompat.getLongVersionCode(context.packageManager.getPackageInfo(context.packageName, 0))
-        } catch (e: Exception) {
-            0L
-        }
+        val appVersion = appVersion(context)
+        val json: String
         val manifest = try {
-            parseManifest(fetch(MANIFEST_URL) ?: "")
+            json = fetch(MANIFEST_URL) ?: ""
+            parseManifest(json)
         } catch (e: Exception) {
             Log.w(TAG, "讀取更新清單失敗", e)
             return@withContext Result(emptyList(), emptyList(), "連不上更新伺服器")
@@ -131,23 +223,16 @@ object PackUpdater {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putLong(PREF_LAST_CHECK, System.currentTimeMillis()).apply()
         val updated = ArrayList<Pair<String, String>>()
         val failed = ArrayList<String>()
-        for (p in pending(manifest, appVersion) { dict.installedPackVersion(it.id, it.group) }) {
-            val part = File(dict.packDir, "${p.id}.part")
-            try {
-                fetch(p.url, part)
-                if ((p.size >= 0 && part.length() != p.size) || !sha256(part).equals(p.sha256, ignoreCase = true)) {
-                    throw java.io.IOException("檔案校驗不符")
-                }
-                val target = File(dict.packDir, "${p.id}.db.gz")
-                if (!part.renameTo(target)) {
-                    part.copyTo(target, overwrite = true)
-                }
-                if (dict.applyPack(target) != null) updated.add(p.name to p.version) else failed.add(p.name)
-            } catch (e: Exception) {
-                Log.w(TAG, "更新 ${p.id} 失敗", e)
-                failed.add(p.name)
-            } finally {
-                part.delete()
+        // 只更新有開的詞庫（開關就是安裝）
+        val enabled = manifest.filter { dict.isPackEnabled(it.id, it.group) }
+        for (p in pending(enabled, appVersion) { dict.installedPackVersion(it.id, it.group) }) {
+            if (installPack(context, dict, p)) updated.add(p.name to p.version) else failed.add(p.name)
+        }
+        // 已安裝的外掛有新版就更新
+        for (p in parsePlugins(json)) {
+            val have = Plugins.installedVersion(context, p.id) ?: continue
+            if (p.minAppVersion <= appVersion && PackVersion.compare(p.version, have) > 0) {
+                if (installPlugin(context, p)) updated.add(p.name to p.version) else failed.add(p.name)
             }
         }
         Result(updated, failed)

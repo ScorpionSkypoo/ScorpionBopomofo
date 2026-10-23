@@ -2653,6 +2653,12 @@ class ScorpioDictManager private constructor(private val context: Context) {
 
     // ---------- 線上更新的資料包（見 PackUpdater） ----------
 
+    /** 詞庫有沒有開（開關就是安裝：只有開著的會自動更新） */
+    fun isPackEnabled(id: String, group: String): Boolean = when (group) {
+        "kaomoji" -> kaomojiEnabled
+        else -> addonEnabled(id)
+    }
+
     /** 下載的資料包存在這裡（<id>.db.gz），App 改版覆蓋詞庫檔後用來重新套用 */
     val packDir: File get() = File(context.filesDir, "packs").apply { mkdirs() }
 
@@ -2773,7 +2779,44 @@ class ScorpioDictManager private constructor(private val context: Context) {
         }
     }
 
+    /**
+     * 詞庫內容（設定頁點進去看）：回傳（主要文字, 次要文字）；query 有值時只列包含它的
+     * 一般詞庫列「詞, 注音」；接續詞列「前詞 → 後詞」；Emoji 列「emoji, 關鍵字」；顏文字列「顏文字, 分類」
+     */
+    suspend fun browseDictionary(id: String, query: String, offset: Int, limit: Int): List<Pair<String, String>> = withContext(Dispatchers.IO) {
+        val like = "%${query.trim()}%"
+        val q = query.isNotBlank()
+        fun rows(database: SQLiteDatabase?, sql: String, args: Array<String>): List<Pair<String, String>> = try {
+            database?.rawQuery(sql, args)?.use { c ->
+                val out = ArrayList<Pair<String, String>>()
+                while (c.moveToNext()) out.add(c.getString(0) to (c.getString(1) ?: "").replace('-', ' '))
+                out
+            } ?: emptyList()
+        } catch (e: Exception) {
+            Log.e(TAG, "讀取詞庫內容失敗：$id", e)
+            emptyList()
+        }
+        val page = "LIMIT $limit OFFSET $offset"
+        when {
+            id == "core" -> rows(db, "SELECT word, reading FROM dict WHERE source IS NULL AND word NOT LIKE 'MACRO@%'" +
+                (if (q) " AND (word LIKE ? OR reading LIKE ?)" else "") + " ORDER BY score DESC $page", if (q) arrayOf(like, like) else emptyArray())
+            id == "emoji" -> rows(db, "SELECT emoji, group_concat(keyword, '、') FROM emoji_dict" +
+                (if (q) " WHERE keyword LIKE ? OR emoji = ?" else "") + " GROUP BY emoji ORDER BY MIN(priority) $page", if (q) arrayOf(like, query.trim()) else emptyArray())
+            id == "kaomoji" -> rows(db, "SELECT kaomoji, group_concat(category, '、') FROM kaomoji_dict" +
+                (if (q) " WHERE category LIKE ? OR kaomoji LIKE ?" else "") + " GROUP BY kaomoji ORDER BY MIN(priority) $page", if (q) arrayOf(like, like) else emptyArray())
+            id.startsWith("import:") -> rows(importDb, "SELECT word, reading FROM import_entries WHERE dict_id = ?" +
+                (if (q) " AND (word LIKE ? OR reading LIKE ?)" else "") + " ORDER BY score DESC $page",
+                if (q) arrayOf(id.removePrefix("import:"), like, like) else arrayOf(id.removePrefix("import:")))
+            packs().any { it.id == id && it.group == "bigram" } -> rows(bigramDb, "SELECT prev || ' → ' || next, '' FROM bigram WHERE source = ?" +
+                (if (q) " AND (prev LIKE ? OR next LIKE ?)" else "") + " ORDER BY score DESC $page", if (q) arrayOf(id, like, like) else arrayOf(id))
+            else -> rows(db, "SELECT word, reading FROM addon_dict WHERE source = ?" +
+                (if (q) " AND (word LIKE ? OR reading LIKE ?)" else "") + " ORDER BY score DESC $page", if (q) arrayOf(id, like, like) else arrayOf(id))
+        }
+    }
+
     suspend fun setDictionaryEnabled(id: String, enabled: Boolean) = withContext(Dispatchers.IO) {
+        // 開關就是安裝：關掉時刪掉下載的新版資料包（省空間；再打開會重新下載最新版）
+        if (!enabled) File(packDir, "$id.db.gz").delete()
         when {
             id == "emoji" -> {
                 emojiEnabled = enabled
