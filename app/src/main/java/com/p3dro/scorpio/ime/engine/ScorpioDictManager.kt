@@ -755,7 +755,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
                 m[intended] = (m[intended] ?: 0) + 1
             }
             subSyllableCache.evictAll()
-            Log.i(TAG, "記住慣性打錯: $typed → $intended")
+            Log.i(TAG, "記住一筆慣性打錯")
         } catch (e: Exception) {
             Log.e(TAG, "更新 user_typo 失敗", e)
         }
@@ -1279,7 +1279,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
                 }
                 // 其他修正方式的整句也列在前排（ㄏㄣㄉㄨㄠ 最可能是「很多」，但「很屌」也要看得到，選過一次就會學起來）
                 repairAlternatives = scored.drop(1).take(4).mapNotNull { it.second?.fullSentence?.takeIf { s -> s.isNotEmpty() } }
-                Log.d(TAG, "鄰鍵修正: ${primaryInput.joinToString("-")} -> ${best.first.syllables.joinToString("-")} (懲罰 ${best.first.penalty})")
+                Log.d(TAG, "鄰鍵修正：${primaryInput.size} 個音節 (懲罰 ${best.first.penalty})")
             }
         }
 
@@ -1743,7 +1743,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
         val emojiGroup = (result.filter { it !in kaomojiSet && isSymbolOnly(it) } + emojiMore).distinct()
         val groups = CandidateGroups(result.toList(), words, emojiGroup, kaomojis.toList())
         candidatesCache.put(cacheKey, groups)
-        Log.d(TAG, "選字耗時 ${(System.nanoTime() - startNs) / 1_000_000}ms: ${allSegmentations.first().joinToString("-")}")
+        Log.d(TAG, "選字耗時 ${(System.nanoTime() - startNs) / 1_000_000}ms（${allSegmentations.first().size} 個音節）")
         return@withContext groups
     }
 
@@ -2411,7 +2411,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
     suspend fun recordSelection(reading: String, word: String) = withContext(Dispatchers.IO) {
         val database = db ?: return@withContext
         if (!isLearnable(reading, word)) {
-            Log.i(TAG, "略過學習（讀音音節數與字數不符或非漢字）: $word ($reading)")
+            Log.i(TAG, "略過學習（讀音音節數與字數不符或非漢字）")
             return@withContext
         }
         try {
@@ -2439,7 +2439,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
             candidatesCache.evictAll()
         userQueryCache.evictAll()  // 只動到個人學習資料
             userOnlyCache.evictAll()
-            Log.i(TAG, "智慧學習新紀錄: $word (讀音: $reading, 無聲調: $toneless, 聲母: $initials)")
+            Log.i(TAG, "智慧學習新紀錄（${word.length} 字）")
         } catch (e: Exception) {
             Log.e(TAG, "更新 user_dict 失敗", e)
         }
@@ -2465,7 +2465,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
                 "UPDATE user_bigram SET count = count + 1, last_used = ? WHERE prev_word = ? AND next_word = ?",
                 arrayOf(now, prevWord, nextWord)
             )
-            Log.i(TAG, "智慧學習關聯詞: $prevWord -> $nextWord")
+            Log.i(TAG, "智慧學習一組關聯詞")
         } catch (e: Exception) {
             Log.e(TAG, "更新 user_bigram 失敗", e)
         }
@@ -2492,10 +2492,10 @@ class ScorpioDictManager private constructor(private val context: Context) {
         userQueryCache.evictAll()  // 只動到個人學習資料
             userOnlyCache.evictAll()
             subSyllableCache.evictAll()
-            Log.i(TAG, "已自個人學習庫徹底刪除詞彙: $word")
+            Log.i(TAG, "已自個人學習庫刪除一個詞")
             true
         } catch (e: Exception) {
-            Log.e(TAG, "刪除個人學習詞彙失敗: $word", e)
+            Log.e(TAG, "刪除個人學習詞彙失敗", e)
             false
         }
     }
