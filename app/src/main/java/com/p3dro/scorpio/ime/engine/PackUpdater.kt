@@ -49,7 +49,9 @@ object PackUpdater {
         val license: String = "",
         /** false＝App 不內建、只能線上安裝 */
         val bundled: Boolean = true,
-        val rows: Int = 0
+        val rows: Int = 0,
+        /** 設定頁的分組：basic、places、symbols、terms、bigram */
+        val category: String = ""
     )
 
     data class ManifestPlugin(
@@ -76,7 +78,8 @@ object PackUpdater {
                 o.getString("id"), o.optString("group", "words"), o.optString("name", o.getString("id")),
                 o.getString("version"), o.optLong("size", -1), o.getString("sha256"), o.getString("url"),
                 o.optInt("minAppVersion", 0), o.optString("description", ""), o.optString("source", ""),
-                o.optString("license", ""), o.optBoolean("bundled", true), o.optInt("rows", 0)
+                o.optString("license", ""), o.optBoolean("bundled", true), o.optInt("rows", 0),
+                o.optString("category", "")
             )
         }
     }
@@ -102,8 +105,8 @@ object PackUpdater {
     }
 
     /** 下載到 part 檔並驗證大小與 sha256；不符就丟例外 */
-    private fun download(url: String, size: Long, sha: String, part: File) {
-        fetch(url, part)
+    private fun download(url: String, size: Long, sha: String, part: File, onProgress: ((Float) -> Unit)? = null) {
+        fetch(url, part, size, onProgress)
         if ((size >= 0 && part.length() != size) || !sha256(part).equals(sha, ignoreCase = true)) {
             part.delete()
             throw java.io.IOException("檔案校驗不符")
@@ -111,10 +114,12 @@ object PackUpdater {
     }
 
     /** 下載並套用一個資料包（開關打開時、或有新版時） */
-    private fun installPack(context: Context, dict: ScorpioDictManager, p: ManifestPack): Boolean {
+    /** onProgress：下載進度 0～1；下載完、開始套用時回報 -1（不確定進度） */
+    private fun installPack(context: Context, dict: ScorpioDictManager, p: ManifestPack, onProgress: ((Float) -> Unit)? = null): Boolean {
         val part = File(dict.packDir, "${p.id}.part")
         return try {
-            download(p.url, p.size, p.sha256, part)
+            download(p.url, p.size, p.sha256, part, onProgress)
+            onProgress?.invoke(-1f)
             val target = File(dict.packDir, "${p.id}.db.gz")
             if (!part.renameTo(target)) part.copyTo(target, overwrite = true)
             dict.applyPack(target) != null
@@ -127,7 +132,7 @@ object PackUpdater {
     }
 
     /** 開關打開時呼叫：線上有比手機上新的版本就馬上下載套用；連不上就沿用手機上的資料 */
-    suspend fun ensureLatest(context: Context, id: String): Boolean = withContext(Dispatchers.IO) {
+    suspend fun ensureLatest(context: Context, id: String, onProgress: ((Float) -> Unit)? = null): Boolean = withContext(Dispatchers.IO) {
         val dict = ScorpioDictManager.getInstance(context.applicationContext)
         val p = try {
             parseManifest(fetchManifest(context)).firstOrNull { it.id == id }
@@ -137,7 +142,7 @@ object PackUpdater {
         if (p.minAppVersion > appVersion(context) || PackVersion.compare(p.version, dict.installedPackVersion(p.id, p.group)) <= 0) {
             return@withContext false
         }
-        installPack(context, dict, p)
+        installPack(context, dict, p, onProgress)
     }
 
     /** 設定頁列出可以安裝的外掛 */
@@ -191,7 +196,7 @@ object PackUpdater {
         }.filter { it.minAppVersion <= appVersion(context) }
     }
 
-    private fun fetch(url: String, out: File? = null): String? {
+    private fun fetch(url: String, out: File? = null, total: Long = -1, onProgress: ((Float) -> Unit)? = null): String? {
         val conn = URL(url).openConnection() as HttpURLConnection
         conn.connectTimeout = 15_000
         conn.readTimeout = 60_000
@@ -200,7 +205,20 @@ object PackUpdater {
         try {
             if (conn.responseCode != 200) throw java.io.IOException("HTTP ${conn.responseCode}")
             return if (out != null) {
-                conn.inputStream.use { input -> FileOutputStream(out).use { input.copyTo(it) } }
+                val size = if (total > 0) total else conn.contentLengthLong
+                conn.inputStream.use { input ->
+                    FileOutputStream(out).use { o ->
+                        val buf = ByteArray(1 shl 16)
+                        var done = 0L
+                        while (true) {
+                            val n = input.read(buf)
+                            if (n < 0) break
+                            o.write(buf, 0, n)
+                            done += n
+                            if (size > 0) onProgress?.invoke((done.toFloat() / size).coerceAtMost(1f))
+                        }
+                    }
+                }
                 null
             } else {
                 conn.inputStream.bufferedReader().use { it.readText() }

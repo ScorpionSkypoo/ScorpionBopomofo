@@ -499,7 +499,7 @@ class SettingsActivity : AppCompatActivity() {
     private fun switchRow(
         parent: LinearLayout, title: String, summary: String, checked: Boolean,
         onRowClick: (() -> Unit)? = null, onChange: (Boolean) -> Unit
-    ) {
+    ): Pair<LinearLayout, com.google.android.material.materialswitch.MaterialSwitch> {
         val row = row(parent, null, clickable = true)
         texts(textColumn(row), title, summary)
         val sw = com.google.android.material.materialswitch.MaterialSwitch(this).apply { isChecked = checked }
@@ -508,10 +508,11 @@ class SettingsActivity : AppCompatActivity() {
             marginStart = dp(16)
         })
         row.setOnClickListener { if (onRowClick != null) onRowClick() else sw.toggle() }
+        return row to sw
     }
 
     private fun boolSwitch(parent: LinearLayout, title: String, summary: String, key: String, default: Boolean) =
-        switchRow(parent, title, summary, prefs.getBoolean(key, default)) { prefs.edit().putBoolean(key, it).apply() }
+        switchRow(parent, title, summary, prefs.getBoolean(key, default)) { prefs.edit().putBoolean(key, it).apply() }.let { }
 
     private fun slider(
         parent: LinearLayout, title: String, summary: String,
@@ -968,12 +969,12 @@ class SettingsActivity : AppCompatActivity() {
         }
 
         // 詞庫分組列出；匯入的詞庫會一直變多，放在最下面
-        // 開關就是安裝：打開時馬上抓線上最新版，之後自動更新；關掉就停用並刪掉下載的資料。點一下可以看詞庫內容
+        // 開關就是安裝：打開時抓線上最新版（還沒下載的就下載安裝），之後自動更新；關掉就停用。點一下可以看詞庫內容
         val groups = linkedMapOf(
             "basic" to ("基本" to null),
             "places" to ("地名與地標" to null),
+            "terms" to ("專業術語" to null),
             "symbols" to ("表情符號" to null),
-            "extra" to ("可下載的詞庫" to "不內建在 App 裡，打開開關才下載安裝；關掉會整個移除。"),
             "bigram" to ("接續詞語料" to "影響整句選字與選完字後聯想的下一個詞，不影響打得出哪些詞。開了多個來源時取搭配最強的那個。"),
             "import" to ("匯入的詞庫" to null)
         )
@@ -994,30 +995,36 @@ class SettingsActivity : AppCompatActivity() {
             cards[key] = c
             loadings[key] = loadingText(c)
         }
-        var onlineOnly = emptySet<String>()
-        fun groupOf(d: ScorpioDictManager.DictionaryInfo) = when {
-            d.id in onlineOnly -> "extra"
-            d.group == "bigram" -> "bigram"
-            d.removable -> "import"
-            d.id in setOf("emoji", "kaomoji") -> "symbols"
-            d.id.contains("places") || d.id.contains("landmarks") -> "places"
-            else -> "basic"
-        }
         lifecycleScope.launch {
             val available = com.p3dro.scorpio.ime.engine.PackUpdater.refreshManifest(this@SettingsActivity)
-            onlineOnly = available.filter { !it.bundled }.map { it.id }.toSet()
+            val manifest = available.associateBy { it.id }
+            val onlineOnly = available.filter { !it.bundled }.map { it.id }.toSet()
             val dicts = dict.dictionaries(available)
             if (stack.lastOrNull() != Page.DICTIONARY) return@launch
             for ((key, c) in cards) c.removeView(loadings[key])
-            if (onlineOnly.isEmpty()) infoRow(cards.getValue("extra"), "目前沒有可下載的詞庫", "連上網路後再打開這頁看看。")
+            fun groupOf(d: ScorpioDictManager.DictionaryInfo) = manifest[d.id]?.category?.takeIf { it in groups } ?: when {
+                d.group == "bigram" -> "bigram"
+                d.removable -> "import"
+                d.id in setOf("emoji", "kaomoji") -> "symbols"
+                d.id.contains("places") || d.id.contains("landmarks") -> "places"
+                else -> "basic"
+            }
+            // 專業術語目前只有可下載的，沒有就不顯示整組
+            if (dicts.none { groupOf(it) == "terms" }) {
+                val c = cards.getValue("terms")
+                (c.parent as? View)?.visibility = View.GONE
+                content.getChildAt(content.indexOfChild(c.parent as View) - 1)?.visibility = View.GONE
+            }
             for (d in dicts) {
                 val list = cards.getValue(groupOf(d))
                 val bigram = d.group == "bigram"
-                val summary = "${d.description}・${"%,d".format(d.count)} ${if (bigram) "組" else "個"}" +
-                    (if (!d.installed) "・未安裝，下載約 ${"%.1f".format(d.downloadSize / 1048576.0)} MB" else "") +
-                    (d.source?.let { "\n來源：$it" } ?: "") + (d.version?.let { "\n版本 $it" } ?: "")
+                fun summary(installed: Boolean, count: Int, version: String?) =
+                    "${d.description}・${"%,d".format(count)} ${if (bigram) "組" else "個"}" +
+                        (if (!installed) "・尚未下載（約 ${"%.1f".format(d.downloadSize / 1048576.0)} MB）" else "") +
+                        (d.source?.let { "\n來源：$it" } ?: "") + (version?.let { "\n版本 $it" } ?: "")
+                var installed = d.installed
                 val openDetail = {
-                    if (d.installed) {
+                    if (installed) {
                         detailDict = d
                         open(Page.DICT_DETAIL)
                     } else {
@@ -1025,38 +1032,81 @@ class SettingsActivity : AppCompatActivity() {
                     }
                 }
                 if (!d.toggleable) {
-                    navRow(list, null, d.name, summary) { openDetail() }
+                    navRow(list, null, d.name, summary(true, d.count, d.version)) { openDetail() }
                     continue
                 }
-                switchRow(list, d.name, summary, d.enabled, onRowClick = openDetail) { on ->
+                var ignore = false
+                lateinit var sw: com.google.android.material.materialswitch.MaterialSwitch
+                lateinit var r: LinearLayout
+                val pair = switchRow(list, d.name, summary(installed, d.count, d.version), d.enabled, onRowClick = openDetail) { on ->
+                    if (ignore) return@switchRow
+                    val sub = (r.getChildAt(0) as LinearLayout).getChildAt(1) as TextView
                     lifecycleScope.launch {
                         if (!on && d.id in onlineOnly) {
-                            // 只能線上安裝的：關掉就整個移除
+                            // 只能線上安裝的：關掉就整個移除，回到「尚未下載」
                             kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { dict.uninstallPack(d.id) }
-                            if (stack.lastOrNull() == Page.DICTIONARY) render()
+                            installed = false
+                            sub.text = summary(false, manifest[d.id]?.rows ?: d.count, manifest[d.id]?.version)
                             return@launch
                         }
                         dict.setDictionaryEnabled(d.id, on)
                         if (!on || d.removable || d.id == "emoji") return@launch
-                        if (!d.installed) android.widget.Toast.makeText(this@SettingsActivity, "下載「${d.name}」中…", android.widget.Toast.LENGTH_SHORT).show()
-                        // 打開時抓線上最新版（匯入的、Emoji 沒有線上版本）；還沒安裝的就是下載安裝
-                        val ok = com.p3dro.scorpio.ime.engine.PackUpdater.ensureLatest(this@SettingsActivity, d.id)
-                        when {
-                            ok -> android.widget.Toast.makeText(this@SettingsActivity,
-                                if (d.installed) "已更新「${d.name}」到最新版" else "已安裝「${d.name}」", android.widget.Toast.LENGTH_SHORT).show()
-                            !d.installed -> {
-                                android.widget.Toast.makeText(this@SettingsActivity, "下載失敗，確認網路後再試一次", android.widget.Toast.LENGTH_SHORT).show()
-                                dict.setDictionaryEnabled(d.id, false)
+                        // 有東西要下載時才在這列底下出現進度條：下載顯示百分比，套用時轉成不確定進度
+                        var bar: com.google.android.material.progressindicator.LinearProgressIndicator? = null
+                        val before = sub.text
+                        sw.isEnabled = false
+                        val ok = com.p3dro.scorpio.ime.engine.PackUpdater.ensureLatest(this@SettingsActivity, d.id) { f ->
+                            runOnUiThread {
+                                val b = bar ?: com.google.android.material.progressindicator.LinearProgressIndicator(this@SettingsActivity).apply {
+                                    max = 100
+                                    trackCornerRadius = dp(4)
+                                    list.addView(this, list.indexOfChild(r) + 1, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                                        setMargins(dp(20), 0, dp(20), dp(12))
+                                    })
+                                    bar = this
+                                }
+                                if (f < 0) {
+                                    if (!b.isIndeterminate) {
+                                        b.visibility = View.INVISIBLE
+                                        b.isIndeterminate = true
+                                        b.visibility = View.VISIBLE
+                                    }
+                                    sub.text = "安裝中…"
+                                } else {
+                                    b.setProgressCompat((f * 100).toInt(), true)
+                                    sub.text = "下載中 ${(f * 100).toInt()}%"
+                                }
                             }
                         }
-                        if ((ok || !d.installed) && stack.lastOrNull() == Page.DICTIONARY) render()
+                        bar?.let { list.removeView(it) }
+                        sw.isEnabled = true
+                        val m = manifest[d.id]
+                        when {
+                            ok -> {
+                                installed = true
+                                sub.text = summary(true, m?.rows ?: d.count, m?.version ?: d.version)
+                                android.widget.Toast.makeText(this@SettingsActivity,
+                                    if (d.installed) "已更新「${d.name}」到最新版" else "已安裝「${d.name}」", android.widget.Toast.LENGTH_SHORT).show()
+                            }
+                            !installed -> {
+                                sub.text = before
+                                android.widget.Toast.makeText(this@SettingsActivity, "下載失敗，確認網路後再試一次", android.widget.Toast.LENGTH_SHORT).show()
+                                dict.setDictionaryEnabled(d.id, false)
+                                ignore = true
+                                sw.isChecked = false
+                                ignore = false
+                            }
+                            else -> sub.text = before
+                        }
                     }
                 }
+                r = pair.first
+                sw = pair.second
                 if (d.removable) {
-                    val r = row(list, null, clickable = false)
-                    r.setPadding(dp(16), 0, dp(4), dp(4))
-                    r.addView(View(this@SettingsActivity), LinearLayout.LayoutParams(0, 1, 1f))
-                    r.addView(TextView(this@SettingsActivity).apply {
+                    val rr = row(list, null, clickable = false)
+                    rr.setPadding(dp(16), 0, dp(4), dp(4))
+                    rr.addView(View(this@SettingsActivity), LinearLayout.LayoutParams(0, 1, 1f))
+                    rr.addView(TextView(this@SettingsActivity).apply {
                         text = "刪除這個詞庫"
                         textSize = 14f
                         setTextColor(cError)
