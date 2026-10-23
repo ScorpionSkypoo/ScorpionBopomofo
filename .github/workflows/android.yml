@@ -1,7 +1,7 @@
 name: Android
 
 # push、PR：建置並跑單元測試
-# 推 v* tag：另外簽章、建立 GitHub Release 並附上 APK
+# 推 v* tag：用正式金鑰簽章（附 debug → 正式金鑰的輪替證明，見 tools/sign_release.sh），建立 GitHub Release 並附上 APK
 on:
   push:
     branches: [main]
@@ -48,11 +48,21 @@ jobs:
           name: apk
           path: app/build/outputs/apk/release/app-release.apk
 
+      - name: 正式簽章
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          echo "$RELEASE_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.keystore"
+          RELEASE_KEYSTORE="$RUNNER_TEMP/release.keystore" DEBUG_KEYSTORE="$SIGNING_KEYSTORE" \
+            tools/sign_release.sh app/build/outputs/apk/release/app-release.apk "ScorpioIME-${GITHUB_REF_NAME}.apk"
+          rm -f "$RUNNER_TEMP/release.keystore"
+        env:
+          RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+          RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
+
       - name: 發佈 Release
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
           T=${GITHUB_REF_NAME}
-          cp app/build/outputs/apk/release/app-release.apk "ScorpioIME-$T.apk"
           if gh release view "$T" > /dev/null 2>&1; then
             gh release upload "$T" "ScorpioIME-$T.apk" --clobber
           else
