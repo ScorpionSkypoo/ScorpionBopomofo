@@ -1,0 +1,22 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <!-- 外框：圓角氣泡對話框 -->
+    <path
+        android:fillColor="@color/ime_text_primary"
+        android:pathData="M20,2H4C2.9,2 2,2.9 2,4v12c0,1.1 0.9,2 2,2h14l4,4V4C22,2.9 21.1,2 20,2zM20,16H4V4h16V16z" />
+    <!-- 左眼：笑瞇眼 ^ -->
+    <path
+        android:fillColor="@color/ime_text_primary"
+        android:pathData="M7,10.5 L8.5,8 L10,10.5 L9.2,10.5 L8.5,9.2 L7.8,10.5 Z" />
+    <!-- 右眼：笑瞇眼 ^ -->
+    <path
+        android:fillColor="@color/ime_text_primary"
+        android:pathData="M14,10.5 L15.5,8 L17,10.5 L16.2,10.5 L15.5,9.2 L14.8,10.5 Z" />
+    <!-- 嘴巴：可愛微笑曲線 -->
+    <path
+        android:fillColor="@color/ime_text_primary"
+        android:pathData="M10.2,12.5 C10.8,14.2 13.2,14.2 13.8,12.5 C13.2,13.3 10.8,13.3 10.2,12.5 Z" />
+</vector>

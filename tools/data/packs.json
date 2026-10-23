@@ -1,0 +1,77 @@
+{
+  "_說明": "所有詞庫的名稱、說明、來源與授權。group：words＝增加打得出的詞；bigram＝只影響詞與詞的接續（整句選字、選完字後的聯想）。改了內容請一併改 version，App 會依版本號重新套用。",
+  "packs": [
+    {
+      "id": "core", "group": "words", "name": "主詞庫",
+      "description": "常用字詞與讀音，整句選字的基礎，不能關閉",
+      "source": "小麥注音輸入法詞庫（McBopomofo）",
+      "license": "MIT License",
+      "url": "https://github.com/openvanilla/McBopomofo",
+      "version": "2026.10"
+    },
+    {
+      "id": "trendy", "group": "words", "name": "流行與口語用語",
+      "description": "網路流行語、社群用語與日常口語搭配，每年更新",
+      "source": "人工整理（tools/data/trendy.txt）",
+      "license": "本專案自製",
+      "url": "",
+      "version": "2026.10"
+    },
+    {
+      "id": "tw_places", "group": "words", "name": "台灣地名與路名",
+      "description": "縣市、鄉鎮市區與全國路名",
+      "source": "內政部戶政司 全國路名資料",
+      "license": "政府資料開放授權條款第 1 版",
+      "url": "https://data.gov.tw/dataset/35321",
+      "version": "2026.10"
+    },
+    {
+      "id": "tw_landmarks", "group": "words", "name": "台灣景點與地標",
+      "description": "觀光景點、步道、古蹟、公園、夜市等",
+      "source": "交通部觀光署 觀光資訊資料庫",
+      "license": "政府資料開放授權條款第 1 版",
+      "url": "https://data.gov.tw/dataset/7777",
+      "version": "2026.10"
+    },
+    {
+      "id": "world_places", "group": "words", "name": "世界國家與城市",
+      "description": "國家地區名稱與世界主要城市",
+      "source": "Unicode CLDR、Wikidata",
+      "license": "Unicode License v3、CC0",
+      "url": "https://www.wikidata.org/",
+      "version": "2026.10"
+    },
+    {
+      "id": "world_landmarks", "group": "words", "name": "世界地標與地理",
+      "description": "知名建築、博物館、山岳、湖泊、島嶼等",
+      "source": "Wikidata",
+      "license": "CC0",
+      "url": "https://www.wikidata.org/",
+      "version": "2026.10"
+    },
+    {
+      "id": "bg_wiki", "group": "bigram", "name": "維基百科",
+      "description": "書面語、知識性名詞的接續（政經、科技、地理等）",
+      "source": "中文維基百科條目（轉台灣正體用語）",
+      "license": "CC BY-SA 4.0",
+      "url": "https://dumps.wikimedia.org/zhwiki/",
+      "version": "2026.10"
+    },
+    {
+      "id": "bg_ptt", "group": "bigram", "name": "PTT",
+      "description": "PTT 各版文章、推文與八卦版問答的口語接續",
+      "source": "Hugging Face：yuhuanstudio/PTT-pretrain-zhtw、Riyuechang/PTT-Corpus-100K_Gossiping",
+      "license": "Apache License 2.0",
+      "url": "https://huggingface.co/datasets/yuhuanstudio/PTT-pretrain-zhtw",
+      "version": "2026.10"
+    },
+    {
+      "id": "bg_dcard", "group": "bigram", "name": "Dcard",
+      "description": "Dcard 討論串的日常對話接續",
+      "source": "Hugging Face：iddle/dcard_conversations",
+      "license": "MIT License",
+      "url": "https://huggingface.co/datasets/iddle/dcard_conversations",
+      "version": "2026.10"
+    }
+  ]
+}

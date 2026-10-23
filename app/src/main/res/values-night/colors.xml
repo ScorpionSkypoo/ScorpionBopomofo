@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Gboard Dark Mode 配色：無縫融入深色狀態列與導航列 -->
+    <color name="ime_classic_bg">#1E1F21</color>
+    <color name="ime_classic_key_bg">#38393B</color>
+    <color name="ime_classic_key_function_bg">#28292B</color>
+    <color name="ime_classic_key_pressed">#4D4E52</color>
+    <color name="ime_classic_key_action_bg">#A8C7FA</color>
+    <color name="ime_classic_key_action_icon">#003355</color>
+    <color name="ime_classic_text_primary">#FFFFFF</color>
+    <color name="ime_classic_text_secondary">#9A9C9F</color>
+    <color name="ime_classic_candidate_bg">#1E1F21</color>
+    <color name="ime_classic_candidate_text">#F2F2F2</color>
+    <color name="ime_classic_candidate_divider">#00000000</color>
+    <color name="ime_classic_composing_text">#A8C7FA</color>
+</resources>

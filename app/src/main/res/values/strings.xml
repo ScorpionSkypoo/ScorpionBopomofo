@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Scorpio 注音輸入法</string>
+    <string name="ime_service_name">Scorpio 智慧注音</string>
+    <string name="ime_subtype_zhuyin">繁體注音 (台灣)</string>
+    <string name="settings_title">Scorpio 注音設定</string>
+    <string name="space_zhuyin">注音</string>
+    <string name="key_symbols_label">\?123</string>
+</resources>

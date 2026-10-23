@@ -1,0 +1,931 @@
+package com.p3dro.scorpio.ime.ui
+
+import android.content.Context
+import android.content.Intent
+import android.content.SharedPreferences
+import android.graphics.Typeface
+import android.os.Bundle
+import android.provider.Settings
+import android.text.InputType
+import android.view.Gravity
+import android.view.View
+import android.view.ViewGroup
+import android.view.inputmethod.InputMethodManager
+import android.widget.EditText
+import android.widget.FrameLayout
+import android.widget.ImageView
+import android.widget.LinearLayout
+import android.widget.ScrollView
+import android.widget.TextView
+import androidx.activity.OnBackPressedCallback
+import androidx.appcompat.app.AppCompatActivity
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.lifecycle.lifecycleScope
+import com.google.android.material.button.MaterialButton
+import com.google.android.material.button.MaterialButtonToggleGroup
+import com.p3dro.scorpio.ime.R
+import com.p3dro.scorpio.ime.engine.ChineseMethod
+import com.p3dro.scorpio.ime.engine.ScorpioDictManager
+import kotlinx.coroutines.launch
+
+/**
+ * 設定 App：第一次使用的引導（啟用 → 切換 → 試打），完成後是分類設定
+ * 介面外觀／輸入與按鍵／選字引擎／字典與學習／關於
+ *
+ * 畫面以程式建構（頁面少、元件重複），頁面切換用簡單的堆疊，返回鍵回上一頁
+ */
+class SettingsActivity : AppCompatActivity() {
+
+    private enum class Page(val title: String) {
+        ONBOARDING("開始使用"),
+        HOME("Scorpio 智慧注音"),
+        METHODS("輸入法"),
+        APPEARANCE("介面外觀"),
+        INPUT("輸入與按鍵"),
+        ENGINE("選字引擎"),
+        DICTIONARY("字典與學習"),
+        USER_WORDS("自建詞"),
+        ABOUT("關於")
+    }
+
+    private lateinit var prefs: SharedPreferences
+
+    // 照片主題：系統相片挑選器（不需要讀取權限）
+    private val importDict = registerForActivityResult(androidx.activity.result.contract.ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri == null) return@registerForActivityResult
+        lifecycleScope.launch {
+            val name = displayName(uri)?.substringBeforeLast('.')?.ifBlank { null } ?: "匯入的詞庫"
+            val text = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                try {
+                    contentResolver.openInputStream(uri)?.use { it.readBytes().toString(Charsets.UTF_8) }
+                } catch (e: Exception) {
+                    null
+                }
+            }
+            if (text == null) {
+                android.widget.Toast.makeText(this@SettingsActivity, "讀不到這個檔案", android.widget.Toast.LENGTH_SHORT).show()
+                return@launch
+            }
+            android.widget.Toast.makeText(this@SettingsActivity, "匯入中…", android.widget.Toast.LENGTH_SHORT).show()
+            val r = dict.importDictionary(name, text)
+            val msg = if (r.added == 0) "沒有可以匯入的詞（每行一個詞，可加注音與次數）"
+            else "已匯入「$name」${r.added} 個詞" + if (r.skipped > 0) "，${r.skipped} 個推不出讀音已略過" else ""
+            android.widget.Toast.makeText(this@SettingsActivity, msg, android.widget.Toast.LENGTH_LONG).show()
+            if (stack.lastOrNull() == Page.DICTIONARY) render()
+        }
+    }
+
+    private val exportDict = registerForActivityResult(androidx.activity.result.contract.ActivityResultContracts.CreateDocument("text/plain")) { uri ->
+        if (uri == null) return@registerForActivityResult
+        lifecycleScope.launch {
+            val text = dict.exportUserDictionary()
+            val ok = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                try {
+                    contentResolver.openOutputStream(uri, "wt")?.use { it.write(text.toByteArray(Charsets.UTF_8)) } != null
+                } catch (e: Exception) {
+                    false
+                }
+            }
+            android.widget.Toast.makeText(this@SettingsActivity, if (ok) "已匯出個人詞庫" else "匯出失敗", android.widget.Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun displayName(uri: android.net.Uri): String? = try {
+        contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use {
+            if (it.moveToFirst()) it.getString(0) else null
+        }
+    } catch (e: Exception) {
+        null
+    }
+
+    private val pickPhoto = registerForActivityResult(androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia()) { uri ->
+        if (uri == null) return@registerForActivityResult
+        lifecycleScope.launch {
+            val ok = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { savePhoto(uri) }
+            if (ok) prefs.edit().putString("keyboard_theme", "photo").apply()
+            else android.widget.Toast.makeText(this@SettingsActivity, "讀取照片失敗", android.widget.Toast.LENGTH_SHORT).show()
+            render()
+        }
+    }
+
+    /** 照片縮到長邊 1600px 存成 keyboard_bg.jpg（輸入法與設定同一個 App，直接讀檔） */
+    private fun savePhoto(uri: android.net.Uri): Boolean = try {
+        val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        contentResolver.openInputStream(uri)?.use { android.graphics.BitmapFactory.decodeStream(it, null, bounds) }
+        var sample = 1
+        while (maxOf(bounds.outWidth, bounds.outHeight) / sample > 1600) sample *= 2
+        val bmp = contentResolver.openInputStream(uri)?.use {
+            android.graphics.BitmapFactory.decodeStream(it, null, android.graphics.BitmapFactory.Options().apply { inSampleSize = sample })
+        }
+        if (bmp == null) false else {
+            java.io.File(filesDir, "keyboard_bg.jpg").outputStream().use { bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 88, it) }
+            true
+        }
+    } catch (e: Exception) {
+        false
+    }
+    private val dict by lazy { ScorpioDictManager.getInstance(applicationContext) }
+
+    private val stack = ArrayList<Page>()
+    private lateinit var titleView: TextView
+    private lateinit var backButton: ImageView
+    private lateinit var scroll: ScrollView
+    private lateinit var content: LinearLayout
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        prefs = getSharedPreferences("scorpio_ime_prefs", Context.MODE_PRIVATE)
+        setContentView(buildFrame())
+
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                if (stack.size > 1) {
+                    stack.removeAt(stack.size - 1)
+                    render(-1)
+                } else {
+                    finish()
+                }
+            }
+        })
+
+        val needsSetup = !isImeEnabled() || !isImeSelected()
+        stack.add(if (needsSetup && !prefs.getBoolean("onboarding_skipped", false)) Page.ONBOARDING else Page.HOME)
+        render(1)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // 從系統設定回來：更新啟用／切換狀態
+        if (stack.lastOrNull() == Page.ONBOARDING || stack.lastOrNull() == Page.HOME) render()
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        // 輸入法選擇視窗關掉時不會觸發 onResume，靠焦點變化更新
+        if (hasFocus && stack.lastOrNull() == Page.ONBOARDING) render()
+    }
+
+    // ---------- 狀態 ----------
+
+    private fun isImeEnabled(): Boolean {
+        val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager ?: return false
+        return imm.enabledInputMethodList.any { it.packageName == packageName }
+    }
+
+    private fun isImeSelected(): Boolean =
+        Settings.Secure.getString(contentResolver, Settings.Secure.DEFAULT_INPUT_METHOD)?.startsWith("$packageName/") == true
+
+    private fun versionName(): String = try {
+        packageManager.getPackageInfo(packageName, 0).versionName ?: ""
+    } catch (e: Exception) {
+        ""
+    }
+
+    // ---------- 外框與頁面切換 ----------
+
+    private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+
+    // Material 3 色彩（Android 12 以上跟著桌布）
+    private fun themeColor(attr: Int) = com.google.android.material.color.MaterialColors.getColor(this, attr, 0)
+    private val cSurface by lazy { themeColor(com.google.android.material.R.attr.colorSurface) }
+    private val cSurfaceContainer by lazy { themeColor(com.google.android.material.R.attr.colorSurfaceContainer) }
+    private val cSurfaceHighest by lazy { themeColor(com.google.android.material.R.attr.colorSurfaceContainerHighest) }
+    private val cOnSurface by lazy { themeColor(com.google.android.material.R.attr.colorOnSurface) }
+    private val cOnSurfaceVariant by lazy { themeColor(com.google.android.material.R.attr.colorOnSurfaceVariant) }
+    private val cPrimary by lazy { themeColor(androidx.appcompat.R.attr.colorPrimary) }
+    private val cOnPrimary by lazy { themeColor(com.google.android.material.R.attr.colorOnPrimary) }
+    private val cError by lazy { themeColor(androidx.appcompat.R.attr.colorError) }
+
+    private fun textAppearance(view: TextView, attr: Int) {
+        val tv = android.util.TypedValue()
+        if (theme.resolveAttribute(attr, tv, true)) androidx.core.widget.TextViewCompat.setTextAppearance(view, tv.resourceId)
+    }
+
+    private lateinit var bar: LinearLayout
+    private var barLifted = false
+
+    private fun buildFrame(): View {
+        androidx.core.view.WindowCompat.setDecorFitsSystemWindows(window, false)
+        val frame = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(cSurface)
+        }
+
+        bar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(4), dp(8), dp(16), dp(8))
+            minimumHeight = dp(64)
+            setBackgroundColor(cSurface)
+        }
+        backButton = ImageView(this).apply {
+            setImageResource(R.drawable.ic_set_arrow_back)
+            setColorFilter(cOnSurface)
+            setPadding(dp(12), dp(12), dp(12), dp(12))
+            val tv = android.util.TypedValue()
+            theme.resolveAttribute(android.R.attr.selectableItemBackgroundBorderless, tv, true)
+            setBackgroundResource(tv.resourceId)
+            contentDescription = "返回"
+            setOnClickListener { onBackPressedDispatcher.onBackPressed() }
+        }
+        bar.addView(backButton, LinearLayout.LayoutParams(dp(48), dp(48)))
+        titleView = TextView(this).apply {
+            textAppearance(this, com.google.android.material.R.attr.textAppearanceTitleLarge)
+            setTextColor(cOnSurface)
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        }
+        bar.addView(titleView, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        frame.addView(bar)
+
+        scroll = ScrollView(this).apply {
+            isFillViewport = true
+            clipToPadding = false
+            isVerticalScrollBarEnabled = false
+            // 捲動後標題列換成稍深的底色（Material 3 的 lift on scroll）
+            setOnScrollChangeListener { _, _, y, _, _ -> liftBar(y > 0) }
+        }
+        content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(8), dp(16), dp(24))
+        }
+        scroll.addView(content)
+        frame.addView(scroll, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+
+        // 內容延伸到導覽列底下，只把最後一段捲動空間加長
+        ViewCompat.setOnApplyWindowInsetsListener(frame) { v, insets ->
+            val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
+            val ime = insets.getInsets(WindowInsetsCompat.Type.ime())
+            v.setPadding(bars.left, bars.top, bars.right, 0)
+            scroll.setPadding(0, 0, 0, maxOf(bars.bottom, ime.bottom))
+            insets
+        }
+        return frame
+    }
+
+    private fun liftBar(lift: Boolean) {
+        if (lift == barLifted) return
+        barLifted = lift
+        android.animation.ValueAnimator.ofArgb(
+            if (lift) cSurface else cSurfaceContainer,
+            if (lift) cSurfaceContainer else cSurface
+        ).apply {
+            duration = 180
+            addUpdateListener { bar.setBackgroundColor(it.animatedValue as Int) }
+            start()
+        }
+    }
+
+    private fun open(page: Page) {
+        stack.add(page)
+        render(1)
+    }
+
+    private fun replaceWith(page: Page) {
+        stack.clear()
+        stack.add(page)
+        render(1)
+    }
+
+    /**
+     * 重畫目前的頁面。direction：1＝進入下一頁、-1＝返回、0＝原地更新（保留捲動位置、不做轉場）
+     */
+    private fun render(direction: Int = 0) {
+        val page = stack.lastOrNull() ?: return
+        titleView.text = page.title
+        backButton.visibility = if (stack.size > 1) View.VISIBLE else View.GONE
+        titleView.setPadding(if (stack.size > 1) dp(4) else dp(16), 0, 0, 0)
+        val keepY = scroll.scrollY
+        content.layoutTransition = null
+        content.removeAllViews()
+        when (page) {
+            Page.ONBOARDING -> buildOnboarding()
+            Page.HOME -> buildHome()
+            Page.METHODS -> buildMethods()
+            Page.APPEARANCE -> buildAppearance()
+            Page.INPUT -> buildInput()
+            Page.ENGINE -> buildEngine()
+            Page.DICTIONARY -> buildDictionary()
+            Page.USER_WORDS -> buildUserWords()
+            Page.ABOUT -> buildAbout()
+        }
+        if (direction == 0) {
+            scroll.post { scroll.scrollTo(0, keepY) }
+        } else {
+            scroll.scrollTo(0, 0)
+            liftBar(false)
+            // 新頁面從前進方向滑入、淡入
+            val interp = androidx.interpolator.view.animation.FastOutSlowInInterpolator()
+            for (v in listOf<View>(content, titleView)) {
+                v.animate().cancel()
+                v.alpha = 0f
+                v.translationX = dp(if (v === content) 40 else 16) * direction.toFloat()
+                v.animate().alpha(1f).translationX(0f).setDuration(280).setInterpolator(interp).start()
+            }
+        }
+        // 頁面畫好後才開版面動畫：之後讀進來的資料讓卡片平滑長高，不會一下子把下面擠開
+        content.post { content.layoutTransition = smoothLayout() }
+    }
+
+    private fun smoothLayout() = android.animation.LayoutTransition().apply {
+        enableTransitionType(android.animation.LayoutTransition.CHANGING)
+        setDuration(220)
+    }
+
+    // ---------- 元件 ----------
+
+    /** Material 3 卡片；回傳卡片裡面放列的 LinearLayout */
+    private fun card(): LinearLayout {
+        val inner = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, dp(4), 0, dp(4))
+        }
+        val c = com.google.android.material.card.MaterialCardView(this).apply {
+            radius = dp(24).toFloat()
+            cardElevation = 0f
+            strokeWidth = 0
+            setCardBackgroundColor(cSurfaceContainer)
+            addView(inner, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        }
+        content.addView(c, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            bottomMargin = dp(12)
+        })
+        return inner
+    }
+
+    private fun sectionTitle(text: String) {
+        content.addView(TextView(this).apply {
+            this.text = text
+            textAppearance(this, com.google.android.material.R.attr.textAppearanceLabelLarge)
+            setTextColor(cPrimary)
+            setPadding(dp(20), dp(12), dp(20), dp(8))
+        })
+    }
+
+    private fun texts(parent: LinearLayout, title: String, summary: String?) {
+        parent.addView(TextView(this).apply {
+            text = title
+            textAppearance(this, com.google.android.material.R.attr.textAppearanceBodyLarge)
+            setTextColor(cOnSurface)
+        })
+        if (!summary.isNullOrEmpty()) {
+            parent.addView(TextView(this).apply {
+                text = summary
+                textAppearance(this, com.google.android.material.R.attr.textAppearanceBodyMedium)
+                setTextColor(cOnSurfaceVariant)
+                setPadding(0, dp(2), 0, 0)
+                setLineSpacing(0f, 1.1f)
+            })
+        }
+    }
+
+    private fun row(parent: LinearLayout, icon: Int?, clickable: Boolean): LinearLayout {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(20), dp(14), dp(20), dp(14))
+            minimumHeight = dp(64)
+            if (clickable) {
+                val tv = android.util.TypedValue()
+                theme.resolveAttribute(android.R.attr.selectableItemBackground, tv, true)
+                setBackgroundResource(tv.resourceId)
+            }
+        }
+        if (icon != null) {
+            row.addView(ImageView(this).apply {
+                setImageResource(icon)
+                setColorFilter(cOnSurfaceVariant)
+            }, LinearLayout.LayoutParams(dp(24), dp(24)).apply { marginEnd = dp(20) })
+        }
+        parent.addView(row)
+        return row
+    }
+
+    private fun textColumn(row: LinearLayout) = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        row.addView(this, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+    }
+
+    private fun navRow(parent: LinearLayout, icon: Int?, title: String, summary: String?, onClick: () -> Unit) {
+        val row = row(parent, icon, clickable = true)
+        texts(textColumn(row), title, summary)
+        row.addView(ImageView(this).apply {
+            setImageResource(R.drawable.ic_set_chevron_right)
+            setColorFilter(cOnSurfaceVariant)
+        }, LinearLayout.LayoutParams(dp(24), dp(24)).apply { marginStart = dp(8) })
+        row.setOnClickListener { onClick() }
+    }
+
+    private fun infoRow(parent: LinearLayout, title: String, summary: String?, icon: Int? = null) {
+        texts(textColumn(row(parent, icon, clickable = false)), title, summary)
+    }
+
+    private fun switchRow(parent: LinearLayout, title: String, summary: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+        val row = row(parent, null, clickable = true)
+        texts(textColumn(row), title, summary)
+        val sw = com.google.android.material.materialswitch.MaterialSwitch(this).apply { isChecked = checked }
+        sw.setOnCheckedChangeListener { _, v -> onChange(v) }
+        row.addView(sw, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            marginStart = dp(16)
+        })
+        row.setOnClickListener { sw.toggle() }
+    }
+
+    private fun boolSwitch(parent: LinearLayout, title: String, summary: String, key: String, default: Boolean) =
+        switchRow(parent, title, summary, prefs.getBoolean(key, default)) { prefs.edit().putBoolean(key, it).apply() }
+
+    private fun slider(
+        parent: LinearLayout, title: String, summary: String,
+        from: Float, to: Float, step: Float, value: Float, format: (Float) -> String, onChange: (Float) -> Unit
+    ) {
+        val row = row(parent, null, clickable = false)
+        val col = textColumn(row)
+        texts(col, title, summary)
+        val valueText = TextView(this).apply {
+            textAppearance(this, com.google.android.material.R.attr.textAppearanceTitleMedium)
+            setTextColor(cPrimary)
+            text = format(value)
+        }
+        row.addView(valueText, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = dp(12) })
+        val s = com.google.android.material.slider.Slider(this).apply {
+            valueFrom = from
+            valueTo = to
+            stepSize = step
+            this.value = (Math.round(value / step) * step).coerceIn(from, to)
+            setLabelFormatter { format(it) }
+            addOnChangeListener { _, v, fromUser ->
+                valueText.text = format(v)
+                if (fromUser) onChange(v)
+            }
+        }
+        parent.addView(s, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            setMargins(dp(8), 0, dp(8), dp(8))
+        })
+    }
+
+    private fun button(parent: LinearLayout, text: String, filled: Boolean = true, danger: Boolean = false, onClick: () -> Unit): MaterialButton {
+        val b = if (filled) MaterialButton(this) else MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle)
+        b.text = text
+        b.isAllCaps = false
+        if (danger) {
+            b.setTextColor(cError)
+            b.strokeColor = android.content.res.ColorStateList.valueOf(cError)
+        }
+        b.setOnClickListener { onClick() }
+        parent.addView(b, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(52)).apply {
+            setMargins(dp(16), dp(4), dp(16), dp(12))
+        })
+        return b
+    }
+
+    private fun testField(parent: LinearLayout, hint: String) {
+        val layout = com.google.android.material.textfield.TextInputLayout(
+            this, null, com.google.android.material.R.attr.textInputOutlinedStyle
+        ).apply {
+            this.hint = hint
+            boxBackgroundMode = com.google.android.material.textfield.TextInputLayout.BOX_BACKGROUND_OUTLINE
+            setBoxCornerRadii(dp(16).toFloat(), dp(16).toFloat(), dp(16).toFloat(), dp(16).toFloat())
+        }
+        layout.addView(com.google.android.material.textfield.TextInputEditText(layout.context).apply {
+            minLines = 2
+            gravity = Gravity.TOP or Gravity.START
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+        })
+        parent.addView(layout, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            setMargins(dp(16), dp(4), dp(16), dp(16))
+        })
+    }
+
+    private fun confirm(title: String, message: String, action: String, onOk: () -> Unit) {
+        com.google.android.material.dialog.MaterialAlertDialogBuilder(this)
+            .setTitle(title)
+            .setMessage(message)
+            .setPositiveButton(action) { _, _ -> onOk() }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    // ---------- 引導 ----------
+
+    private fun buildOnboarding() {
+        val enabled = isImeEnabled()
+        val selected = isImeSelected()
+
+        val hero = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(0, dp(8), 0, dp(24))
+        }
+        hero.addView(ImageView(this).apply { setImageResource(R.mipmap.ic_launcher) }, LinearLayout.LayoutParams(dp(80), dp(80)))
+        hero.addView(TextView(this).apply {
+            text = "歡迎使用 Scorpio 智慧注音"
+            textSize = 22f
+            setTypeface(typeface, Typeface.BOLD)
+            gravity = Gravity.CENTER
+            setTextColor(cOnSurface)
+            setPadding(0, dp(16), 0, dp(6))
+        })
+        hero.addView(TextView(this).apply {
+            text = "整句選字、免聲調、打錯也猜得到。\n只要兩個步驟就能開始打字。"
+            textSize = 15f
+            gravity = Gravity.CENTER
+            setTextColor(cOnSurfaceVariant)
+            setLineSpacing(0f, 1.2f)
+        })
+        content.addView(hero)
+
+        fun step(n: Int, done: Boolean, active: Boolean, title: String, summary: String, action: String, onClick: () -> Unit) {
+            val c = card()
+            val row = row(c, null, clickable = false)
+            row.addView(FrameLayout(this).apply {
+                background = android.graphics.drawable.GradientDrawable().apply {
+                    shape = android.graphics.drawable.GradientDrawable.OVAL
+                    setColor(if (done || active) cPrimary else cSurfaceHighest)
+                }
+                if (done) {
+                    addView(ImageView(this@SettingsActivity).apply {
+                        setImageResource(R.drawable.ic_set_check)
+                        setColorFilter(cOnPrimary)
+                    }, FrameLayout.LayoutParams(dp(20), dp(20), Gravity.CENTER))
+                } else {
+                    addView(TextView(this@SettingsActivity).apply {
+                        text = n.toString()
+                        textSize = 15f
+                        setTypeface(typeface, Typeface.BOLD)
+                        setTextColor(if (active) cOnPrimary else cOnSurfaceVariant)
+                    }, FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER))
+                }
+            }, LinearLayout.LayoutParams(dp(32), dp(32)).apply { marginEnd = dp(16) })
+            texts(textColumn(row), title, if (done) "已完成" else summary)
+            if (!done && active) button(c, action, onClick = onClick)
+        }
+
+        step(1, enabled, !enabled, "啟用輸入法",
+            "在系統的「螢幕鍵盤」清單中，把【Scorpio 智慧注音】打開。系統會提醒輸入法可以讀取你打的字，這是所有輸入法都會出現的標準提示。",
+            "前往系統設定") {
+            startActivity(Intent(Settings.ACTION_INPUT_METHOD_SETTINGS))
+        }
+        step(2, selected, enabled && !selected, "切換為目前的輸入法",
+            "從輸入法清單選擇【Scorpio 智慧注音】。", "選擇輸入法") {
+            (getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager)?.showInputMethodPicker()
+        }
+
+        val c = card()
+        texts(textColumn(row(c, null, clickable = false)), "試打看看", "例如打「ㄏㄣㄏㄠ」（不用聲調），候選列會出現「很好」。")
+        testField(c, "在這裡試打…")
+
+        if (enabled && selected) {
+            button(content, "開始使用") {
+                prefs.edit().putBoolean("onboarding_skipped", false).apply()
+                replaceWith(Page.HOME)
+            }
+        } else {
+            button(content, "稍後再設定", filled = false) {
+                prefs.edit().putBoolean("onboarding_skipped", true).apply()
+                replaceWith(Page.HOME)
+            }
+        }
+    }
+
+    // ---------- 首頁 ----------
+
+    private fun buildHome() {
+        val enabled = isImeEnabled()
+        val ready = enabled && isImeSelected()
+        val status = card()
+        val row = row(status, if (ready) R.drawable.ic_set_check else R.drawable.ic_set_warning, clickable = false)
+        texts(
+            textColumn(row),
+            if (ready) "輸入法運作中" else "輸入法尚未設定完成",
+            if (ready) "版本 ${versionName()}" else if (!enabled) "還沒在系統中啟用" else "目前不是使用中的輸入法"
+        )
+        if (!ready) button(status, "完成設定") { open(Page.ONBOARDING) }
+        testField(status, "在這裡試打…")
+
+        sectionTitle("設定")
+        val nav = card()
+        val methods = ChineseMethod.enabled(prefs).joinToString("、") { it.label }
+        navRow(nav, R.drawable.ic_set_keyboard, "輸入法", "$methods、英文") { open(Page.METHODS) }
+        navRow(nav, R.drawable.ic_set_palette, "介面外觀", "主題、照片背景、按鍵大小、候選列") { open(Page.APPEARANCE) }
+        navRow(nav, R.drawable.ic_set_engine, "輸入與按鍵", "震動、空白鍵、長按功能") { open(Page.INPUT) }
+        navRow(nav, R.drawable.ic_set_book, "選字引擎", "整句選字、動態感應區、按鍵校正") { open(Page.ENGINE) }
+        navRow(nav, R.drawable.ic_set_book, "字典與學習", "詞庫開關、匯入匯出、學習統計、自建詞") { open(Page.DICTIONARY) }
+        navRow(nav, R.drawable.ic_set_info, "關於", "版本與資料來源") { open(Page.ABOUT) }
+    }
+
+    // ---------- 輸入法 ----------
+
+    private fun buildMethods() {
+        sectionTitle("中文輸入法")
+        val c = card()
+        val enabled = ChineseMethod.enabled(prefs).toMutableSet()
+        val descriptions = mapOf(
+            ChineseMethod.DACHEN to "標準大千 41 鍵注音鍵盤，支援免聲調、簡拼與打錯修正。",
+            ChineseMethod.HSU to "許氏 26 鍵：一個鍵代表一到兩個注音，自動判斷。",
+            ChineseMethod.ETEN26 to "倚天 26 鍵：一個鍵代表一到兩個注音，自動判斷。",
+            ChineseMethod.DACHEN26 to "大千 26 鍵：大千的位置壓縮到 26 個字母鍵。",
+            ChineseMethod.PINYIN to "用英文字母打漢語拼音（zhong → 中），可只打聲母（kbd → 看不到）。",
+            ChineseMethod.CANGJIE to "倉頡碼（Unicode 倉頡第三代），最多 5 碼，打一半就會列出常用字。",
+            ChineseMethod.QUICK to "速成：只打倉頡碼的第一碼和最後一碼，依常用程度排序。"
+        )
+        for (m in ChineseMethod.entries) {
+            switchRow(c, m.label, descriptions[m].orEmpty(), m in enabled) { on ->
+                if (on) enabled.add(m) else enabled.remove(m)
+                if (enabled.isEmpty()) {
+                    // 至少保留一個
+                    enabled.add(ChineseMethod.DACHEN)
+                    render()
+                }
+                prefs.edit().putString(ChineseMethod.PREF_ENABLED, ChineseMethod.entries.filter { it in enabled }.joinToString(",") { it.id }).apply()
+            }
+        }
+        infoRow(card(), "切換方式", "按鍵盤上的地球鍵，依上面的順序切換啟用的輸入法，最後是英文。拼音與 26 鍵注音共用同一套詞庫、整句選字與學習紀錄；倉頡、速成選字後一樣會出現接續詞。")
+    }
+
+    // ---------- 介面外觀 ----------
+
+    private fun buildAppearance() {
+        sectionTitle("主題")
+        val t = card()
+        val current = prefs.getString("keyboard_theme", "dynamic") ?: "dynamic"
+        val hasPhoto = java.io.File(filesDir, "keyboard_bg.jpg").exists()
+        val themes = listOf(
+            Triple("dynamic", "動態取色（預設）", if (android.os.Build.VERSION.SDK_INT >= 31) "跟著桌布配色，換桌布鍵盤顏色也會跟著變。" else "需要 Android 12 以上，這支手機會使用經典配色。"),
+            Triple("system", "經典", "灰白配色，跟著系統切換淺色和深色。"),
+            Triple("light", "淺色", "永遠使用淺色。"),
+            Triple("dark", "深色", "永遠使用深色。"),
+            Triple("photo", "照片", if (hasPhoto) "用你選的照片當鍵盤背景，按鍵半透明。" else "選一張照片當鍵盤背景。")
+        )
+        for ((id, title, summary) in themes) {
+            val row = row(t, null, clickable = true)
+            texts(textColumn(row), title, summary)
+            val radio = com.google.android.material.radiobutton.MaterialRadioButton(this).apply {
+                isChecked = id == current
+                isClickable = false
+            }
+            row.addView(radio)
+            row.setOnClickListener {
+                if (id == "photo" && !hasPhoto) {
+                    pickPhoto.launch(androidx.activity.result.PickVisualMediaRequest(androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia.ImageOnly))
+                } else {
+                    prefs.edit().putString("keyboard_theme", id).apply()
+                    render()
+                }
+            }
+        }
+        if (current == "photo") {
+            button(t, "更換照片", filled = false) {
+                pickPhoto.launch(androidx.activity.result.PickVisualMediaRequest(androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia.ImageOnly))
+            }
+            slider(t, "照片調暗", "照片太亮時調高，按鍵上的字比較清楚。", 0f, 85f, 5f, prefs.getInt("photo_dim", 35).toFloat(), { "${it.toInt()}%" }) {
+                prefs.edit().putInt("photo_dim", it.toInt()).apply()
+            }
+        }
+
+        sectionTitle("按鍵大小")
+        val sz = card()
+        slider(sz, "按鍵高度", "調整後觸控定位會依實際按鍵大小換算，不影響準確度。", 80f, 130f, 5f,
+            prefs.getFloat("key_height_scale", 1.0f) * 100f, { "${it.toInt()}%" }) {
+            prefs.edit().putFloat("key_height_scale", it / 100f).apply()
+        }
+
+        sectionTitle("鍵盤")
+        val k = card()
+        boolSwitch(k, "按鍵預覽泡泡", "按住按鍵時在上方放大顯示按到的字，長按時泡泡會變色。", "key_preview", true)
+
+        sectionTitle("候選字")
+        val c = card()
+        boolSwitch(c, "候選列穿插 Emoji 與顏文字", "關閉後候選列只顯示字詞，Emoji 與顏文字改到展開面板的分頁。", "inline_emoji_kaomoji", true)
+
+        texts(textColumn(row(c, null, clickable = false)), "展開面板每排格數", "按下候選列右邊的箭頭展開時，單字佔 1 格、詞佔 2 格。")
+        val group = MaterialButtonToggleGroup(this).apply {
+            isSingleSelection = true
+            isSelectionRequired = true
+        }
+        val ids = HashMap<Int, Int>()
+        for (n in listOf(5, 6, 7)) {
+            val b = MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+                id = View.generateViewId()
+                text = "$n 格"
+                isAllCaps = false
+            }
+            ids[b.id] = n
+            group.addView(b, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            if (prefs.getInt("candidate_grid_cells", 6) == n) group.check(b.id)
+        }
+        group.addOnButtonCheckedListener { _, id, isChecked ->
+            if (isChecked) ids[id]?.let { prefs.edit().putInt("candidate_grid_cells", it).apply() }
+        }
+        c.addView(group, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            setMargins(dp(16), 0, dp(16), dp(12))
+        })
+    }
+
+    // ---------- 輸入與按鍵 ----------
+
+    private fun buildInput() {
+        sectionTitle("回饋")
+        val f = card()
+        boolSwitch(f, "按鍵震動", "按下按鍵時輕微震動。", "vibrate_on_keypress", false)
+
+        sectionTitle("空白鍵")
+        val s = card()
+        infoRow(s, "按一下", "還沒打聲調時是一聲（大千標準）；已經打完聲調時送出第一個候選字。")
+        switchRow(
+            s, "連按兩下送出注音符號",
+            "關閉：連按兩下送出第一個候選字。\n開啟：直接送出打的注音，例如「ㄏㄠˇ」。",
+            prefs.getString("double_space_action", "candidate") == "raw"
+        ) { prefs.edit().putString("double_space_action", if (it) "raw" else "candidate").apply() }
+
+        sectionTitle("長按功能")
+        val l = card()
+        infoRow(l, "注音鍵", "長按後放開，直接輸入注音符號本身（例如「ㄅ」）。長按時泡泡變色，滑開就取消。")
+        infoRow(l, "「，」鍵", "長按開啟這個設定畫面。")
+        infoRow(l, "地球鍵", "長按切換到其他輸入法。")
+        infoRow(l, "候選字", "帶小鉛筆的是你自己打出來的詞，長按可以刪除。")
+    }
+
+    // ---------- 選字引擎 ----------
+
+    private fun buildEngine() {
+        sectionTitle("運作方式")
+        val e = card()
+        infoRow(e, "整句選字", "依詞庫與前後文，一次挑出整句最通順的組合；打錯一兩個鍵也會一起考慮。")
+        infoRow(e, "免聲調與簡拼", "可以不打聲調，也可以只打聲母，例如「ㄎㄅㄉ」→「看不到」。")
+        infoRow(e, "動態感應區", "依你前面打的字，在背景微調每個按鍵的判定範圍（注音與英文）。點在按鍵正中央一律照按的鍵，不會被改掉。")
+        infoRow(e, "打錯自動修正", "常打錯的注音（例如 ㄉㄨㄠ→ㄉㄧㄠ）選過一次正確的字後就會記住。")
+
+        sectionTitle("個人化按鍵校正")
+        val t = card()
+        val n = dict.spatial.sampleCount()
+        if (n < 300) {
+            infoRow(t, "學習中：已收集 $n / 300 次按鍵", "輸入法會記住你按每個鍵時習慣偏哪個方向，自動校正判定位置。收集滿 300 次就建立好你的基準。")
+        } else {
+            infoRow(t, "已完成校正，持續更新中", "基準已建立。之後依最近約 300 次按鍵持續微調：換手機殼、換握法也會慢慢跟上，舊習慣自然淡出。")
+        }
+        infoRow(t, "刪掉重打也會學", "只刪一個注音就馬上改按別的鍵，會把按歪的那一下記成「想按的是新的鍵」。")
+        button(t, "重設按鍵校正", filled = false) {
+            confirm("重設按鍵校正？", "清除已學到的按鍵習慣偏移，從頭開始學習。選字學習不受影響。", "重設") {
+                dict.resetTouchCalibration()
+                render()
+            }
+        }
+    }
+
+    // ---------- 字典與學習 ----------
+
+    /** 資料讀進來之前的佔位；卡片開版面動畫，資料到了平滑展開、淡入 */
+    private fun loadingText(parent: LinearLayout) = com.google.android.material.progressindicator.LinearProgressIndicator(this).apply {
+        isIndeterminate = true
+        trackCornerRadius = dp(4)
+        parent.addView(this, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            setMargins(dp(20), dp(28), dp(20), dp(28))
+        })
+        parent.layoutTransition = smoothLayout().apply {
+            disableTransitionType(android.animation.LayoutTransition.DISAPPEARING)
+        }
+    }
+
+    private fun buildDictionary() {
+        sectionTitle("學習統計")
+        val s = card()
+        val loading = loadingText(s)
+        lifecycleScope.launch {
+            val st = dict.learningStats()
+            if (stack.lastOrNull() != Page.DICTIONARY) return@launch
+            s.removeView(loading)
+            infoRow(s, "學過的中文詞：${st.words}", "選過的字詞會往前排，加到一定程度就不再增加。")
+            infoRow(s, "自建詞：${st.userCreated}", "系統詞典沒有、由你打出來的詞（候選列上帶小鉛筆）。")
+            infoRow(s, "接續搭配：${st.bigrams}", "打完一個詞後預測下一個詞用的個人搭配（中英文）。")
+            infoRow(s, "英文單字：${st.englishWords}", null)
+            infoRow(s, "打錯修正：${st.typos}", null)
+        }
+
+        sectionTitle("管理")
+        val m = card()
+        navRow(m, R.drawable.ic_user_word, "自建詞", "查看並刪除你打出來的詞") { open(Page.USER_WORDS) }
+        button(m, "清除所有學習紀錄", filled = false, danger = true) {
+            confirm(
+                "清除所有學習紀錄？",
+                "學過的字詞、自建詞、接續搭配、英文單字與打錯修正都會刪除，無法復原。按鍵校正不受影響。",
+                "清除"
+            ) {
+                lifecycleScope.launch {
+                    dict.clearLearning()
+                    render()
+                }
+            }
+        }
+
+        sectionTitle("接續詞語料")
+        val phrases = card()
+        infoRow(phrases, "詞與詞怎麼接", "影響整句選字與選完字後聯想的下一個詞，不影響打得出哪些詞。開了多個來源時取搭配最強的那個。")
+        val phrasesLoading = loadingText(phrases)
+
+        // 詞庫清單會隨匯入一直變長，放在頁面最下面，免得把其他區塊擠下去
+        sectionTitle("詞庫")
+        val io = card()
+        navRow(io, null, "匯入詞庫", "每行一個詞的文字檔，也能直接匯入小麥注音、新酷音、RIME、Gboard 的詞庫檔；沒寫注音會自動推") {
+            importDict.launch(arrayOf("text/*", "application/octet-stream"))
+        }
+        navRow(io, null, "匯出個人詞庫", "把學過的詞與自建詞存成文字檔，換手機或備份時可以再匯入") {
+            exportDict.launch("scorpio_個人詞庫.txt")
+        }
+        val wordList = card()
+        val listLoading = loadingText(wordList)
+        lifecycleScope.launch {
+            val dicts = dict.dictionaries()
+            if (stack.lastOrNull() != Page.DICTIONARY) return@launch
+            wordList.removeView(listLoading)
+            phrases.removeView(phrasesLoading)
+            for (d in dicts) {
+                val bigram = d.group == "bigram"
+                val list = if (bigram) phrases else wordList
+                val summary = "${d.description}・${"%,d".format(d.count)} ${if (bigram) "組" else "個"}" +
+                    (d.source?.let { "\n來源：$it" } ?: "")
+                if (!d.toggleable) {
+                    infoRow(list, d.name, summary)
+                    continue
+                }
+                switchRow(list, d.name, summary, d.enabled) { on ->
+                    lifecycleScope.launch { dict.setDictionaryEnabled(d.id, on) }
+                }
+                if (d.removable) {
+                    val r = row(list, null, clickable = false)
+                    r.setPadding(dp(16), 0, dp(4), dp(4))
+                    r.addView(View(this@SettingsActivity), LinearLayout.LayoutParams(0, 1, 1f))
+                    r.addView(TextView(this@SettingsActivity).apply {
+                        text = "刪除這個詞庫"
+                        textSize = 14f
+                        setTextColor(cError)
+                        setPadding(dp(16), dp(8), dp(16), dp(8))
+                        setOnClickListener {
+                            confirm("刪除「${d.name}」？", "這個匯入的詞庫會從輸入法移除，原本的檔案不受影響。", "刪除") {
+                                lifecycleScope.launch {
+                                    dict.removeImportedDictionary(d.id)
+                                    render()
+                                }
+                            }
+                        }
+                    })
+                }
+            }
+        }
+    }
+
+    private fun buildUserWords() {
+        val c = card()
+        val loading = loadingText(c)
+        lifecycleScope.launch {
+            val words = dict.userCreatedWords()
+            if (stack.lastOrNull() != Page.USER_WORDS) return@launch
+            c.removeView(loading)
+            if (words.isEmpty()) {
+                infoRow(c, "目前沒有自建詞", "系統詞典沒有、但你選過的詞會出現在這裡。")
+                return@launch
+            }
+            titleView.text = "自建詞（${words.size}）"
+            for ((word, count) in words) {
+                val row = row(c, null, clickable = false)
+                row.minimumHeight = dp(52)
+                row.setPadding(dp(16), dp(6), dp(4), dp(6))
+                texts(textColumn(row), word, "用過 $count 次")
+                row.addView(TextView(this@SettingsActivity).apply {
+                    text = "刪除"
+                    textSize = 14f
+                    setTextColor(cError)
+                    setPadding(dp(16), dp(12), dp(16), dp(12))
+                    val tv = android.util.TypedValue()
+                    theme.resolveAttribute(android.R.attr.selectableItemBackgroundBorderless, tv, true)
+                    setBackgroundResource(tv.resourceId)
+                    setOnClickListener {
+                        lifecycleScope.launch {
+                            if (dict.deleteUserWord(word)) c.removeView(row)
+                        }
+                    }
+                })
+            }
+        }
+    }
+
+    // ---------- 關於 ----------
+
+    private fun buildAbout() {
+        val a = card()
+        infoRow(a, "Scorpio 智慧注音", "版本 ${versionName()}")
+        sectionTitle("資料來源")
+        val d = card()
+        infoRow(d, "英文單字頻率", "FrequencyWords（hermitdave，CC BY-SA 4.0）")
+        infoRow(d, "英文接續詞", "OpenSubtitles 對白語料（OPUS 專案）統計")
+        infoRow(d, "倉頡、速成碼表", "Unicode Unihan（Unicode License v3）")
+        lifecycleScope.launch {
+            val dicts = dict.dictionaries()
+            if (stack.lastOrNull() != Page.ABOUT) return@launch
+            for (x in dicts) {
+                val src = x.source ?: continue
+                infoRow(d, if (x.group == "bigram") "接續詞：${x.name}" else x.name, src)
+            }
+        }
+    }
+}

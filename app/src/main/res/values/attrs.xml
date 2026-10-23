@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 鍵盤主題色（各主題 style 提供，res/color/ime_* 以 ?attr 參照） -->
+<resources>
+    <attr name="imeBg" format="color|reference" />
+    <attr name="imeKeyBg" format="color|reference" />
+    <attr name="imeKeyFunctionBg" format="color|reference" />
+    <attr name="imeKeyPressed" format="color|reference" />
+    <attr name="imeKeyActionBg" format="color|reference" />
+    <attr name="imeKeyActionIcon" format="color|reference" />
+    <attr name="imeTextPrimary" format="color|reference" />
+    <attr name="imeTextSecondary" format="color|reference" />
+    <attr name="imeCandidateBg" format="color|reference" />
+    <attr name="imeCandidateText" format="color|reference" />
+    <attr name="imeCandidateDivider" format="color|reference" />
+    <attr name="imeComposingText" format="color|reference" />
+</resources>

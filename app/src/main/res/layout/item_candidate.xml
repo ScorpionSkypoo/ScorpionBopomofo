@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="wrap_content"
+    android:layout_height="match_parent"
+    android:orientation="horizontal"
+    android:gravity="center_vertical">
+
+    <TextView
+        android:id="@+id/tv_candidate"
+        android:layout_width="wrap_content"
+        android:layout_height="match_parent"
+        android:gravity="center"
+        android:paddingStart="15dp"
+        android:paddingEnd="15dp"
+        android:textColor="@color/ime_candidate_text"
+        android:textSize="21sp"
+        android:background="?android:attr/selectableItemBackgroundBorderless" />
+
+    <View
+        android:id="@+id/candidate_divider"
+        android:layout_width="1dp"
+        android:layout_height="18dp"
+        android:background="@color/ime_candidate_divider" />
+</LinearLayout>

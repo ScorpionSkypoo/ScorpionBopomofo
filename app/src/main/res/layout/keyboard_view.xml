@@ -1,0 +1,616 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/keyboard_root"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:background="@drawable/bg_keyboard_root">
+
+    <!-- 1. 頂部工具列 / 候選字列 (高度 46dp，背景無縫融入鍵盤底色，無分隔線) -->
+    <FrameLayout
+        android:id="@+id/candidate_bar_container"
+        android:layout_width="match_parent"
+        android:layout_height="46dp"
+        android:background="@android:color/transparent">
+
+        <!-- 狀態 A: 閒置工具列 (無候選字時顯示統一設計的簡約向量圖標) -->
+        <LinearLayout
+            android:id="@+id/layout_idle_bar"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:paddingStart="8dp"
+            android:paddingEnd="8dp">
+
+            <!-- 1. Emoji 向量圖示 (直接切換 Emoji 鍵盤) -->
+            <FrameLayout
+                android:id="@+id/btn_idle_emoji"
+                android:layout_width="40dp"
+                android:layout_height="36dp"
+                android:background="?android:attr/selectableItemBackgroundBorderless"
+                android:clickable="true"
+                android:focusable="true">
+                <ImageView
+                    android:layout_width="22dp"
+                    android:layout_height="22dp"
+                    android:layout_gravity="center"
+                    android:src="@drawable/ic_ime_emoji" />
+            </FrameLayout>
+
+            <!-- 2. 顏文字 向量圖示 (直接切換顏文字庫) -->
+            <FrameLayout
+                android:id="@+id/btn_idle_kaomoji"
+                android:layout_width="40dp"
+                android:layout_height="36dp"
+                android:layout_marginStart="8dp"
+                android:background="?android:attr/selectableItemBackgroundBorderless"
+                android:clickable="true"
+                android:focusable="true">
+                <ImageView
+                    android:layout_width="22dp"
+                    android:layout_height="22dp"
+                    android:layout_gravity="center"
+                    android:src="@drawable/ic_ime_kaomoji" />
+            </FrameLayout>
+
+            <!-- 手寫 -->
+            <FrameLayout
+                android:id="@+id/btn_idle_handwriting"
+                android:layout_width="40dp"
+                android:layout_height="36dp"
+                android:layout_marginStart="8dp"
+                android:background="?android:attr/selectableItemBackgroundBorderless"
+                android:clickable="true"
+                android:focusable="true">
+                <ImageView
+                    android:layout_width="22dp"
+                    android:layout_height="22dp"
+                    android:layout_gravity="center"
+                    android:src="@drawable/ic_ime_handwriting" />
+            </FrameLayout>
+
+            <View
+                android:layout_width="0dp"
+                android:layout_height="1dp"
+                android:layout_weight="1" />
+
+            <!-- 3. 設定 / 返回 向量圖示 (返回鍵覆蓋在設定按鈕上，按一下切換/返回) -->
+            <FrameLayout
+                android:id="@+id/btn_idle_settings"
+                android:layout_width="40dp"
+                android:layout_height="36dp"
+                android:background="?android:attr/selectableItemBackgroundBorderless"
+                android:clickable="true"
+                android:focusable="true">
+                <ImageView
+                    android:id="@+id/iv_idle_settings_icon"
+                    android:layout_width="22dp"
+                    android:layout_height="22dp"
+                    android:layout_gravity="center"
+                    android:src="@drawable/ic_ime_settings" />
+            </FrameLayout>
+        </LinearLayout>
+
+        <!-- 狀態 B: 活躍候選字列 (打字時顯示) -->
+        <LinearLayout
+            android:id="@+id/layout_candidate_active"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:visibility="gone">
+
+            <androidx.recyclerview.widget.RecyclerView
+                android:id="@+id/rv_candidates"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1"
+                android:overScrollMode="never" />
+
+            <FrameLayout
+                android:id="@+id/btn_expand_candidates"
+                android:layout_width="40dp"
+                android:layout_height="match_parent"
+                android:clickable="true"
+                android:focusable="true"
+                android:background="?android:attr/selectableItemBackgroundBorderless">
+                <ImageView
+                    android:id="@+id/iv_expand_chevron"
+                    android:layout_width="20dp"
+                    android:layout_height="20dp"
+                    android:layout_gravity="center"
+                    android:src="@drawable/ic_ime_chevron_down"
+                    android:tint="@color/ime_text_primary" />
+            </FrameLayout>
+        </LinearLayout>
+    </FrameLayout>
+
+    <!-- 2. 展開面板 (包含全螢幕候選字大列表、Emoji 庫與豐富顏文字分類) -->
+    <LinearLayout
+        android:id="@+id/panel_expanded"
+        android:layout_width="match_parent"
+        android:layout_height="246dp"
+        android:orientation="vertical"
+        android:visibility="gone"
+        android:background="@color/ime_bg">
+
+        <!-- 頂部分類頁籤列 (Gboard 風格極簡膠囊分類) -->
+        <HorizontalScrollView
+            android:id="@+id/layout_expanded_header"
+            android:layout_width="match_parent"
+            android:layout_height="40dp"
+            android:scrollbars="none"
+            android:overScrollMode="never">
+            <LinearLayout
+                android:id="@+id/layout_expanded_tabs"
+                android:layout_width="wrap_content"
+                android:layout_height="match_parent"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:paddingStart="8dp"
+                android:paddingEnd="8dp" />
+        </HorizontalScrollView>
+
+        <androidx.recyclerview.widget.RecyclerView
+            android:id="@+id/rv_expanded_grid"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:paddingStart="4dp"
+            android:paddingEnd="4dp"
+            android:paddingBottom="4dp"
+            android:overScrollMode="never" />
+    </LinearLayout>
+
+    <!-- 3. 注音大千主鍵盤 (按鍵高度 44dp，維持 2.5dp 原始黃金間距，全域由空間座標定位模式接管) -->
+    <LinearLayout
+        android:id="@+id/panel_zhuyin"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:paddingTop="4dp"
+        android:paddingBottom="6dp"
+        android:paddingStart="3dp"
+        android:paddingEnd="3dp">
+
+        <com.p3dro.scorpio.ime.ui.ZhuyinGridLayout
+            android:id="@+id/grid_zhuyin"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
+            <!-- 第 1 排 (44dp) -->
+            <LinearLayout
+                android:id="@+id/row_1"
+                android:layout_width="match_parent"
+                android:layout_height="44dp"
+                android:orientation="horizontal"
+                android:weightSum="10" />
+
+            <!-- 第 2 排 (44dp) -->
+            <LinearLayout
+                android:id="@+id/row_2"
+                android:layout_width="match_parent"
+                android:layout_height="44dp"
+                android:layout_marginTop="4dp"
+                android:orientation="horizontal"
+                android:weightSum="10" />
+
+            <!-- 第 3 排 (44dp) -->
+            <LinearLayout
+                android:id="@+id/row_3"
+                android:layout_width="match_parent"
+                android:layout_height="44dp"
+                android:layout_marginTop="4dp"
+                android:orientation="horizontal"
+                android:weightSum="10" />
+
+            <!-- 第 4 排 (44dp) -->
+            <LinearLayout
+                android:id="@+id/row_4"
+                android:layout_width="match_parent"
+                android:layout_height="44dp"
+                android:layout_marginTop="4dp"
+                android:orientation="horizontal"
+                android:weightSum="10" />
+        </com.p3dro.scorpio.ime.ui.ZhuyinGridLayout>
+
+        <!-- 第 5 排 (44dp, 刪除鍵加寬至 1.5, 送出鍵 1.5 鎖定右側) -->
+        <LinearLayout
+            android:id="@+id/row_5"
+            android:layout_width="match_parent"
+            android:layout_height="44dp"
+            android:layout_marginTop="4dp"
+            android:orientation="horizontal"
+            android:weightSum="10.4">
+
+            <!-- 1. ?123 -->
+            <FrameLayout
+                android:id="@+id/btn_symbols_toggle"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1.4"
+                android:layout_marginStart="2.5dp"
+                android:layout_marginEnd="2.5dp"
+                android:background="@drawable/bg_keyboard_function_key"
+                android:clickable="true"
+                android:focusable="true">
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_gravity="center"
+                    android:text="@string/key_symbols_label"
+                    android:textColor="@color/ime_text_primary"
+                    android:textSize="14sp" />
+            </FrameLayout>
+
+            <!-- 2. 逗號 ， -->
+            <FrameLayout
+                android:id="@+id/btn_comma"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="0.9"
+                android:layout_marginStart="2.5dp"
+                android:layout_marginEnd="2.5dp"
+                android:background="@drawable/bg_keyboard_key"
+                android:clickable="true"
+                android:focusable="true">
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_gravity="center"
+                    android:text="，"
+                    android:textColor="@color/ime_text_primary"
+                    android:textSize="18sp" />
+            </FrameLayout>
+
+            <!-- 3. 語言切換球 🌐 -->
+            <FrameLayout
+                android:id="@+id/btn_globe"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="0.9"
+                android:layout_marginStart="2.5dp"
+                android:layout_marginEnd="2.5dp"
+                android:background="@drawable/bg_keyboard_function_key"
+                android:clickable="true"
+                android:focusable="true">
+                <ImageView
+                    android:layout_width="20dp"
+                    android:layout_height="20dp"
+                    android:layout_gravity="center"
+                    android:src="@drawable/ic_ime_globe"
+                    android:tint="@color/ime_text_primary" />
+            </FrameLayout>
+
+            <!-- 4. 空白鍵 (注音) -->
+            <FrameLayout
+                android:id="@+id/btn_space"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="3.3"
+                android:layout_marginStart="2.5dp"
+                android:layout_marginEnd="2.5dp"
+                android:background="@drawable/bg_keyboard_key"
+                android:clickable="true"
+                android:focusable="true">
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_gravity="center"
+                    android:id="@+id/tv_space_label"
+                    android:text="@string/space_zhuyin"
+                    android:textColor="@color/ime_text_secondary"
+                    android:textSize="13sp" />
+            </FrameLayout>
+
+            <!-- 5. ㄦ 鍵 -->
+            <FrameLayout
+                android:id="@+id/btn_er"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="0.9"
+                android:layout_marginStart="2.5dp"
+                android:layout_marginEnd="2.5dp"
+                android:background="@drawable/bg_keyboard_key"
+                android:clickable="true"
+                android:focusable="true">
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_gravity="center"
+                    android:text="ㄦ"
+                    android:textColor="@color/ime_text_primary"
+                    android:textSize="18sp" />
+            </FrameLayout>
+
+            <!-- 6. 退格刪除鍵 ⌫ (加寬至 1.5，觸控更精準) -->
+            <FrameLayout
+                android:id="@+id/btn_backspace"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1.5"
+                android:layout_marginStart="2.5dp"
+                android:layout_marginEnd="2.5dp"
+                android:background="@drawable/bg_keyboard_function_key"
+                android:clickable="true"
+                android:focusable="true">
+                <ImageView
+                    android:layout_width="20dp"
+                    android:layout_height="20dp"
+                    android:layout_gravity="center"
+                    android:src="@drawable/ic_ime_backspace"
+                    android:tint="@color/ime_text_primary" />
+            </FrameLayout>
+
+            <!-- 7. Enter 送出鍵 ↵ (權重 1.5，右側絕對對齊) -->
+            <FrameLayout
+                android:id="@+id/btn_enter"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1.5"
+                android:layout_marginStart="2.5dp"
+                android:layout_marginEnd="2.5dp"
+                android:background="@drawable/bg_keyboard_action_key"
+                android:clickable="true"
+                android:focusable="true">
+                <ImageView
+                    android:layout_width="20dp"
+                    android:layout_height="20dp"
+                    android:layout_gravity="center"
+                    android:src="@drawable/ic_ime_enter" />
+            </FrameLayout>
+        </LinearLayout>
+    </LinearLayout>
+
+    <!-- 4. 英文 QWERTY 鍵盤 (高度維持 44dp 與注音完全 1:1，底排送出鍵絕對對齊) -->
+    <com.p3dro.scorpio.ime.ui.SpatialKeyLayout
+        android:id="@+id/panel_english"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:visibility="gone"
+        android:paddingTop="4dp"
+        android:paddingBottom="6dp"
+        android:paddingStart="3dp"
+        android:paddingEnd="3dp">
+
+        <!-- 第 0 排：數字列 (高度 44dp 與其它排完全一致，無落差) -->
+        <LinearLayout
+            android:id="@+id/en_row_0"
+            android:layout_width="match_parent"
+            android:layout_height="44dp"
+            android:orientation="horizontal"
+            android:weightSum="10" />
+
+        <!-- 第 1 排：QWERTYUIOP -->
+        <LinearLayout
+            android:id="@+id/en_row_1"
+            android:layout_width="match_parent"
+            android:layout_height="44dp"
+            android:layout_marginTop="4dp"
+            android:orientation="horizontal"
+            android:weightSum="10" />
+
+        <!-- 第 2 排：ASDFGHJKL -->
+        <LinearLayout
+            android:id="@+id/en_row_2"
+            android:layout_width="match_parent"
+            android:layout_height="44dp"
+            android:layout_marginTop="4dp"
+            android:orientation="horizontal"
+            android:weightSum="10" />
+
+        <!-- 第 3 排：Shift + ZXCVBNM + Backspace (加寬刪除鍵至 16) -->
+        <LinearLayout
+            android:id="@+id/en_row_3"
+            android:layout_width="match_parent"
+            android:layout_height="44dp"
+            android:layout_marginTop="4dp"
+            android:orientation="horizontal"
+            android:weightSum="100">
+
+            <FrameLayout
+                android:id="@+id/btn_en_shift"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="14"
+                android:layout_marginStart="2.5dp"
+                android:layout_marginEnd="2.5dp"
+                android:background="@drawable/bg_keyboard_function_key"
+                android:clickable="true"
+                android:focusable="true">
+                <ImageView
+                    android:id="@+id/iv_en_shift"
+                    android:layout_width="20dp"
+                    android:layout_height="20dp"
+                    android:layout_gravity="center"
+                    android:src="@drawable/ic_ime_shift"
+                    android:tint="@color/ime_text_primary" />
+                <TextView
+                    android:id="@+id/tv_en_shift_label"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_gravity="center"
+                    android:text="'"
+                    android:textSize="22sp"
+                    android:textColor="@color/ime_text_primary"
+                    android:visibility="gone" />
+            </FrameLayout>
+
+            <LinearLayout
+                android:id="@+id/en_row_3_keys"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="70"
+                android:orientation="horizontal"
+                android:weightSum="7" />
+
+            <FrameLayout
+                android:id="@+id/btn_en_backspace"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="16"
+                android:layout_marginStart="2.5dp"
+                android:layout_marginEnd="2.5dp"
+                android:background="@drawable/bg_keyboard_function_key"
+                android:clickable="true"
+                android:focusable="true">
+                <ImageView
+                    android:layout_width="20dp"
+                    android:layout_height="20dp"
+                    android:layout_gravity="center"
+                    android:src="@drawable/ic_ime_backspace"
+                    android:tint="@color/ime_text_primary" />
+            </FrameLayout>
+        </LinearLayout>
+
+        <!-- 第 4 排：底排 (?123, 逗號, 🌐, Space, 句號, Enter)
+             權重總和 10.4，送出鍵位於 8.9~10.4 與注音排完全重合，絕不位移 -->
+        <LinearLayout
+            android:id="@+id/en_row_4"
+            android:layout_width="match_parent"
+            android:layout_height="44dp"
+            android:layout_marginTop="4dp"
+            android:orientation="horizontal"
+            android:weightSum="10.4">
+
+            <FrameLayout
+                android:id="@+id/btn_en_symbols"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1.4"
+                android:layout_marginStart="2.5dp"
+                android:layout_marginEnd="2.5dp"
+                android:background="@drawable/bg_keyboard_function_key"
+                android:clickable="true"
+                android:focusable="true">
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_gravity="center"
+                    android:text="@string/key_symbols_label"
+                    android:textColor="@color/ime_text_primary"
+                    android:textSize="14sp" />
+            </FrameLayout>
+
+            <FrameLayout
+                android:id="@+id/btn_en_comma"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="0.9"
+                android:layout_marginStart="2.5dp"
+                android:layout_marginEnd="2.5dp"
+                android:background="@drawable/bg_keyboard_key"
+                android:clickable="true"
+                android:focusable="true">
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_gravity="center"
+                    android:text=","
+                    android:textColor="@color/ime_text_primary"
+                    android:textSize="18sp" />
+            </FrameLayout>
+
+            <FrameLayout
+                android:id="@+id/btn_en_globe"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="0.9"
+                android:layout_marginStart="2.5dp"
+                android:layout_marginEnd="2.5dp"
+                android:background="@drawable/bg_keyboard_function_key"
+                android:clickable="true"
+                android:focusable="true">
+                <ImageView
+                    android:layout_width="20dp"
+                    android:layout_height="20dp"
+                    android:layout_gravity="center"
+                    android:src="@drawable/ic_ime_globe"
+                    android:tint="@color/ime_text_primary" />
+            </FrameLayout>
+
+            <FrameLayout
+                android:id="@+id/btn_en_space"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="4.7"
+                android:layout_marginStart="2.5dp"
+                android:layout_marginEnd="2.5dp"
+                android:background="@drawable/bg_keyboard_key"
+                android:clickable="true"
+                android:focusable="true">
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_gravity="center"
+                    android:id="@+id/tv_en_space_label"
+                    android:text="English"
+                    android:textColor="@color/ime_text_secondary"
+                    android:textSize="13sp" />
+            </FrameLayout>
+
+            <FrameLayout
+                android:id="@+id/btn_en_period"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1.0"
+                android:layout_marginStart="2.5dp"
+                android:layout_marginEnd="2.5dp"
+                android:background="@drawable/bg_keyboard_key"
+                android:clickable="true"
+                android:focusable="true">
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_gravity="center"
+                    android:text="."
+                    android:textColor="@color/ime_text_primary"
+                    android:textSize="18sp" />
+            </FrameLayout>
+
+            <FrameLayout
+                android:id="@+id/btn_en_enter"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1.5"
+                android:layout_marginStart="2.5dp"
+                android:layout_marginEnd="2.5dp"
+                android:background="@drawable/bg_keyboard_action_key"
+                android:clickable="true"
+                android:focusable="true">
+                <ImageView
+                    android:layout_width="20dp"
+                    android:layout_height="20dp"
+                    android:layout_gravity="center"
+                    android:src="@drawable/ic_ime_enter" />
+            </FrameLayout>
+        </LinearLayout>
+    </com.p3dro.scorpio.ime.ui.SpatialKeyLayout>
+
+    <!-- 5. 數字與常用標點鍵盤 (44dp，空間座標定位) -->
+    <com.p3dro.scorpio.ime.ui.SpatialKeyLayout
+        android:id="@+id/panel_symbols"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:visibility="gone"
+        android:paddingTop="4dp"
+        android:paddingBottom="6dp"
+        android:paddingStart="3dp"
+        android:paddingEnd="3dp" />
+
+    <!-- 手寫面板（內容由程式建立，高度同注音／英文鍵盤） -->
+    <LinearLayout
+        android:id="@+id/panel_handwriting"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:visibility="gone"
+        android:paddingTop="4dp"
+        android:paddingBottom="6dp"
+        android:paddingStart="3dp"
+        android:paddingEnd="3dp" />
+</LinearLayout>

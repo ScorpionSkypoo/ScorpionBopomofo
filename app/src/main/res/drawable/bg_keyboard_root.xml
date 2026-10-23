@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 鍵盤整體底色：左上、右上圓角，視窗背景設為透明讓圓角外露出底下的 App -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <solid android:color="@color/ime_bg" />
+    <corners
+        android:topLeftRadius="28dp"
+        android:topRightRadius="28dp"
+        android:bottomLeftRadius="0dp"
+        android:bottomRightRadius="0dp" />
+</shape>
