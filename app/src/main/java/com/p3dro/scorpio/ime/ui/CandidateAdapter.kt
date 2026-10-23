@@ -25,18 +25,25 @@ class CandidateAdapter(
     val topCandidate: String?
         get() = items.firstOrNull()
 
+    /**
+     * 換一份候選：只通知哪幾格變了（不用 notifyDataSetChanged）。格子原地重新綁定，不必重建；
+     * 候選列固定大小（setHasFixedSize），只有列表自己重新排版，不會讓整個鍵盤跟著重新量一次
+     */
     fun submitList(newItems: List<String>) {
+        val old = items.size
         items.clear()
         items.addAll(newItems)
         userWords = emptySet()
-        notifyDataSetChanged()
+        val n = items.size
+        if (minOf(old, n) > 0) notifyItemRangeChanged(0, minOf(old, n))
+        if (n > old) notifyItemRangeInserted(old, n - old) else if (old > n) notifyItemRangeRemoved(n, old - n)
     }
 
     /** 候選更新後非同步標記使用者自建詞（只在清單沒換掉時套用） */
     fun markUserWords(forItems: List<String>, words: Set<String>) {
         if (forItems != items || words == userWords) return
         userWords = words
-        notifyDataSetChanged()
+        notifyItemRangeChanged(0, items.size)
     }
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ViewHolder {

@@ -46,6 +46,9 @@ class WordTable(val f: ScdFile) {
     fun scoreOrder(pos: Int) = bySc.get(pos)
 }
 
+/** WordStore 查詢結果快取的筆數（一筆通常幾個到幾十個詞） */
+private const val CACHE_SIZE = 1200
+
 /** 合併查詢用：哪個檔、哪一列、分數、檔內的先後 */
 private class Ref(val t: Int, val row: Int, val score: Double, val ord: Int)
 
@@ -55,6 +58,24 @@ private val refOrder = Comparator<Ref> { a, b ->
 
 /** 生效中的所有詞表（主詞庫在前，再來是開著的附加詞庫、匯入詞庫），等於舊版的 dict 表 */
 class WordStore(val tables: List<WordTable>) {
+
+    /**
+     * 查詢結果快取：打字是一鍵一鍵往上加，同一個鍵（讀音、前綴、模糊音）下一鍵大多又會再查一次，
+     * 每次都要在每個詞表各做一次二分搜尋。詞表一有變動（開關、安裝、匯入）就換一個新的 WordStore，快取跟著丟掉，不會拿到舊資料
+     */
+    private val cache = object : LinkedHashMap<String, List<WordHit>>(256, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, List<WordHit>>) = size > CACHE_SIZE
+    }
+
+    private inline fun cached(key: String, compute: () -> List<WordHit>): List<WordHit> {
+        synchronized(cache) { cache[key]?.let { return it } }
+        val v = compute()
+        synchronized(cache) { cache[key] = v }
+        return v
+    }
+
+    /** 系統要記憶體時清掉 */
+    fun clearCache() = synchronized(cache) { cache.clear() }
 
     private fun decode(refs: MutableList<Ref>, limit: Int): List<WordHit> {
         refs.sortWith(refOrder)
@@ -79,10 +100,10 @@ class WordStore(val tables: List<WordTable>) {
         return decode(refs, limit)
     }
 
-    fun byToneless(key: String, limit: Int, singleChar: Boolean = false) = exact({ it.tlIx }, key, limit, singleChar)
-    fun byReading(key: String, limit: Int, singleChar: Boolean = false) = exact({ it.rdIx }, key, limit, singleChar)
-    fun byFinals(key: String, limit: Int) = exact({ it.fnIx }, key, limit, false)
-    fun byWord(word: String, limit: Int) = exact({ it.wdIx }, word, limit, false)
+    fun byToneless(key: String, limit: Int, singleChar: Boolean = false) = cached("t$limit$singleChar\u0000$key") { exact({ it.tlIx }, key, limit, singleChar) }
+    fun byReading(key: String, limit: Int, singleChar: Boolean = false) = cached("r$limit$singleChar\u0000$key") { exact({ it.rdIx }, key, limit, singleChar) }
+    fun byFinals(key: String, limit: Int) = cached("f$limit\u0000$key") { exact({ it.fnIx }, key, limit, false) }
+    fun byWord(word: String, limit: Int) = cached("w$limit\u0000$word") { exact({ it.wdIx }, word, limit, false) }
 
     /** 前 limit 名（分數高到低、同分依位置）：一段資料列裡挑 */
     private fun topOf(t: Int, w: WordTable, rows: Iterator<Int>, limit: Int, ordOf: (Int) -> Int, into: MutableList<Ref>) {
@@ -99,7 +120,7 @@ class WordStore(val tables: List<WordTable>) {
     }
 
     /** SELECT … WHERE toneless >= ? AND toneless < ? || U+FFFF ORDER BY score DESC LIMIT n */
-    fun byTonelessPrefix(prefix: String, limit: Int): List<WordHit> {
+    fun byTonelessPrefix(prefix: String, limit: Int): List<WordHit> = cached("p$limit\u0000$prefix") {
         val refs = ArrayList<Ref>()
         for ((t, w) in tables.withIndex()) {
             val heavy = w.heavyPrefix(prefix, limit)
@@ -111,13 +132,17 @@ class WordStore(val tables: List<WordTable>) {
             if (keys.isEmpty()) continue
             topOf(t, w, (w.tlIx.start(keys.first) until w.tlIx.end(keys.last)).iterator(), limit, { it }, refs)
         }
-        return decode(refs, limit)
+        decode(refs, limit)
     }
 
     /** SELECT … WHERE toneless IN (…) ORDER BY score DESC LIMIT n */
     fun byTonelessIn(keys: Collection<String>, limit: Int): List<WordHit> {
-        val refs = ArrayList<Ref>()
         val distinct = keys.toSortedSet()
+        return cached("i$limit\u0000" + distinct.joinToString("\u0001")) { tonelessIn(distinct, limit) }
+    }
+
+    private fun tonelessIn(distinct: Set<String>, limit: Int): List<WordHit> {
+        val refs = ArrayList<Ref>()
         for ((t, w) in tables.withIndex()) {
             val rows = ArrayList<Int>()
             for (key in distinct) {
@@ -131,8 +156,12 @@ class WordStore(val tables: List<WordTable>) {
 
     /** SELECT … WHERE (initials = ? OR initials = ? OR …) AND toneless LIKE ? ORDER BY score DESC LIMIT n */
     fun byInitialsLike(initials: Collection<String>, pattern: String, limit: Int): List<WordHit> {
-        val refs = ArrayList<Ref>()
         val keys = initials.toSortedSet()
+        return cached("n$limit\u0000$pattern\u0000" + keys.joinToString("\u0001")) { initialsLike(keys, pattern, limit) }
+    }
+
+    private fun initialsLike(keys: Set<String>, pattern: String, limit: Int): List<WordHit> {
+        val refs = ArrayList<Ref>()
         val like = Like(pattern)
         for ((t, w) in tables.withIndex()) {
             val best = ArrayList<Ref>()

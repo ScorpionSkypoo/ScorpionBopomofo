@@ -266,18 +266,21 @@ class ScorpioDictManager private constructor(private val context: Context) {
     private var user = UserStore()
 
     /**
-     * 基準測試用（dev/BenchReceiver）：暫時不看個人學習（記憶體鏡像換成空的），跑完再換回來。
-     * SQLite 裡的學習紀錄不動；用來跟沒有學習紀錄的舊版比詞庫查詢的結果
+     * 基準測試用（dev/BenchReceiver）：暫時不看個人化資料（學習紀錄的記憶體鏡像換成空的、按鍵落點校正換回預設），跑完再換回來。
+     * SQLite 與設定裡的資料不動；兩次測試之間使用者打字造成的學習與校正變化就不會影響比對
      */
     fun <T> withoutUserData(block: () -> T): T {
         val saved = user
+        val savedSpatial = spatial.serialize()
         user = UserStore()
         synchronized(typoMemory) { typoMemory.clear() }
+        spatial.restore(null)
         invalidateCandidateCaches()
         try {
             return block()
         } finally {
             user = saved
+            spatial.restore(savedSpatial)
             loadTypoMemory()
             invalidateCandidateCaches()
         }
@@ -1648,6 +1651,8 @@ class ScorpioDictManager private constructor(private val context: Context) {
         data class Node(val score: Double, val text: String, val last: String)
         val beam = 6
         val dp = Array(n + 1) { mutableListOf<Node>() }
+        // 每個位置「整句文字 → 在 dp 裡的位置」：同一句話只留最高分，不必每次從頭比對字串
+        val dpIndex = Array(n + 1) { HashMap<String, Int>() }
         dp[0].add(Node(0.0, "", prevWord.orEmpty()))
 
         val variantsPerPos = syllables.mapIndexed { idx, syl ->
@@ -1758,14 +1763,16 @@ class ScorpioDictManager private constructor(private val context: Context) {
                 val bestCands = spanCands.entries.sortedByDescending { it.value }.take(4)
                 val lengthBonus = (len - 1) * 2.8
                 val target = dp[i + len]
+                val targetIndex = dpIndex[i + len]
                 for (node in dp[i]) {
                     for ((w, sc) in bestCands) {
                         val total = node.score + sc + lengthBonus + bigramBonus(node.last, w, sc)
                         val text = node.text + w
-                        val existing = target.indexOfFirst { it.text == text }
-                        if (existing >= 0) {
+                        val existing = targetIndex[text]
+                        if (existing != null) {
                             if (total > target[existing].score) target[existing] = Node(total, text, w)
                         } else {
+                            targetIndex[text] = target.size
                             target.add(Node(total, text, w))
                         }
                     }
@@ -2053,6 +2060,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
         subSyllableCache.trimToSize(subSyllableCache.maxSize() / 2)
         SQLiteDatabase.releaseMemory()
         if (level != android.content.ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN) {
+            data.words.clearCache()
             subSyllableCache.evictAll()
             bigramCache.evictAll()
             userOnlyCache.evictAll()

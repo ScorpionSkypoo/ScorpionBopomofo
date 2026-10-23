@@ -330,6 +330,10 @@ class ScorpioImeService : InputMethodService() {
             adapter = candidateAdapter
             // 每按一鍵候選列就整個換一次，淡入、移動動畫只會多畫很多幀
             itemAnimator = null
+            // 候選列的大小跟內容無關：換候選時只重排列表本身，不讓整個鍵盤重新量版面
+            setHasFixedSize(true)
+            // 一排看得到十幾格：回收池預設只留 5 格，多的每次都要重新 inflate
+            recycledViewPool.setMaxRecycledViews(0, 24)
         }
         root.findViewById<RecyclerView>(R.id.rv_expanded_grid)?.itemAnimator = null
 
