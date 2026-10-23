@@ -15,7 +15,7 @@
 | 世界國家與城市 | [Unicode CLDR](https://cldr.unicode.org/) 地區與城市名稱、[Wikidata](https://www.wikidata.org/) | Unicode License v3、CC0 1.0 |
 | 世界地標與地理 | [Wikidata](https://www.wikidata.org/) | CC0 1.0 |
 | Emoji 關鍵字 | [Unicode CLDR](https://github.com/unicode-org/cldr) zh_Hant 註解（release 46） | Unicode License v3，見 [`licenses/Unicode-License-v3.txt`](licenses/Unicode-License-v3.txt) |
-| 顏文字 | 專案初期內建的清單，原始出處未記錄 | — |
+| 顏文字 | [w33ble/emoticon-data](https://github.com/w33ble/emoticon-data)（英文標籤對應成中文分類，略過含簡體字的） | MIT License，著作權聲明見 [`licenses/emoticon-data-MIT.txt`](licenses/emoticon-data-MIT.txt) |
 | 倉頡、速成碼表 | [Unicode Unihan](https://www.unicode.org/Public/UCD/latest/ucd/) `kCangjie` | Unicode License v3 |
 | 英文單字與字頻 | [hermitdave/FrequencyWords](https://github.com/hermitdave/FrequencyWords)（OpenSubtitles 2018） | CC BY-SA 4.0 |
 | 英文接續詞 | [OPUS OpenSubtitles v2018](https://opus.nlpl.eu/OpenSubtitles/corpus/version/OpenSubtitles) 英文對白統計 | 依 OPUS 規定引用：P. Lison and J. Tiedemann (2016), *OpenSubtitles2016: Extracting Large Parallel Corpora from Movie and TV Subtitles*, LREC 2016 |

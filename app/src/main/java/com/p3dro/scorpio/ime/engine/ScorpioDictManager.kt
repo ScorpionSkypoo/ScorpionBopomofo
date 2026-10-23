@@ -22,7 +22,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
         private const val TAG = "ScorpioDictManager"
         private const val DB_NAME = "scorpio_dict.db"
         private const val DB_MIN_SIZE_BYTES = 18 * 1024 * 1024L
-        private const val CURRENT_DB_VERSION = 21
+        private const val CURRENT_DB_VERSION = 22
         private const val PREF_DB_VERSION = "scorpio_dict_db_version"
         private const val BIGRAM_DB_NAME = "scorpio_bigram.db"
         private const val CURRENT_BIGRAM_VERSION = 4
@@ -140,21 +140,38 @@ class ScorpioDictManager private constructor(private val context: Context) {
         /** 學習加分：疊加在字典分數上，讓選過的字在同一層級內勝出，而非蓋過所有正確讀音 */
         fun learnBonus(count: Int): Double = minOf(3.0 + count * 1.5, 12.0)
 
-        // 顏文字關鍵字 → 分類（打「笑臉」「開心」等詞時同步穿插對應顏文字）
+        // 顏文字關鍵字 → 分類（打「笑臉」「開心」等詞時同步穿插對應顏文字；分類見 tools/build_kaomoji.py）
         val KAOMOJI_KEYWORDS: Map<String, String> = buildMap {
             fun reg(cat: String, vararg words: String) { words.forEach { put(it, cat) } }
-            reg("開心", "笑臉", "微笑", "笑", "笑容", "哈哈", "開心", "高興", "快樂", "愉快", "歡樂", "好笑", "笑死", "太好了", "爽", "讚", "好棒", "萬歲", "歡呼")
-            reg("害羞", "害羞", "臉紅", "不好意思", "尷尬", "靦腆")
-            reg("哭泣", "哭", "哭哭", "難過", "傷心", "眼淚", "流淚", "嗚嗚", "悲傷", "委屈", "心碎")
-            reg("生氣", "生氣", "憤怒", "火大", "氣死", "怒", "不爽", "靠北", "抓狂")
-            reg("驚訝", "驚訝", "驚嚇", "嚇到", "震驚", "哇", "什麼", "不會吧", "傻眼")
-            reg("無奈", "無奈", "沒辦法", "囧", "算了", "唉", "好吧", "無言", "汗")
-            reg("加油", "加油", "努力", "奮鬥", "衝", "拼了", "打氣", "撐住")
-            reg("感謝", "謝謝", "感謝", "多謝", "謝啦", "感恩")
+            reg("開心", "笑臉", "微笑", "笑", "笑容", "哈哈", "開心", "高興", "快樂", "愉快", "歡樂", "好笑", "笑死", "太好了", "爽", "讚", "好棒", "萬歲", "歡呼",
+                "加油", "努力", "奮鬥", "衝", "拼了", "打氣", "撐住", "興奮")
+            reg("喜歡", "喜歡", "愛", "愛你", "想你", "愛心", "謝謝", "感謝", "多謝", "謝啦", "感恩")
+            reg("親親抱抱", "親親", "抱抱", "親一個", "擁抱", "么么噠")
             reg("打招呼", "你好", "哈囉", "嗨", "早安", "午安", "掰掰", "再見", "招手")
-            reg("睡眠", "睡覺", "晚安", "睡", "好睏", "想睡", "累", "好累", "疲憊")
-            reg("賣萌", "可愛", "賣萌", "萌", "撒嬌", "乖")
-            reg("親親抱抱", "親親", "抱抱", "愛你", "喜歡", "愛", "么么噠", "想你")
+            reg("害羞", "害羞", "臉紅", "不好意思", "尷尬", "靦腆", "可愛", "萌", "撒嬌", "乖", "躲起來")
+            reg("眨眼", "眨眼", "放電")
+            reg("得意", "得意", "嘿嘿", "嘲諷", "跩")
+            reg("哭泣", "哭", "哭哭", "難過", "傷心", "眼淚", "流淚", "嗚嗚", "悲傷", "委屈", "心碎", "好痛")
+            reg("生氣", "生氣", "憤怒", "火大", "氣死", "怒", "不爽", "靠北", "抓狂")
+            reg("翻桌", "翻桌", "掀桌")
+            reg("驚訝", "驚訝", "驚嚇", "嚇到", "震驚", "哇", "不會吧", "傻眼", "害怕", "好可怕")
+            reg("疑惑", "疑惑", "為什麼", "不懂", "什麼", "想想", "思考", "嗯")
+            reg("擔心", "擔心", "緊張", "怎麼辦")
+            reg("無奈", "無奈", "沒辦法", "囧", "算了", "唉", "好吧", "無言", "汗", "隨便")
+            reg("投降", "投降", "認輸", "我輸了")
+            reg("抱歉", "抱歉", "對不起", "歹勢", "失禮")
+            reg("崩潰", "崩潰", "瘋了", "發瘋")
+            reg("陣亡", "陣亡", "死了", "掛了", "累死")
+            reg("盯著", "盯著", "瞪", "盯")
+            reg("睡覺", "睡覺", "晚安", "睡", "好睏", "想睡", "累", "好累", "疲憊")
+            reg("跳舞", "跳舞", "音樂", "唱歌", "派對")
+            reg("逃跑", "逃跑", "快跑", "跑")
+            reg("寫字", "寫字", "筆記", "讀書", "寫作業")
+            reg("貓咪", "貓", "貓咪", "喵")
+            reg("熊熊", "熊", "熊熊")
+            reg("兔兔", "兔子", "兔兔")
+            reg("狗狗", "狗", "狗狗", "汪")
+            reg("動物", "動物", "小鳥", "豬", "猴子", "魚")
         }
     
 
@@ -2608,7 +2625,10 @@ class ScorpioDictManager private constructor(private val context: Context) {
                 source = "Unicode CLDR 繁中註解（Unicode License v3）"
             )
         )
-        out.add(DictionaryInfo("kaomoji", "顏文字", "打字時穿插顏文字候選", countOf("SELECT count(*) FROM kaomoji_dict"), kaomojiEnabled))
+        out.add(DictionaryInfo(
+                "kaomoji", "顏文字", "打字時穿插顏文字候選", countOf("SELECT count(DISTINCT kaomoji) FROM kaomoji_dict"), kaomojiEnabled,
+                source = "w33ble/emoticon-data（MIT License）"
+            ))
         try {
             importDb?.rawQuery(
                 "SELECT d.id, d.name, d.enabled, (SELECT count(*) FROM import_entries e WHERE e.dict_id = d.id) FROM import_dicts d ORDER BY d.created",
@@ -2937,7 +2957,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
         val database = db ?: return@withContext emptyList()
         val list = mutableListOf<String>()
         try {
-            database.rawQuery("SELECT DISTINCT category FROM kaomoji_dict ORDER BY category ASC", null).use { cursor ->
+            database.rawQuery("SELECT category FROM kaomoji_dict GROUP BY category ORDER BY MIN(priority)", null).use { cursor ->
                 while (cursor.moveToNext()) {
                     list.add(cursor.getString(0))
                 }

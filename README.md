@@ -33,7 +33,7 @@
 - 倉頡、速成
 - 手寫（Google ML Kit 離線辨識，第一次使用時下載模型）
 - 英文：4.7 萬字補全、鄰鍵容錯、接續詞
-- Emoji（依中文詞意聯想）與顏文字
+- Emoji（依中文詞意聯想）與 1,500 多個顏文字（28 個分類）
 
 ### 詞庫
 - **可以個別開關**：主詞庫之外，流行用語、台灣地名路名、台灣景點、世界地名、世界地標、Emoji、顏文字都能各自開關。
@@ -127,4 +127,4 @@ tools/                          詞庫建置腳本與資料（packs.json、trend
 - 程式碼：[MIT License](LICENSE)
 - 詞庫資料：依各來源授權，維基百科與英文字頻衍生的部分為 CC BY-SA 4.0，詳見 [DATA_LICENSES.md](DATA_LICENSES.md)
 
-主詞庫來自[小麥注音輸入法](https://github.com/openvanilla/McBopomofo)，感謝 OpenVanilla 社群。
+主詞庫來自[小麥注音輸入法](https://github.com/openvanilla/McBopomofo)，感謝 OpenVanilla 社群；顏文字來自 Joe Fleming 的 [emoticon-data](https://github.com/w33ble/emoticon-data)。

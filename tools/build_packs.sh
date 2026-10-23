@@ -17,6 +17,8 @@ mkdir -p "$W/raw" "$W/corpus" "$W/bg"
 
 gunzip -c "$A/scorpio_dict.db.gz" > "$W/dict.db"
 "$PY" -I "$T/build_addon_dicts.py" "$W/raw" "$W/dict.db"
+# 顏文字：raw/emoticons.json 沒有就從固定版本下載
+"$PY" -I "$T/build_kaomoji.py" "$W/dict.db" $( [ -f "$W/raw/emoticons.json" ] && echo "$W/raw/emoticons.json" )
 
 gunzip -c "$A/scorpio_bigram.db.gz" > "$W/bigram.db"
 SOURCES=${*:-bg_wiki bg_ptt bg_dcard trendy}
