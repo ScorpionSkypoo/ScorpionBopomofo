@@ -150,6 +150,24 @@
         </LinearLayout>
     </FrameLayout>
 
+    <!-- 常駐的最近使用 Emoji／顏文字列（設定開啟才顯示） -->
+    <HorizontalScrollView
+        android:id="@+id/recent_bar"
+        android:layout_width="match_parent"
+        android:layout_height="38dp"
+        android:scrollbars="none"
+        android:overScrollMode="never"
+        android:visibility="gone">
+        <LinearLayout
+            android:id="@+id/layout_recent"
+            android:layout_width="wrap_content"
+            android:layout_height="match_parent"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:paddingStart="8dp"
+            android:paddingEnd="8dp" />
+    </HorizontalScrollView>
+
     <!-- 2. 展開面板 (包含全螢幕候選字大列表、Emoji 庫與豐富顏文字分類) -->
     <LinearLayout
         android:id="@+id/panel_expanded"
@@ -197,6 +215,16 @@
         android:paddingBottom="6dp"
         android:paddingStart="3dp"
         android:paddingEnd="3dp">
+
+        <!-- 常駐數字列（設定開啟才顯示） -->
+        <LinearLayout
+            android:id="@+id/row_numbers"
+            android:layout_width="match_parent"
+            android:layout_height="44dp"
+            android:layout_marginBottom="4dp"
+            android:orientation="horizontal"
+            android:weightSum="10"
+            android:visibility="gone" />
 
         <com.p3dro.scorpio.ime.ui.ZhuyinGridLayout
             android:id="@+id/grid_zhuyin"

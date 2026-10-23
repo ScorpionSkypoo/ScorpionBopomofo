@@ -5,6 +5,7 @@
         <shape android:shape="rectangle">
             <solid android:color="@color/ime_key_bg" />
             <corners android:radius="8dp" />
+            <stroke android:width="?attr/imeKeyStroke" android:color="?attr/imeKeyStrokeColor" />
         </shape>
     </item>
 </ripple>

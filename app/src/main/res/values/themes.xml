@@ -17,6 +17,22 @@
         <item name="imeCandidateText">@color/ime_classic_candidate_text</item>
         <item name="imeCandidateDivider">@color/ime_classic_candidate_divider</item>
         <item name="imeComposingText">@color/ime_classic_composing_text</item>
+        <item name="imeKeyStroke">0dp</item>
+        <item name="imeKeyStrokeColor">@android:color/transparent</item>
+        <item name="imeKeyboardRadius">28dp</item>
+    </style>
+
+    <!-- 外觀選項：疊在鍵盤主題上（設定「介面外觀 → 按鍵、鍵盤」） -->
+    <style name="ImeOverlay.KeyBorder" parent="">
+        <item name="imeKeyStroke">1dp</item>
+        <item name="imeKeyStrokeColor">@color/ime_key_stroke</item>
+    </style>
+    <style name="ImeOverlay.NoKeyBg" parent="">
+        <item name="imeKeyBg">@android:color/transparent</item>
+        <item name="imeKeyFunctionBg">@android:color/transparent</item>
+    </style>
+    <style name="ImeOverlay.SquareTop" parent="">
+        <item name="imeKeyboardRadius">0dp</item>
     </style>
 
     <!-- 設定 App：Material 3，Android 12 以上跟著桌布取色 -->

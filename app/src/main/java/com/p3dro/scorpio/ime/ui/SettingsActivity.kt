@@ -702,7 +702,16 @@ class SettingsActivity : AppCompatActivity() {
             slider(t, "照片調暗", "照片太亮時調高，按鍵上的字比較清楚。", 0f, 85f, 5f, prefs.getInt("photo_dim", 35).toFloat(), { "${it.toInt()}%" }) {
                 prefs.edit().putInt("photo_dim", it.toInt()).apply()
             }
+            slider(t, "照片透明度", "調高時照片變淡、透出底下的黑色。", 0f, 90f, 5f,
+                (100 - prefs.getInt(com.p3dro.scorpio.ime.ScorpioImeService.PREF_PHOTO_ALPHA, 100)).toFloat(), { "${it.toInt()}%" }) {
+                prefs.edit().putInt(com.p3dro.scorpio.ime.ScorpioImeService.PREF_PHOTO_ALPHA, 100 - it.toInt()).apply()
+            }
         }
+
+        sectionTitle("按鍵")
+        val ks = card()
+        boolSwitch(ks, "按鍵底色", "關掉後按鍵只剩文字，配照片背景最好看。", com.p3dro.scorpio.ime.ScorpioImeService.PREF_KEY_BG, true)
+        boolSwitch(ks, "按鍵邊框", "每個按鍵加一圈細框，按鍵底色關掉時也看得出按鍵的範圍。", com.p3dro.scorpio.ime.ScorpioImeService.PREF_KEY_BORDER, false)
 
         sectionTitle("按鍵大小")
         val sz = card()
@@ -713,6 +722,9 @@ class SettingsActivity : AppCompatActivity() {
 
         sectionTitle("鍵盤")
         val k = card()
+        boolSwitch(k, "上方圓角", "鍵盤左上、右上的圓弧角；關掉是直角。", com.p3dro.scorpio.ime.ScorpioImeService.PREF_ROUNDED, true)
+        boolSwitch(k, "常駐數字列", "注音鍵盤上方多一排 1～0，打數字不用切到符號鍵盤。", com.p3dro.scorpio.ime.ScorpioImeService.PREF_NUMBER_ROW, false)
+        boolSwitch(k, "最近使用的 Emoji 與顏文字", "工具列下方多一列，常駐顯示最近用過的 Emoji 和顏文字。", com.p3dro.scorpio.ime.ScorpioImeService.PREF_RECENT_BAR, false)
         boolSwitch(k, "按鍵預覽泡泡", "按住按鍵時在上方放大顯示按到的字，長按時泡泡會變色。", "key_preview", true)
 
         sectionTitle("候選字")

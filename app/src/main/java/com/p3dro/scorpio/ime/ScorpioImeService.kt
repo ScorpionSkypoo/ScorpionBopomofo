@@ -83,6 +83,7 @@ class ScorpioImeService : InputMethodService() {
     // 手寫送出依寫的順序排隊（前一個字還在辨識時，後一個字不能先送出）
     private val hwCommitLock = kotlinx.coroutines.sync.Mutex()
     private var panelExpanded: View? = null
+    private var recentBar: View? = null
     private var isCandidateExpanded = false
     private var ivExpandChevron: ImageView? = null
     private var layoutExpandedHeader: View? = null
@@ -154,6 +155,16 @@ class ScorpioImeService : InputMethodService() {
     private val enRow3 = listOf('z', 'x', 'c', 'v', 'b', 'n', 'm')
 
     companion object {
+        // 外觀選項（設定「介面外觀」）
+        const val PREF_KEY_BORDER = "key_border"
+        const val PREF_KEY_BG = "key_background"
+        const val PREF_ROUNDED = "keyboard_rounded"
+        const val PREF_NUMBER_ROW = "number_row"
+        const val PREF_RECENT_BAR = "recent_bar"
+        const val PREF_PHOTO_ALPHA = "photo_alpha"
+        private const val PREF_RECENT_LIST = "recent_symbols"
+        private const val RECENT_SEP = "\u001F"
+
         /** 展開候選格的字級（sp），不因詞長縮小 */
         const val EXPANDED_TEXT_SP = 20f
 
@@ -197,7 +208,9 @@ class ScorpioImeService : InputMethodService() {
     /** 會影響鍵盤畫面的設定；變了就重建鍵盤 */
     private fun themeSignature() = listOf(
         themeId(), prefs.getInt("photo_dim", 35), keyHeightScale(), photoFile().lastModified(),
-        resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK
+        resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK,
+        prefs.getBoolean(PREF_KEY_BORDER, false), prefs.getBoolean(PREF_KEY_BG, true), prefs.getBoolean(PREF_ROUNDED, true),
+        prefs.getBoolean(PREF_NUMBER_ROW, false), prefs.getBoolean(PREF_RECENT_BAR, false), prefs.getInt(PREF_PHOTO_ALPHA, 100)
     ).joinToString("|")
 
     private fun buildThemedContext(): Context {
@@ -217,7 +230,12 @@ class ScorpioImeService : InputMethodService() {
             "photo" -> R.style.ImeTheme_Photo
             else -> R.style.ImeTheme_Classic
         }
-        return android.view.ContextThemeWrapper(base, style)
+        // 外觀選項疊在主題上：按鍵邊框、按鍵底色、鍵盤上方圓角
+        return android.view.ContextThemeWrapper(base, style).apply {
+            if (prefs.getBoolean(PREF_KEY_BORDER, false)) getTheme().applyStyle(R.style.ImeOverlay_KeyBorder, true)
+            if (!prefs.getBoolean(PREF_KEY_BG, true)) getTheme().applyStyle(R.style.ImeOverlay_NoKeyBg, true)
+            if (!prefs.getBoolean(PREF_ROUNDED, true)) getTheme().applyStyle(R.style.ImeOverlay_SquareTop, true)
+        }
     }
 
     /** 按鍵高度：把所有 44dp 的按鍵排依比例縮放（觸控定位以實際按鍵大小換算，不受影響） */
@@ -260,11 +278,15 @@ class ScorpioImeService : InputMethodService() {
                 null
             }
             if (bmp != null) {
+                // 照片底下墊一層黑：照片調透明時透出來的是黑底，不是後面的 App
+                keyboardFrame.addView(View(ui).apply { setBackgroundColor(android.graphics.Color.BLACK) },
+                    FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
                 keyboardFrame.addView(ImageView(ui).apply {
                     setImageBitmap(bmp)
                     scaleType = ImageView.ScaleType.CENTER_CROP
                     val dim = prefs.getInt("photo_dim", 35).coerceIn(0, 85)
                     setColorFilter(android.graphics.Color.argb(dim * 255 / 100, 0, 0, 0), android.graphics.PorterDuff.Mode.SRC_ATOP)
+                    alpha = prefs.getInt(PREF_PHOTO_ALPHA, 100).coerceIn(10, 100) / 100f
                 }, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
             }
         }
@@ -288,6 +310,9 @@ class ScorpioImeService : InputMethodService() {
         panelSymbols = root.findViewById(R.id.panel_symbols)
         panelHandwriting = root.findViewById(R.id.panel_handwriting)
         panelExpanded = root.findViewById(R.id.panel_expanded)
+        recentBar = root.findViewById(R.id.recent_bar)
+        setupNumberRow(root)
+        refreshRecentBar()
 
         candidateAdapter = CandidateAdapter { candidate ->
             onCandidateSelected(candidate)
@@ -568,6 +593,7 @@ class ScorpioImeService : InputMethodService() {
             hwLastCommit = null
         }
         panelExpanded?.visibility = if (mode == KeyboardMode.EXPANDED) View.VISIBLE else View.GONE
+        recentBar?.visibility = if (prefs.getBoolean(PREF_RECENT_BAR, false) && mode != KeyboardMode.EXPANDED && mode != KeyboardMode.HANDWRITING) View.VISIBLE else View.GONE
 
         if (mode == KeyboardMode.EXPANDED || mode == KeyboardMode.SYMBOLS || mode == KeyboardMode.HANDWRITING) {
             ivIdleSettingsIcon?.setImageResource(R.drawable.ic_ime_back)
@@ -1478,6 +1504,7 @@ class ScorpioImeService : InputMethodService() {
     }
 
     private fun onCandidateSelected(candidate: String) {
+        if (isSymbolCandidate(candidate)) recordRecentSymbol(candidate)
         retypeCandidate = null
         lastActionWasBackspace = false
         val ic = currentInputConnection
@@ -1927,6 +1954,86 @@ class ScorpioImeService : InputMethodService() {
         updateTabStyles()
     }
 
+    // ---------- 常駐數字列、最近使用的 Emoji／顏文字 ----------
+
+    /** 注音鍵盤上方的數字列：打到一半按數字會先送出目前的字 */
+    private fun setupNumberRow(root: View) {
+        val row = root.findViewById<LinearLayout>(R.id.row_numbers) ?: return
+        row.removeAllViews()
+        row.visibility = if (prefs.getBoolean(PREF_NUMBER_ROW, false)) View.VISIBLE else View.GONE
+        if (row.visibility != View.VISIBLE) return
+        for (c in "1234567890") {
+            row.addView(FrameLayout(ui).apply {
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f).apply {
+                    setMargins(dpToPx(2.5f), 0, dpToPx(2.5f), 0)
+                }
+                background = ui.getDrawable(R.drawable.bg_keyboard_key)
+                isClickable = true
+                addView(com.p3dro.scorpio.ime.ui.KeyLabelView(ui).apply {
+                    text = c.toString()
+                    textSize = 19f
+                    setTextColor(ui.getColor(R.color.ime_text_primary))
+                    gravity = Gravity.CENTER
+                }, FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER))
+                setOnClickListener {
+                    triggerHaptic(it)
+                    if (composer.isComposing) commitTopCandidateOrRaw()
+                    currentInputConnection?.commitText(c.toString(), 1)
+                    updateBarVisibility()
+                }
+            })
+        }
+    }
+
+    /** 候選字裡的 Emoji、顏文字：沒有漢字、注音、英文字母與數字；單一字元的只算符號類（避開「，」這種標點） */
+    private fun isSymbolCandidate(s: String) = s.isNotEmpty() &&
+        s.none { it in '\u4E00'..'\u9FFF' || it in '\u3400'..'\u4DBF' || it in '\u3105'..'\u312F' || (it.code < 128 && it.isLetterOrDigit()) } &&
+        (s.length >= 2 || Character.getType(s[0]) == Character.OTHER_SYMBOL.toInt())
+
+    private fun recentSymbols(): List<String> =
+        prefs.getString(PREF_RECENT_LIST, "")!!.split(RECENT_SEP).filter { it.isNotEmpty() }
+
+    private fun recordRecentSymbol(s: String) {
+        val list = (listOf(s) + recentSymbols().filter { it != s }).take(24)
+        prefs.edit().putString(PREF_RECENT_LIST, list.joinToString(RECENT_SEP)).apply()
+        refreshRecentBar()
+    }
+
+    private fun refreshRecentBar() {
+        val box = keyboardRootView?.findViewById<LinearLayout>(R.id.layout_recent) ?: return
+        box.removeAllViews()
+        if (!prefs.getBoolean(PREF_RECENT_BAR, false)) return
+        val list = recentSymbols()
+        if (list.isEmpty()) {
+            box.addView(TextView(ui).apply {
+                text = "最近用過的 Emoji 和顏文字會出現在這裡"
+                textSize = 13f
+                setTextColor(ui.getColor(R.color.ime_text_secondary))
+                setPadding(dpToPx(8), 0, dpToPx(8), 0)
+            })
+            return
+        }
+        for (item in list) {
+            box.addView(TextView(ui).apply {
+                text = item
+                textSize = if (item.length > 3) 14f else 20f
+                gravity = Gravity.CENTER
+                setTextColor(ui.getColor(R.color.ime_text_primary))
+                setPadding(dpToPx(10), 0, dpToPx(10), 0)
+                val tv = android.util.TypedValue()
+                ui.theme.resolveAttribute(android.R.attr.selectableItemBackgroundBorderless, tv, true)
+                setBackgroundResource(tv.resourceId)
+                setOnClickListener {
+                    triggerHaptic(it)
+                    if (composer.isComposing) commitTopCandidateOrRaw()
+                    currentInputConnection?.commitText(item, 1)
+                    recordRecentSymbol(item)
+                    updateBarVisibility()
+                }
+            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        }
+    }
+
     // ---------- 擴充功能（外掛） ----------
 
     /** 釘選的外掛在工具列上各有一顆按鈕（顯示外掛的圖示字），點了直接開它的面板 */
@@ -2051,6 +2158,7 @@ class ScorpioImeService : InputMethodService() {
             val list = dictManager.getEmojisByCategory(cat)
             rvGrid.adapter = ExpandedGridAdapter(list, { emo ->
                 currentInputConnection?.commitText(emo, 1)
+                recordRecentSymbol(emo)
             })
         }
     }
@@ -2087,6 +2195,7 @@ class ScorpioImeService : InputMethodService() {
             val list = dictManager.getKaomojisByCategory(cat)
             rvGrid.adapter = ExpandedGridAdapter(list, { km ->
                 currentInputConnection?.commitText(km, 1)
+                recordRecentSymbol(km)
             }, autoSizeText = true)
         }
     }

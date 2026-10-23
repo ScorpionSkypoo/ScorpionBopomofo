@@ -13,4 +13,8 @@
     <attr name="imeCandidateText" format="color|reference" />
     <attr name="imeCandidateDivider" format="color|reference" />
     <attr name="imeComposingText" format="color|reference" />
+    <!-- 外觀選項（ImeOverlay.* 覆蓋）：按鍵邊框粗細與顏色、鍵盤上方圓角 -->
+    <attr name="imeKeyStroke" format="dimension" />
+    <attr name="imeKeyStrokeColor" format="color|reference" />
+    <attr name="imeKeyboardRadius" format="dimension" />
 </resources>
