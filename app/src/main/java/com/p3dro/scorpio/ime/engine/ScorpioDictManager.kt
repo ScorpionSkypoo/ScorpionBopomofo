@@ -22,10 +22,10 @@ class ScorpioDictManager private constructor(private val context: Context) {
         private const val TAG = "ScorpioDictManager"
         private const val DB_NAME = "scorpio_dict.db"
         private const val DB_MIN_SIZE_BYTES = 18 * 1024 * 1024L
-        private const val CURRENT_DB_VERSION = 22
+        private const val CURRENT_DB_VERSION = 23
         private const val PREF_DB_VERSION = "scorpio_dict_db_version"
         private const val BIGRAM_DB_NAME = "scorpio_bigram.db"
-        private const val CURRENT_BIGRAM_VERSION = 4
+        private const val CURRENT_BIGRAM_VERSION = 5
         private const val PREF_BIGRAM_VERSION = "scorpio_bigram_db_version"
         private const val PREF_USER_DICT_CLEANUP = "user_dict_cleanup_v1"
         private const val PREF_USER_DICT_CANONICAL = "user_dict_canonical_v1"
@@ -2026,7 +2026,8 @@ class ScorpioDictManager private constructor(private val context: Context) {
                     return
                 }
             }
-            bigramDb = SQLiteDatabase.openDatabase(file.absolutePath, null, SQLiteDatabase.OPEN_READONLY)
+            // 可寫入：線上更新的接續詞資料包直接換掉同來源的資料
+            bigramDb = SQLiteDatabase.openDatabase(file.absolutePath, null, SQLiteDatabase.OPEN_READWRITE)
             Log.i(TAG, "Bigram 詞庫開啟成功: ${file.absolutePath}")
         } catch (e: Exception) {
             Log.e(TAG, "Bigram 詞庫載入失敗", e)
@@ -2463,6 +2464,8 @@ class ScorpioDictManager private constructor(private val context: Context) {
         val group: String = "words",
         /** 來源與授權，例如「內政部全國路名資料（政府資料開放授權條款第 1 版）」；匯入的詞庫沒有 */
         val source: String? = null,
+        /** 資料包版本（線上更新用），例如 2026.10.23 */
+        val version: String? = null,
         /** 主詞庫不能關 */
         val toggleable: Boolean = true,
         /** 匯入的詞庫可以刪除 */
@@ -2596,25 +2599,28 @@ class ScorpioDictManager private constructor(private val context: Context) {
         } catch (e: Exception) {
             0
         }
+        var kaomojiPack: Pack? = null
         for (p in packs()) {
             val source = "${p.source}（${p.license}）"
+            val version = installedPackVersion(p.id, p.group).ifEmpty { p.version }
             when {
                 p.id == "core" -> out.add(
                     DictionaryInfo(
                         p.id, p.name, p.description, countOf("SELECT count(*) FROM dict WHERE source IS NULL"),
-                        enabled = true, source = source, toggleable = false
+                        enabled = true, source = source, version = p.version, toggleable = false
                     )
                 )
+                p.group == "kaomoji" -> kaomojiPack = p
                 p.group == "bigram" -> out.add(
                     DictionaryInfo(
                         p.id, p.name, p.description, count(bigramDb, "SELECT count(*) FROM bigram WHERE source = ?", p.id),
-                        addonEnabled(p.id), group = "bigram", source = source
+                        addonEnabled(p.id), group = "bigram", source = source, version = version
                     )
                 )
                 else -> out.add(
                     DictionaryInfo(
                         p.id, p.name, p.description, count(db, "SELECT count(*) FROM addon_dict WHERE source = ?", p.id),
-                        addonEnabled(p.id), source = source
+                        addonEnabled(p.id), source = source, version = version
                     )
                 )
             }
@@ -2627,7 +2633,8 @@ class ScorpioDictManager private constructor(private val context: Context) {
         )
         out.add(DictionaryInfo(
                 "kaomoji", "顏文字", "打字時穿插顏文字候選", countOf("SELECT count(DISTINCT kaomoji) FROM kaomoji_dict"), kaomojiEnabled,
-                source = "w33ble/emoticon-data（MIT License）"
+                source = kaomojiPack?.let { "${it.source}（${it.license}）" } ?: "w33ble/emoticon-data（MIT License）",
+                version = kaomojiPack?.let { installedPackVersion(it.id, it.group).ifEmpty { it.version } }
             ))
         try {
             importDb?.rawQuery(
@@ -2642,6 +2649,128 @@ class ScorpioDictManager private constructor(private val context: Context) {
             Log.e(TAG, "讀取匯入詞庫清單失敗", e)
         }
         out
+    }
+
+    // ---------- 線上更新的資料包（見 PackUpdater） ----------
+
+    /** 下載的資料包存在這裡（<id>.db.gz），App 改版覆蓋詞庫檔後用來重新套用 */
+    val packDir: File get() = File(context.filesDir, "packs").apply { mkdirs() }
+
+    /**
+     * 目前生效的資料包版本：看資料實際存放的那個資料庫
+     * 詞與顏文字在主詞庫（dict_packs），接續詞在 bigram 庫（pack_versions）；流行用語兩邊都有，取舊的那邊
+     */
+    fun installedPackVersion(id: String, group: String): String {
+        fun fromDict() = try {
+            db?.rawQuery("SELECT version FROM dict_packs WHERE id = ?", arrayOf(id))?.use { if (it.moveToFirst()) it.getString(0) else null }
+        } catch (e: Exception) {
+            null
+        } ?: ""
+        fun fromBigram() = try {
+            bigramDb?.rawQuery("SELECT version FROM pack_versions WHERE id = ?", arrayOf(id))?.use { if (it.moveToFirst()) it.getString(0) else null }
+        } catch (e: Exception) {
+            null
+        } ?: ""
+        return when {
+            group == "bigram" -> fromBigram()
+            id == "trendy" -> minOf(fromDict(), fromBigram(), PackVersion.comparator)
+            else -> fromDict()
+        }
+    }
+
+    /**
+     * 套用一個資料包（gzip 壓縮的 SQLite，格式見資料 repo 的 tools/make_packs.py）：
+     * 依 meta.id 把同來源的舊資料換成新的，並記下版本。回傳套用的版本，失敗回傳 null
+     */
+    @Synchronized
+    fun applyPack(gz: File): String? {
+        val database = db ?: return null
+        val tmp = File(context.cacheDir, "pack-${System.nanoTime()}.db")
+        try {
+            GZIPInputStream(gz.inputStream()).use { input -> FileOutputStream(tmp).use { input.copyTo(it) } }
+            val meta = HashMap<String, String>()
+            val tables = HashSet<String>()
+            SQLiteDatabase.openDatabase(tmp.absolutePath, null, SQLiteDatabase.OPEN_READONLY).use { pack ->
+                pack.rawQuery("SELECT key, value FROM meta", null).use { c -> while (c.moveToNext()) meta[c.getString(0)] = c.getString(1) }
+                pack.rawQuery("SELECT name FROM sqlite_master WHERE type = 'table'", null).use { c -> while (c.moveToNext()) tables.add(c.getString(0)) }
+            }
+            val id = meta["id"] ?: return null
+            val version = meta["version"] ?: return null
+
+            if ("addon_dict" in tables || "kaomoji_dict" in tables) {
+                database.execSQL("ATTACH DATABASE ? AS pack", arrayOf(tmp.absolutePath))
+                try {
+                    database.beginTransaction()
+                    try {
+                        if ("addon_dict" in tables) {
+                            database.delete("addon_dict", "source = ?", arrayOf(id))
+                            database.execSQL("INSERT INTO addon_dict SELECT reading, toneless, word, score, initials, finals, source FROM pack.addon_dict")
+                        }
+                        if ("kaomoji_dict" in tables) {
+                            database.delete("kaomoji_dict", null, null)
+                            database.execSQL("INSERT INTO kaomoji_dict (reading, kaomoji, category, priority) SELECT reading, kaomoji, category, priority FROM pack.kaomoji_dict")
+                        }
+                        val v = android.content.ContentValues().apply {
+                            put("id", id)
+                            put("grp", meta["group"] ?: "words")
+                            put("name", meta["name"] ?: id)
+                            put("description", meta["description"] ?: "")
+                            put("source", meta["source"] ?: "")
+                            put("license", meta["license"] ?: "")
+                            put("url", meta["url"] ?: "")
+                            put("version", version)
+                        }
+                        if (database.update("dict_packs", v, "id = ?", arrayOf(id)) == 0) {
+                            v.put("sort", 99)
+                            database.insert("dict_packs", null, v)
+                        }
+                        database.setTransactionSuccessful()
+                    } finally {
+                        database.endTransaction()
+                    }
+                } finally {
+                    database.execSQL("DETACH DATABASE pack")
+                }
+            }
+            if ("bigram" in tables) {
+                val bdb = bigramDb ?: return null
+                bdb.execSQL("CREATE TABLE IF NOT EXISTS pack_versions (id TEXT PRIMARY KEY, version TEXT NOT NULL)")
+                bdb.execSQL("ATTACH DATABASE ? AS pack", arrayOf(tmp.absolutePath))
+                try {
+                    bdb.beginTransaction()
+                    try {
+                        bdb.delete("bigram", "source = ?", arrayOf(id))
+                        bdb.execSQL("INSERT OR REPLACE INTO bigram (prev, next, score, source) SELECT prev, next, score, source FROM pack.bigram")
+                        bdb.execSQL("INSERT OR REPLACE INTO pack_versions (id, version) VALUES (?, ?)", arrayOf(id, version))
+                        bdb.setTransactionSuccessful()
+                    } finally {
+                        bdb.endTransaction()
+                    }
+                } finally {
+                    bdb.execSQL("DETACH DATABASE pack")
+                }
+            }
+            packCache = null
+            enabledBigramSources = null
+            bigramCache.evictAll()
+            invalidateCandidateCaches()
+            syncDictionarySources()
+            Log.i(TAG, "已套用資料包 $id $version")
+            return version
+        } catch (e: Exception) {
+            Log.e(TAG, "套用資料包失敗：${gz.name}", e)
+            return null
+        } finally {
+            tmp.delete()
+        }
+    }
+
+    /** 下載過、比目前生效的版本新的資料包重新套用（App 內建詞庫改版覆蓋後） */
+    private fun reapplyDownloadedPacks() {
+        for (f in packDir.listFiles { f -> f.name.endsWith(".db.gz") } ?: return) {
+            val info = PackUpdater.readMeta(f, context.cacheDir) ?: continue
+            if (PackVersion.compare(info.second, installedPackVersion(info.first, info.third)) > 0) applyPack(f)
+        }
     }
 
     suspend fun setDictionaryEnabled(id: String, enabled: Boolean) = withContext(Dispatchers.IO) {
@@ -2991,6 +3120,8 @@ class ScorpioDictManager private constructor(private val context: Context) {
         spatial.restore(spatialPrefs.getString(PREF_SPATIAL_BIAS, null))
         // 背景預先載入按鍵當下要用的資料：第一個按鍵就有音節先驗與英文字母先驗
         Thread {
+            // 詞庫檔被 App 內建的新版覆蓋時，之前下載、比內建新的資料包要重新套用
+            reapplyDownloadedPacks()
             // 附加／匯入詞庫依開關套進主詞庫（新版詞庫檔覆蓋後要重新套）
             syncDictionarySources()
             if (spatial.syllablePrefixes == null) spatial.setSyllableFrequencies(syllableFrequencies())

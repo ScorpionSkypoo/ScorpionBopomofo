@@ -178,6 +178,8 @@ class ScorpioImeService : InputMethodService() {
         composer = BopomofoComposer()
         dictManager = ScorpioDictManager.getInstance(this)
         prefs = getSharedPreferences("scorpio_ime_prefs", Context.MODE_PRIVATE)
+        // 詞庫線上更新：每天在 Wi-Fi 下檢查一次（WorkManager 會自己去重）
+        com.p3dro.scorpio.ime.engine.PackUpdater.schedule(this)
         isVibrationEnabled = prefs.getBoolean("vibrate_on_keypress", false)
         ui = buildThemedContext()
     }

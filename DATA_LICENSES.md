@@ -2,14 +2,14 @@
 
 程式碼以 [MIT License](LICENSE) 釋出。`app/src/main/assets/` 裡的詞庫資料是從下列來源整理、統計而來，各自依原來源的授權條款使用；再散布這些資料時，請一併保留本檔與 `licenses/` 目錄。
 
-每個詞庫的名稱、來源、授權與版本也記在 [`tools/data/packs.json`](tools/data/packs.json)，App 的「設定 → 字典與學習」和「關於」頁會列出來。
+每個詞庫的名稱、來源、授權與版本也記在資料 repo 的 [`packs.json`](https://github.com/ScorpionSkypoo/scorpio-ime-data/blob/main/packs.json)，App 的「設定 → 字典與學習」和「關於」頁會列出來。
 
 ## 中文詞庫（`scorpio_dict.db.gz`）
 
 | 內容 | 來源 | 授權 |
 |---|---|---|
 | 主詞庫：字詞、讀音、詞頻 | [小麥注音輸入法](https://github.com/openvanilla/McBopomofo)詞庫 | MIT License，著作權聲明見 [`licenses/McBopomofo-MIT.txt`](licenses/McBopomofo-MIT.txt) |
-| 流行與口語用語 | 本專案人工整理（[`tools/data/trendy.txt`](tools/data/trendy.txt)） | MIT License（同本專案） |
+| 流行與口語用語 | 本專案人工整理（[`sources/trendy.txt`](https://github.com/ScorpionSkypoo/scorpio-ime-data/blob/main/sources/trendy.txt)） | MIT License（同本專案） |
 | 台灣地名與路名 | 內政部戶政司〈[全國路名資料](https://data.gov.tw/dataset/35321)〉 | [政府資料開放授權條款－第 1 版](https://data.gov.tw/license) |
 | 台灣景點與地標 | 交通部觀光署〈[景點－觀光資訊資料庫](https://data.gov.tw/dataset/7777)〉 | 政府資料開放授權條款－第 1 版 |
 | 世界國家與城市 | [Unicode CLDR](https://cldr.unicode.org/) 地區與城市名稱、[Wikidata](https://www.wikidata.org/) | Unicode License v3、CC0 1.0 |
@@ -29,7 +29,7 @@
 | 維基百科 | [中文維基百科](https://dumps.wikimedia.org/zhwiki/)條目，以 OpenCC `s2twp` 轉台灣正體用語 | CC BY-SA 4.0 |
 | PTT | Hugging Face [yuhuanstudio/PTT-pretrain-zhtw](https://huggingface.co/datasets/yuhuanstudio/PTT-pretrain-zhtw)、[Riyuechang/PTT-Corpus-100K_Gossiping-1400-39400_v2](https://huggingface.co/datasets/Riyuechang/PTT-Corpus-100K_Gossiping-1400-39400_v2) | Apache License 2.0 |
 | Dcard | Hugging Face [iddle/dcard_conversations](https://huggingface.co/datasets/iddle/dcard_conversations) | MIT License |
-| 流行與口語用語 | 本專案人工整理（`tools/data/trendy.txt` 的 `[pairs]`） | MIT License（同本專案） |
+| 流行與口語用語 | 本專案人工整理（資料 repo `sources/trendy.txt` 的 `[pairs]`） | MIT License（同本專案） |
 
 ## 相同方式分享（ShareAlike）
 
@@ -37,4 +37,4 @@
 
 ## 重建詞庫
 
-建置腳本在 [`tools/`](tools/)，說明見 [README](README.md#重建詞庫)。
+建置腳本在資料 repo [scorpio-ime-data](https://github.com/ScorpionSkypoo/scorpio-ime-data)。

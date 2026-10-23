@@ -38,6 +38,7 @@
 ### 詞庫
 - **可以個別開關**：主詞庫之外，流行用語、台灣地名路名、台灣景點、世界地名、世界地標、Emoji、顏文字都能各自開關。
 - **接續詞依來源拆開**：維基百科、PTT、Dcard 三份語料各自開關，只影響整句選字和選完字後聯想的下一個詞。
+- **線上更新**：流行用語、地名、顏文字、接續詞語料每天在 Wi-Fi 下自動檢查新版，見〈詞庫與線上更新〉。
 - **匯入、匯出**：見下面的〈匯入詞庫〉。匯入的詞存在獨立檔案，App 改版換詞庫也不會不見。
 - **每個詞庫都寫清楚來源與授權**，見 [DATA_LICENSES.md](DATA_LICENSES.md)。
 
@@ -47,11 +48,11 @@
 - 按鍵預覽泡泡、按鍵高度調整、震動回饋
 
 ### 隱私
-打字內容、學習紀錄都只存在手機上，不會上傳。App 唯一的網路用途是第一次使用手寫時下載 ML Kit 辨識模型。
+打字內容、學習紀錄都只存在手機上，不會上傳。App 只在兩種情況連網：下載詞庫更新（只讀取資料 repo 的公開檔案，不送出任何資料，可以在設定關掉），以及第一次使用手寫時下載 ML Kit 辨識模型。
 
 ## 安裝
 
-目前還沒有發布 APK，請自行建置（見下一節）。需要 Android 8.0（API 26）以上、arm64 裝置。
+到 [Releases](https://github.com/ScorpionSkypoo/ScorpionBopomofo/releases) 下載 APK，或自行建置（見下一節）。需要 Android 8.0（API 26）以上、arm64 裝置。
 
 裝好後打開「Scorpio 注音輸入法」，照首頁的引導在系統設定啟用、切換成這個輸入法即可。
 
@@ -66,7 +67,7 @@ cd ScorpionBopomofo
 ./gradlew testReleaseUnitTest      # 單元測試
 ```
 
-- release 版目前用 debug 金鑰簽章，只適合自己安裝。
+- 本機建置的 release 版用 debug 金鑰簽章。GitHub Actions 在推 `v*` tag 時會用 repo secrets 裡的金鑰簽章（`SIGNING_KEYSTORE_BASE64`、`SIGNING_STORE_PASSWORD`、`SIGNING_KEY_ALIAS`、`SIGNING_KEY_PASSWORD`），並把 APK 附在 Release 上；一般 push 和 PR 只建置、跑測試。
 - 只打包 arm64-v8a（`app/build.gradle.kts` 的 `abiFilters`）。
 - 在 arm64 Linux 上建置時，Maven 上的 aapt2 是 x86 版，需要在 `~/.gradle/gradle.properties` 指定 arm64 版：`android.aapt2FromMavenOverride=/path/to/aapt2`。
 - 版本號跟著 git 產生：versionName 是最近的 `v*` tag（之後有 commit 會變成 `1.0.0-3-gabc1234`），versionCode 是 100 加上 commit 數。
@@ -91,20 +92,13 @@ cd ScorpionBopomofo
 
 「匯出個人詞庫」會把學過的詞和自建詞存成「詞、注音、使用次數」的文字檔，換手機時可以直接匯入回來。
 
-## 重建詞庫
+## 詞庫與線上更新
 
-詞庫資產（`app/src/main/assets/scorpio_dict.db.gz`、`scorpio_bigram.db.gz`）由 `tools/` 裡的腳本產生，需要 Python 3 和 `opencc`、`pyarrow`。
+詞庫資料、建置腳本與新詞雷達在另一個 repo：**[scorpio-ime-data](https://github.com/ScorpionSkypoo/scorpio-ime-data)**。
 
-```bash
-tools/build_packs.sh <工作目錄> [來源...]
-```
-
-- `<工作目錄>/raw/`：附加詞庫的原始資料（全國路名、觀光景點、CLDR、Wikidata 匯出檔）；缺的來源會保留原本的詞。
-- `<工作目錄>/corpus/`：接續詞語料（`wiki1.bz2`、`pttpre.parquet`、`pttqa.parquet`、`dcard.parquet`）；缺的來源會保留原本的資料。
-- 只更新流行用語：改 [`tools/data/trendy.txt`](tools/data/trendy.txt)，執行 `tools/build_packs.sh <工作目錄> trendy`。
-- 改完內容要調 [`tools/data/packs.json`](tools/data/packs.json) 裡的 `version`，並把 `ScorpioDictManager` 的 `CURRENT_DB_VERSION`／`CURRENT_BIGRAM_VERSION` 加一，App 才會換上新資產。
-
-各資料的下載位置寫在每支腳本開頭的說明。
+- App 內建一份基底詞庫（`app/src/main/assets/`），用 `tools/sync_data.sh` 從資料 repo 的 Release `base` 下載最新版。換上新資產時，要把 `ScorpioDictManager` 的 `CURRENT_DB_VERSION`／`CURRENT_BIGRAM_VERSION` 加一。
+- 流行用語、地名、景點、顏文字、接續詞語料可以線上更新：App 每天在 Wi-Fi 下讀一次資料 repo 的 `manifest.json`，有新版就下載、驗證 sha256 後套用（`engine/PackUpdater.kt`）。也可以在「設定 → 字典與學習 → 線上更新」手動檢查，或關掉自動更新。
+- 新詞雷達每週蒐集 Google Trends 熱搜與 PTT 近期用語，開 PR 列出候選新詞；審核合併後自動發佈新版流行用語。
 
 ## 專案結構
 
@@ -117,14 +111,16 @@ app/src/main/java/com/p3dro/scorpio/ime/
 │   ├── LetterDecoder.kt        26 鍵注音、拼音的字母解碼
 │   ├── SpatialModel.kt         按鍵落點模型與個人化校正
 │   ├── DictImportParser.kt     匯入詞庫的格式解析
+│   ├── PackUpdater.kt          詞庫線上更新（manifest、下載、校驗、排程）
 │   └── HandwritingRecognizer.kt
 └── ui/                         設定 App、按鍵、候選列、預覽泡泡
-tools/                          詞庫建置腳本與資料（packs.json、trendy.txt）
+tools/sync_data.sh              從資料 repo 下載最新的內建詞庫
 ```
 
 ## 授權
 
 - 程式碼：[MIT License](LICENSE)
 - 詞庫資料：依各來源授權，維基百科與英文字頻衍生的部分為 CC BY-SA 4.0，詳見 [DATA_LICENSES.md](DATA_LICENSES.md)
+- 線上詞庫與建置腳本：見 [scorpio-ime-data](https://github.com/ScorpionSkypoo/scorpio-ime-data)
 
 主詞庫來自[小麥注音輸入法](https://github.com/openvanilla/McBopomofo)，感謝 OpenVanilla 社群；顏文字來自 Joe Fleming 的 [emoticon-data](https://github.com/w33ble/emoticon-data)。

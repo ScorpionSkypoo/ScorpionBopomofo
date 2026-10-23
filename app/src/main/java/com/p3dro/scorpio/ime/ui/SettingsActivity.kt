@@ -137,6 +137,7 @@ class SettingsActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         prefs = getSharedPreferences("scorpio_ime_prefs", Context.MODE_PRIVATE)
         setContentView(buildFrame())
+        com.p3dro.scorpio.ime.engine.PackUpdater.schedule(this)
 
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
@@ -818,6 +819,50 @@ class SettingsActivity : AppCompatActivity() {
             }
         }
 
+        sectionTitle("線上更新")
+        val up = card()
+        val updatePrefs = getSharedPreferences(com.p3dro.scorpio.ime.engine.PackUpdater.PREFS, Context.MODE_PRIVATE)
+        switchRow(
+            up, "自動更新詞庫", "每天在 Wi-Fi 下檢查一次，有新版的流行用語、地名、接續詞語料就自動下載。",
+            updatePrefs.getBoolean(com.p3dro.scorpio.ime.engine.PackUpdater.PREF_AUTO, true)
+        ) { on ->
+            updatePrefs.edit().putBoolean(com.p3dro.scorpio.ime.engine.PackUpdater.PREF_AUTO, on).apply()
+            com.p3dro.scorpio.ime.engine.PackUpdater.schedule(this)
+        }
+        fun lastCheckText(): String {
+            val t = updatePrefs.getLong(com.p3dro.scorpio.ime.engine.PackUpdater.PREF_LAST_CHECK, 0)
+            return if (t == 0L) "還沒檢查過" else "上次檢查：" + java.text.SimpleDateFormat("M/d HH:mm", java.util.Locale.TAIWAN).format(java.util.Date(t))
+        }
+        val checkButton = button(up, "立即檢查更新", filled = false) {}
+        val status = TextView(this).apply {
+            text = lastCheckText()
+            textAppearance(this, com.google.android.material.R.attr.textAppearanceBodySmall)
+            setTextColor(cOnSurfaceVariant)
+            gravity = Gravity.CENTER
+            setPadding(dp(16), 0, dp(16), dp(12))
+        }
+        up.addView(status)
+        checkButton.setOnClickListener {
+            checkButton.isEnabled = false
+            checkButton.text = "檢查中…"
+            lifecycleScope.launch {
+                val r = com.p3dro.scorpio.ime.engine.PackUpdater.checkAndUpdate(this@SettingsActivity)
+                val msg = when {
+                    r.error != null -> r.error
+                    r.updated.isEmpty() && r.failed.isEmpty() -> "目前已經是最新版"
+                    else -> (if (r.updated.isNotEmpty()) "已更新：" + r.updated.joinToString("、") { "${it.first} ${it.second}" } else "") +
+                        (if (r.failed.isNotEmpty()) "（${r.failed.joinToString("、")} 更新失敗）" else "")
+                }
+                android.widget.Toast.makeText(this@SettingsActivity, msg, android.widget.Toast.LENGTH_LONG).show()
+                if (stack.lastOrNull() != Page.DICTIONARY) return@launch
+                if (r.updated.isNotEmpty()) render() else {
+                    checkButton.isEnabled = true
+                    checkButton.text = "立即檢查更新"
+                    status.text = lastCheckText()
+                }
+            }
+        }
+
         sectionTitle("接續詞語料")
         val phrases = card()
         infoRow(phrases, "詞與詞怎麼接", "影響整句選字與選完字後聯想的下一個詞，不影響打得出哪些詞。開了多個來源時取搭配最強的那個。")
@@ -843,7 +888,7 @@ class SettingsActivity : AppCompatActivity() {
                 val bigram = d.group == "bigram"
                 val list = if (bigram) phrases else wordList
                 val summary = "${d.description}・${"%,d".format(d.count)} ${if (bigram) "組" else "個"}" +
-                    (d.source?.let { "\n來源：$it" } ?: "")
+                    (d.source?.let { "\n來源：$it" } ?: "") + (d.version?.let { "\n版本 $it" } ?: "")
                 if (!d.toggleable) {
                     infoRow(list, d.name, summary)
                     continue
