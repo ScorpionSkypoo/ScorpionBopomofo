@@ -15,18 +15,20 @@ import java.io.File
  * 改了詞庫或選字程式後，同一支手機上「改之前跑 baseline、改之後跑 compare」，比對每一題的候選有沒有變、耗時差多少。
  *
  * 只有 shell（adb／Shizuku）能觸發：receiver 要求 DUMP 權限，一般 App 拿不到
- *   am broadcast -n com.p3dro.scorpio.ime/.dev.BenchReceiver --es mode baseline|compare
+ *   am broadcast -n com.p3dro.scorpio.ime/.dev.BenchReceiver --es mode baseline|compare [--ez nouser true]
  * 輸入是 tools/perf/make_bench_inputs.py 從詞庫隨機挑詞產生的，不含任何人打過的字；log 只記數量與耗時
  */
 class BenchReceiver : BroadcastReceiver() {
 
     override fun onReceive(context: Context, intent: Intent) {
         val mode = intent.getStringExtra("mode") ?: "compare"
+        // nouser：不看個人學習（跟沒有學習紀錄的舊版比詞庫查詢）
+        val noUser = intent.getBooleanExtra("nouser", false)
         val pending = goAsync()
         val app = context.applicationContext
         Thread {
             try {
-                run(app, mode)
+                if (noUser) ScorpioDictManager.getInstance(app).withoutUserData { run(app, mode) } else run(app, mode)
             } catch (e: Exception) {
                 Log.e(TAG, "基準測試失敗", e)
                 File(outDir(app), "summary.txt").writeText("error ${e.javaClass.simpleName}\n")

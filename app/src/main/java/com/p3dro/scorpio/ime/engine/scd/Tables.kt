@@ -358,13 +358,31 @@ class EmojiTable(val f: ScdFile) {
         return (catIx.start(k) until catIx.end(k)).map { f.str(catEmoji.get(catIx.row(it))) }
     }
 
-    /** 第 i 筆（關鍵字, emoji, 優先序），設定頁瀏覽用 */
-    fun row(i: Int) = Triple(f.str(kw.get(i)), f.str(emoji.get(i)), pri.get(i))
+    /**
+     * 設定頁瀏覽（emoji, 關鍵字以「、」接起來），同舊版
+     * SELECT emoji, group_concat(keyword, '、') FROM emoji_dict [WHERE keyword LIKE %q% OR emoji = q] GROUP BY emoji ORDER BY MIN(priority)：
+     * 先篩再分組；組依最小優先序、再依 emoji 的 UTF-8 順序；組內關鍵字依 UTF-8 順序
+     */
+    fun browse(q: String): List<Pair<String, String>> {
+        val like = Like("%$q%")
+        val groups = HashMap<String, Pair<IntArray, MutableList<String>>>()
+        for (i in 0 until size) {
+            val k = f.str(kw.get(i))
+            val e = f.str(emoji.get(i))
+            if (q.isNotEmpty() && !like.matches(k) && e != q) continue
+            val g = groups.getOrPut(e) { intArrayOf(Int.MAX_VALUE) to ArrayList() }
+            g.first[0] = minOf(g.first[0], pri.get(i))
+            g.second.add(k)
+        }
+        return groups.entries.sortedWith { a, b ->
+            val c = a.value.first[0].compareTo(b.value.first[0])
+            if (c != 0) c else compareUtf8(a.key, b.key)
+        }.map { (e, g) -> e to g.second.sortedWith { a, b -> compareUtf8(a, b) }.joinToString("、") }
+    }
 }
 
 /** 顏文字：依讀音、依分類找（優先序小的在前） */
 class KaomojiTable(val f: ScdFile) {
-    private val read = f.ints("k.read")!!
     private val kao = f.ints("k.kao")!!
     private val cat = f.ints("k.cat")!!
     private val pri = f.ints("k.pri")!!
@@ -383,10 +401,38 @@ class KaomojiTable(val f: ScdFile) {
     fun byCategory(category: String, limit: Int = Int.MAX_VALUE) = list(ct, category, limit)
     fun categories(): List<String> = List(cats.limit()) { f.str(cats.get(it)) }
 
-    /** 第 i 筆（讀音, 顏文字, 分類, 優先序），設定頁瀏覽用 */
     fun kaomoji(i: Int) = f.str(kao.get(i))
-    fun category(i: Int) = f.str(cat.get(i))
-    fun priority(i: Int) = pri.get(i)
-    @Suppress("unused")
-    fun reading(i: Int) = f.str(read.get(i))
+
+    /**
+     * 設定頁瀏覽（顏文字, 分類以「、」接起來），同舊版
+     * SELECT kaomoji, group_concat(category, '、') FROM kaomoji_dict [WHERE category LIKE %q% OR kaomoji LIKE %q%] GROUP BY kaomoji ORDER BY MIN(priority)：
+     * 先篩再分組；組依最小優先序、再依顏文字的 UTF-8 順序；組內分類依原順序
+     */
+    fun browse(q: String): List<Pair<String, String>> {
+        val like = Like("%$q%")
+        val groups = HashMap<String, Pair<IntArray, MutableList<String>>>()
+        for (i in 0 until size) {
+            val c = f.str(cat.get(i))
+            val k = f.str(kao.get(i))
+            if (q.isNotEmpty() && !like.matches(c) && !like.matches(k)) continue
+            val g = groups.getOrPut(k) { intArrayOf(Int.MAX_VALUE) to ArrayList() }
+            g.first[0] = minOf(g.first[0], pri.get(i))
+            g.second.add(c)
+        }
+        return groups.entries.sortedWith { a, b ->
+            val c = a.value.first[0].compareTo(b.value.first[0])
+            if (c != 0) c else compareUtf8(a.key, b.key)
+        }.map { (k, g) -> k to g.second.joinToString("、") }
+    }
+}
+
+/** SQLite 的字串比較（BINARY：UTF-8 位元組順序；跟 String.compareTo 只在補充平面字元上不同） */
+fun compareUtf8(a: String, b: String): Int {
+    val x = a.toByteArray(Charsets.UTF_8)
+    val y = b.toByteArray(Charsets.UTF_8)
+    for (i in 0 until minOf(x.size, y.size)) {
+        val c = (x[i].toInt() and 0xff) - (y[i].toInt() and 0xff)
+        if (c != 0) return c
+    }
+    return x.size - y.size
 }

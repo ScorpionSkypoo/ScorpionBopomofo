@@ -84,4 +84,11 @@ dependencies {
     testImplementation("junit:junit:4.13.2")
     // 單元測試裡 android.jar 的 org.json 只是空殼，換成真的實作
     testImplementation("org.json:json:20240303")
+    // SCD 與舊版 SQLite 詞庫逐筆比對（ScdSqliteEquivalenceTest；有給 SQLite 詞庫路徑才跑）
+    testImplementation("org.xerial:sqlite-jdbc:3.45.1.0")
+}
+
+tasks.withType<Test>().configureEach {
+    // -Pscd.sqlite=<解壓後的 scorpio_dict.db> 時跑 SCD／SQLite 逐筆比對
+    (project.findProperty("scd.sqlite") as String?)?.let { systemProperty("scd.sqlite", it) }
 }

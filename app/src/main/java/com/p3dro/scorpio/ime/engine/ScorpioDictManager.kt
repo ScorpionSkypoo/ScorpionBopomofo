@@ -16,6 +16,7 @@ import com.p3dro.scorpio.ime.engine.scd.ScdFile
 import com.p3dro.scorpio.ime.engine.scd.ScdWriter
 import com.p3dro.scorpio.ime.engine.scd.WordStore
 import com.p3dro.scorpio.ime.engine.scd.WordTable
+import com.p3dro.scorpio.ime.engine.scd.compareUtf8
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -261,7 +262,26 @@ class ScorpioDictManager private constructor(private val context: Context) {
     private var db: SQLiteDatabase? = null
 
     /** 個人學習的記憶體鏡像：每按一鍵的查詢走這裡 */
-    private val user = UserStore()
+    @Volatile
+    private var user = UserStore()
+
+    /**
+     * 基準測試用（dev/BenchReceiver）：暫時不看個人學習（記憶體鏡像換成空的），跑完再換回來。
+     * SQLite 裡的學習紀錄不動；用來跟沒有學習紀錄的舊版比詞庫查詢的結果
+     */
+    fun <T> withoutUserData(block: () -> T): T {
+        val saved = user
+        user = UserStore()
+        synchronized(typoMemory) { typoMemory.clear() }
+        invalidateCandidateCaches()
+        try {
+            return block()
+        } finally {
+            user = saved
+            loadTypoMemory()
+            invalidateCandidateCaches()
+        }
+    }
 
     // 計算結果的快取（詞庫查詢本身直接讀 mmap，不必快取）
     private val subSyllableCache = LruCache<String, List<Pair<String, Double>>>(1500)
@@ -2224,28 +2244,15 @@ class ScorpioDictManager private constructor(private val context: Context) {
      */
     suspend fun browseDictionary(id: String, query: String, offset: Int, limit: Int): List<Pair<String, String>> = withContext(Dispatchers.IO) {
         val q = query.trim()
-        fun String.has() = q.isEmpty() || contains(q, ignoreCase = true)
+        // 同舊版的 LIKE '%q%'（ASCII 不分大小寫）
+        val like = Like("%$q%")
+        fun String.has() = q.isEmpty() || like.matches(this)
         fun <T> page(rows: Sequence<T>) = rows.drop(offset).take(limit).toList()
         val d = data
         try {
             when {
-                id == "emoji" -> {
-                    val e = d.emoji ?: return@withContext emptyList()
-                    val byEmoji = LinkedHashMap<String, MutableList<String>>()
-                    val order = ArrayList<Triple<String, String, Int>>((0 until e.size).map { e.row(it) })
-                    order.sortBy { it.third }
-                    for ((kw, emoji, _) in order) byEmoji.getOrPut(emoji) { ArrayList() }.add(kw)
-                    page(byEmoji.asSequence().filter { (emoji, kws) -> q.isEmpty() || emoji == q || kws.any { it.has() } }
-                        .map { (emoji, kws) -> emoji to kws.joinToString("、") })
-                }
-                id == "kaomoji" -> {
-                    val k = d.kaomoji ?: return@withContext emptyList()
-                    val order = (0 until k.size).sortedBy { k.priority(it) }
-                    val byKao = LinkedHashMap<String, MutableList<String>>()
-                    for (i in order) byKao.getOrPut(k.kaomoji(i)) { ArrayList() }.add(k.category(i))
-                    page(byKao.asSequence().filter { (kao, cats) -> q.isEmpty() || kao.has() || cats.any { it.has() } }
-                        .map { (kao, cats) -> kao to cats.joinToString("、") })
-                }
+                id == "emoji" -> page(d.emoji?.browse(q).orEmpty().asSequence())
+                id == "kaomoji" -> page(d.kaomoji?.browse(q).orEmpty().asSequence())
                 else -> {
                     val f = loaded[id] ?: return@withContext emptyList()
                     if (f.has("b.prev") && f.group == "bigram") {
@@ -2255,8 +2262,9 @@ class ScorpioDictManager private constructor(private val context: Context) {
                             .map { (prev, next) -> "$prev → $next" to "" })
                     } else {
                         val w = WordTable(f)
+                        val macro = Like("MACRO@%")
                         page((0 until w.size).asSequence().map { w.scoreOrder(it) }
-                            .filter { !(id == "core" && w.word(it).startsWith("MACRO@")) }
+                            .filter { !(id == "core" && macro.matches(w.word(it))) }
                             .filter { w.word(it).has() || w.reading(it).has() }
                             .map { w.word(it) to w.reading(it).replace('-', ' ') })
                     }
@@ -2500,14 +2508,15 @@ class ScorpioDictManager private constructor(private val context: Context) {
             keys.add(prevWord)
             if (prevWord.length > 1) keys.add(prevWord.takeLast(1))
             for (key in keys) {
-                val hits = ArrayList<Pair<String, Double>>()
-                for ((_, t) in tables) t.forEach(key, 14) { next, score -> hits.add(next to score) }
-                hits.sortByDescending { it.second }
-                var taken = 0
-                val seen = HashSet<String>()
-                for ((w, _) in hits) {
-                    if (!seen.add(w)) continue
-                    if (++taken > 14) break
+                // SELECT next FROM bigram WHERE prev = ? ORDER BY score DESC LIMIT 14：舊版 bigram 表的主鍵是 (prev, next, source)，
+                // 同分依 next（UTF-8）再依來源；不同來源的同一組搭配各算一筆
+                val hits = ArrayList<Triple<String, Double, String>>()
+                for ((id, t) in tables) t.forEach(key, 14) { next, score -> hits.add(Triple(next, score, id)) }
+                hits.sortWith { a, b ->
+                    if (a.second != b.second) b.second.compareTo(a.second)
+                    else compareUtf8(a.first, b.first).let { if (it != 0) it else a.third.compareTo(b.third) }
+                }
+                for ((w, _, _) in hits.take(14)) {
                     if (!list.contains(w) && isRenderable(w)) list.add(w)
                 }
                 if (list.size >= 10) break
