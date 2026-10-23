@@ -16,6 +16,7 @@ import java.io.File
  *
  * 只有 shell（adb／Shizuku）能觸發：receiver 要求 DUMP 權限，一般 App 拿不到
  *   am broadcast -n com.p3dro.scorpio.ime/.dev.BenchReceiver --es mode baseline|compare [--ez nouser true]
+ *   am broadcast -n com.p3dro.scorpio.ime/.dev.BenchReceiver --es mode explain --es keys ㄋㄚㄒㄧㄝ（說明某組按鍵的排序）
  * 輸入是 tools/perf/make_bench_inputs.py 從詞庫隨機挑詞產生的，不含任何人打過的字；log 只記數量與耗時
  */
 class BenchReceiver : BroadcastReceiver() {
@@ -28,7 +29,11 @@ class BenchReceiver : BroadcastReceiver() {
         val app = context.applicationContext
         Thread {
             try {
-                if (noUser) ScorpioDictManager.getInstance(app).withoutUserData { run(app, mode) } else run(app, mode)
+                when {
+                    mode == "explain" -> explain(app, intent.getStringExtra("keys").orEmpty(), intent.getStringExtra("prev"))
+                    noUser -> ScorpioDictManager.getInstance(app).withoutUserData { run(app, mode) }
+                    else -> run(app, mode)
+                }
             } catch (e: Exception) {
                 Log.e(TAG, "基準測試失敗", e)
                 File(outDir(app), "summary.txt").writeText("error ${e.javaClass.simpleName}\n")
@@ -39,6 +44,23 @@ class BenchReceiver : BroadcastReceiver() {
     }
 
     private fun outDir(context: Context) = File(context.getExternalFilesDir(null), "bench").apply { mkdirs() }
+
+    /**
+     * explain：說明一組按鍵為什麼排出這些候選（--es keys ㄋㄚㄒㄧㄝ [--es prev 前一個詞]）：
+     * 整句的每一段怎麼來、幾分，前幾名候選的分數，每個鍵的鄰鍵懲罰（按在鍵中央時）。寫到 bench/explain.txt
+     */
+    private fun explain(context: Context, keys: String, prev: String?) {
+        val dict = ScorpioDictManager.getInstance(context)
+        val composer = BopomofoComposer()
+        for (c in keys) composer.append(c)
+        val trace = ArrayList<String>()
+        for (c in keys.toSet()) {
+            val pen = dict.spatial.neighborPenalties(BopomofoComposer.TouchPoint(c))
+            trace.add("鄰鍵 $c：" + pen.sortedBy { it.second }.take(4).joinToString(" ") { "${it.first}%.2f".format(it.second) })
+        }
+        runBlocking { dict.getCandidateGroups(composer.getAllSegmentations(), composer.hasExplicitTone(), prev, composer.getTouchPoints(), trace) }
+        File(outDir(context), "explain.txt").writeText(trace.joinToString("\n") + "\n")
+    }
 
     private fun run(context: Context, mode: String) {
         val dict = ScorpioDictManager.getInstance(context)
@@ -102,6 +124,22 @@ class BenchReceiver : BroadcastReceiver() {
         val out = File(dir, if (mode == "baseline") "baseline.txt" else "current.txt")
         out.writeText(results.joinToString("\n") + "\n")
         val summary = StringBuilder("$mode：${results.size} 筆結果\n$timing\n")
+        // 命中率：每個測項最後一鍵的第一候選（前三）是不是本來要打的詞（assets/bench/expected.txt：結果行號<Tab>詞）
+        try {
+            val expected = context.assets.open("bench/expected.txt").bufferedReader().readLines().mapNotNull { l ->
+                l.split('\t').takeIf { it.size == 2 }?.let { it[0].toInt() to it[1] }
+            }
+            var top1 = 0
+            var top3 = 0
+            for ((row, word) in expected) {
+                val cands = results.getOrNull(row - 1)?.substringBefore(" | ")?.split(' ') ?: continue
+                if (cands.firstOrNull() == word) top1++
+                if (cands.take(3).contains(word)) top3++
+            }
+            summary.append("命中率：第一候選 $top1/${expected.size}、前三 $top3/${expected.size}\n")
+        } catch (e: java.io.IOException) {
+            // 沒有預期答案檔
+        }
         val base = File(dir, "baseline.txt")
         if (mode != "baseline" && base.exists()) {
             val expected = base.readLines()
