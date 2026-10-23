@@ -98,10 +98,11 @@ class KeyPreview(private val root: ViewGroup) {
         }
     }
 
-    /** 長按成立：泡泡變成選中色，放開才送出 */
-    fun select(token: Any) {
+    /** 長按成立：泡泡變成選中色，放開才送出；label 有給就換成長按要送出的字 */
+    fun select(token: Any, label: String? = null) {
         val popup = active[token] ?: return
         popup.bubble.chosen = true
+        if (label != null) popup.bubble.label = label
         popup.bubble.invalidate()
     }
 

@@ -161,7 +161,7 @@ class ScorpioImeService : InputMethodService() {
         const val PREF_NUMBER_ROW = "number_row"
         const val PREF_RECENT_BAR = "recent_bar"
         const val PREF_PHOTO_ALPHA = "photo_alpha"
-        private const val PREF_RECENT_LIST = "recent_symbols"
+        const val PREF_RECENT_LIST = "recent_symbols"
         private const val RECENT_SEP = "\u001F"
 
         /** 展開候選格的字級（sp），不因詞長縮小 */
@@ -600,7 +600,8 @@ class ScorpioImeService : InputMethodService() {
      * 長按成立後滑出按鍵範圍則取消，放開什麼都不送
      */
     @SuppressLint("ClickableViewAccessibility")
-    private fun longPressKeyTouchListener(label: String, onTap: () -> Unit, onLong: () -> Unit): View.OnTouchListener {
+    /** longLabel：長按成立後泡泡改顯示的字（例如逗號鍵長按顯示「。」）；沒給就沿用 label */
+    private fun longPressKeyTouchListener(label: String, onTap: () -> Unit, onLong: () -> Unit, longLabel: String? = null): View.OnTouchListener {
         var downTime = 0L
         var longArmed = false
         var cancelled = false
@@ -619,7 +620,7 @@ class ScorpioImeService : InputMethodService() {
                     armRunnable = Runnable {
                         longArmed = true
                         triggerHaptic(v)
-                        keyPreview?.select(v)
+                        keyPreview?.select(v, longLabel)
                     }.also { v.postDelayed(it, 400L) }
                     true
                 }
@@ -676,7 +677,7 @@ class ScorpioImeService : InputMethodService() {
             }
             currentInputConnection?.commitText("。", 1)
             updateBarVisibility()
-        }))
+        }, longLabel = "。"))
 
         val btnGlobe = root.findViewById<View>(R.id.btn_globe)
         btnGlobe.setOnClickListener {

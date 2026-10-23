@@ -236,7 +236,14 @@ class SettingsActivity : AppCompatActivity() {
         }
     }
 
-    private val prefListener = SharedPreferences.OnSharedPreferenceChangeListener { _, _ -> previewField.post { refreshPreview() } }
+    // 鍵盤打字時自己會寫的設定（最近使用的 Emoji、目前的輸入法），不算「改設定」，否則選一個 Emoji 鍵盤就被重建、面板收起
+    private val runtimeKeys = setOf(
+        com.p3dro.scorpio.ime.ScorpioImeService.PREF_RECENT_LIST,
+        ChineseMethod.PREF_CURRENT
+    )
+    private val prefListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+        if (key !in runtimeKeys) previewField.post { refreshPreview() }
+    }
     private var barLifted = false
 
     private fun buildFrame(): View {
