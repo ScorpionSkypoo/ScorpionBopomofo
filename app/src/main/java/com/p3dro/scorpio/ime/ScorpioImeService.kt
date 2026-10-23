@@ -83,7 +83,6 @@ class ScorpioImeService : InputMethodService() {
     // 手寫送出依寫的順序排隊（前一個字還在辨識時，後一個字不能先送出）
     private val hwCommitLock = kotlinx.coroutines.sync.Mutex()
     private var panelExpanded: View? = null
-    private var recentBar: View? = null
     private var isCandidateExpanded = false
     private var ivExpandChevron: ImageView? = null
     private var layoutExpandedHeader: View? = null
@@ -210,7 +209,7 @@ class ScorpioImeService : InputMethodService() {
         themeId(), prefs.getInt("photo_dim", 35), keyHeightScale(), photoFile().lastModified(),
         resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK,
         prefs.getBoolean(PREF_KEY_BORDER, false), prefs.getBoolean(PREF_KEY_BG, true), prefs.getBoolean(PREF_ROUNDED, true),
-        prefs.getBoolean(PREF_NUMBER_ROW, false), prefs.getBoolean(PREF_RECENT_BAR, false), prefs.getInt(PREF_PHOTO_ALPHA, 100)
+        prefs.getBoolean(PREF_NUMBER_ROW, false), prefs.getInt(PREF_PHOTO_ALPHA, 100)
     ).joinToString("|")
 
     private fun buildThemedContext(): Context {
@@ -310,7 +309,6 @@ class ScorpioImeService : InputMethodService() {
         panelSymbols = root.findViewById(R.id.panel_symbols)
         panelHandwriting = root.findViewById(R.id.panel_handwriting)
         panelExpanded = root.findViewById(R.id.panel_expanded)
-        recentBar = root.findViewById(R.id.recent_bar)
         setupNumberRow(root)
         refreshRecentBar()
 
@@ -332,26 +330,6 @@ class ScorpioImeService : InputMethodService() {
 
         ivIdleSettingsIcon = root.findViewById(R.id.iv_idle_settings_icon)
 
-        // 閒置列捷徑：Emoji 切換（再按一下收起回到鍵盤）
-        root.findViewById<View>(R.id.btn_idle_emoji)?.setOnClickListener {
-            triggerHaptic(it)
-            if (currentMode == KeyboardMode.EXPANDED && currentExpandedType == ExpandedType.EMOJI) {
-                collapseCandidates()
-            } else {
-                openEmojiPanel(root)
-            }
-        }
-
-        // 閒置列捷徑：顏文字切換（再按一下收起回到鍵盤）
-        root.findViewById<View>(R.id.btn_idle_kaomoji)?.setOnClickListener {
-            triggerHaptic(it)
-            if (currentMode == KeyboardMode.EXPANDED && currentExpandedType == ExpandedType.KAOMOJI) {
-                collapseCandidates()
-            } else {
-                openKaomojiPanel(root)
-            }
-        }
-
         // 閒置列捷徑：⚙️ 設定 / ‹ 返回（在展開/符號時覆蓋在設定鍵位置作為返回按鈕）
         root.findViewById<View>(R.id.btn_idle_settings)?.setOnClickListener {
             triggerHaptic(it)
@@ -365,13 +343,7 @@ class ScorpioImeService : InputMethodService() {
             }
         }
 
-        // 閒置列捷徑：手寫（再按一下回到鍵盤）
-        root.findViewById<View>(R.id.btn_idle_handwriting)?.setOnClickListener {
-            triggerHaptic(it)
-            if (currentMode == KeyboardMode.HANDWRITING) collapseCandidates() else setKeyboardMode(KeyboardMode.HANDWRITING)
-        }
-
-        refreshPinnedPlugins(root)
+        refreshToolbar(root)
 
         // 下拉展開大候選區 ⌵ 點擊：展開或折疊
         root.findViewById<View>(R.id.btn_expand_candidates).setOnClickListener {
@@ -454,7 +426,8 @@ class ScorpioImeService : InputMethodService() {
         if (method != chineseMethod || composer.decoder?.kind != method.decoderKind) applyChineseMethod(method)
         finishEnglishWord(learn = false)
         setKeyboardMode(KeyboardMode.ZHUYIN)
-        keyboardRootView?.let { refreshPinnedPlugins(it) }
+        keyboardRootView?.let { refreshToolbar(it) }
+        refreshRecentBar()
         updateBarVisibility()
     }
 
@@ -588,7 +561,6 @@ class ScorpioImeService : InputMethodService() {
             hwLastCommit = null
         }
         panelExpanded?.visibility = if (mode == KeyboardMode.EXPANDED) View.VISIBLE else View.GONE
-        recentBar?.visibility = if (prefs.getBoolean(PREF_RECENT_BAR, false) && mode != KeyboardMode.EXPANDED && mode != KeyboardMode.HANDWRITING) View.VISIBLE else View.GONE
 
         if (mode == KeyboardMode.EXPANDED || mode == KeyboardMode.SYMBOLS || mode == KeyboardMode.HANDWRITING) {
             ivIdleSettingsIcon?.setImageResource(R.drawable.ic_ime_back)
@@ -691,7 +663,7 @@ class ScorpioImeService : InputMethodService() {
             setKeyboardMode(KeyboardMode.SYMBOLS)
         }
 
-        // 「，」：點一下輸入逗號，長按（放開時）開設定
+        // 「，」：點一下輸入逗號，長按（放開時）輸入句號
         root.findViewById<View>(R.id.btn_comma).setOnTouchListener(longPressKeyTouchListener("，", onTap = {
             if (composer.isComposing) {
                 commitTopCandidateOrRaw()
@@ -699,10 +671,11 @@ class ScorpioImeService : InputMethodService() {
             currentInputConnection?.commitText("，", 1)
             updateBarVisibility()
         }, onLong = {
-            val intent = Intent(this, com.p3dro.scorpio.ime.ui.SettingsActivity::class.java).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            if (composer.isComposing) {
+                commitTopCandidateOrRaw()
             }
-            startActivity(intent)
+            currentInputConnection?.commitText("。", 1)
+            updateBarVisibility()
         }))
 
         val btnGlobe = root.findViewById<View>(R.id.btn_globe)
@@ -754,6 +727,11 @@ class ScorpioImeService : InputMethodService() {
         }))
 
         root.findViewById<View>(R.id.btn_backspace).setOnTouchListener(RepeatTouchListener {
+            triggerHaptic(root)
+            handleBackspace()
+        })
+        // 展開面板（Emoji、顏文字、擴充功能）頁籤列右邊的刪除鍵
+        root.findViewById<View>(R.id.btn_panel_backspace)?.setOnTouchListener(RepeatTouchListener {
             triggerHaptic(root)
             handleBackspace()
         })
@@ -2001,8 +1979,8 @@ class ScorpioImeService : InputMethodService() {
         val list = recentSymbols()
         if (list.isEmpty()) {
             box.addView(TextView(ui).apply {
-                text = "最近用過的 Emoji 和顏文字會出現在這裡"
-                textSize = 13f
+                text = "最近用過的 Emoji 會出現在這裡"
+                textSize = 12f
                 setTextColor(ui.getColor(R.color.ime_text_secondary))
                 setPadding(dpToPx(8), 0, dpToPx(8), 0)
             })
@@ -2011,7 +1989,7 @@ class ScorpioImeService : InputMethodService() {
         for (item in list) {
             box.addView(TextView(ui).apply {
                 text = item
-                textSize = if (item.length > 3) 14f else 20f
+                textSize = if (item.length > 3) 13f else 19f
                 gravity = Gravity.CENTER
                 setTextColor(ui.getColor(R.color.ime_text_primary))
                 setPadding(dpToPx(10), 0, dpToPx(10), 0)
@@ -2033,28 +2011,31 @@ class ScorpioImeService : InputMethodService() {
 
     private var openPluginId: String? = null
 
-    /** 安裝的外掛各有一顆工具列按鈕（依設定裡的順序），點了開它的面板、再點一下收起 */
-    private fun refreshPinnedPlugins(root: View) {
-        val box = root.findViewById<LinearLayout>(R.id.layout_pinned_plugins) ?: return
+    /** 工具列左邊的工具（Emoji、顏文字、手寫、擴充功能），顯示哪些與順序依設定；點了開面板、再點一下收起 */
+    private fun refreshToolbar(root: View) {
+        val box = root.findViewById<LinearLayout>(R.id.layout_tools) ?: return
         box.removeAllViews()
-        for (p in com.p3dro.scorpio.ime.engine.Plugins.installed(this)) {
+        for (t in com.p3dro.scorpio.ime.engine.Toolbar.visible(this)) {
             box.addView(FrameLayout(ui).apply {
-                contentDescription = p.name
+                contentDescription = t.name
                 val tv = android.util.TypedValue()
                 ui.theme.resolveAttribute(android.R.attr.selectableItemBackgroundBorderless, tv, true)
                 setBackgroundResource(tv.resourceId)
-                addView(ImageView(ui).apply {
-                    setImageResource(com.p3dro.scorpio.ime.engine.Plugins.iconRes(p.icon))
-                }, FrameLayout.LayoutParams(dpToPx(22), dpToPx(22), Gravity.CENTER))
+                addView(ImageView(ui).apply { setImageResource(t.icon) }, FrameLayout.LayoutParams(dpToPx(22), dpToPx(22), Gravity.CENTER))
                 setOnClickListener {
                     triggerHaptic(it)
-                    if (currentMode == KeyboardMode.EXPANDED && currentExpandedType == ExpandedType.PLUGINS && openPluginId == p.id) {
-                        collapseCandidates()
-                    } else {
-                        openPluginPanel(root, p.id)
+                    when (t.id) {
+                        "emoji" -> if (currentMode == KeyboardMode.EXPANDED && currentExpandedType == ExpandedType.EMOJI) collapseCandidates() else openEmojiPanel(root)
+                        "kaomoji" -> if (currentMode == KeyboardMode.EXPANDED && currentExpandedType == ExpandedType.KAOMOJI) collapseCandidates() else openKaomojiPanel(root)
+                        "handwriting" -> if (currentMode == KeyboardMode.HANDWRITING) collapseCandidates() else setKeyboardMode(KeyboardMode.HANDWRITING)
+                        else -> {
+                            val id = t.id.removePrefix("plugin:")
+                            if (currentMode == KeyboardMode.EXPANDED && currentExpandedType == ExpandedType.PLUGINS && openPluginId == id) collapseCandidates()
+                            else openPluginPanel(root, id)
+                        }
                     }
                 }
-            }, LinearLayout.LayoutParams(dpToPx(40), dpToPx(36)).apply { marginStart = dpToPx(8) })
+            }, LinearLayout.LayoutParams(dpToPx(40), dpToPx(36)).apply { marginEnd = dpToPx(4) })
         }
     }
 

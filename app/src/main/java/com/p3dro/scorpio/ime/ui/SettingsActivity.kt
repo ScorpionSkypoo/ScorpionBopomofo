@@ -47,7 +47,7 @@ class SettingsActivity : AppCompatActivity() {
         DICTIONARY("字典與學習"),
         USER_WORDS("自建詞"),
         DICT_DETAIL("詞庫內容"),
-        PLUGINS("擴充功能"),
+        PLUGINS("工具列與擴充功能"),
         ABOUT("關於")
     }
 
@@ -139,6 +139,8 @@ class SettingsActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         prefs = getSharedPreferences("scorpio_ime_prefs", Context.MODE_PRIVATE)
         setContentView(buildFrame())
+        prefs.registerOnSharedPreferenceChangeListener(prefListener)
+        getSharedPreferences("scorpio_plugins", Context.MODE_PRIVATE).registerOnSharedPreferenceChangeListener(prefListener)
         com.p3dro.scorpio.ime.engine.PackUpdater.schedule(this)
 
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
@@ -156,6 +158,12 @@ class SettingsActivity : AppCompatActivity() {
         stack.add(if (needsSetup && !prefs.getBoolean("onboarding_skipped", false)) Page.ONBOARDING else Page.HOME)
         if (intent?.getStringExtra(EXTRA_PAGE) == "plugins") stack.add(Page.PLUGINS)
         render(1)
+    }
+
+    override fun onDestroy() {
+        prefs.unregisterOnSharedPreferenceChangeListener(prefListener)
+        getSharedPreferences("scorpio_plugins", Context.MODE_PRIVATE).unregisterOnSharedPreferenceChangeListener(prefListener)
+        super.onDestroy()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -217,6 +225,18 @@ class SettingsActivity : AppCompatActivity() {
     }
 
     private lateinit var bar: LinearLayout
+    private lateinit var previewBox: LinearLayout
+    private lateinit var previewField: EditText
+    private val previewPages = setOf(Page.METHODS, Page.APPEARANCE, Page.INPUT, Page.PLUGINS)
+
+    /** 設定改了：重新連上試打框，輸入法會依新設定重建鍵盤 */
+    private fun refreshPreview() {
+        if (::previewField.isInitialized && previewField.hasFocus()) {
+            (getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager)?.restartInput(previewField)
+        }
+    }
+
+    private val prefListener = SharedPreferences.OnSharedPreferenceChangeListener { _, _ -> previewField.post { refreshPreview() } }
     private var barLifted = false
 
     private fun buildFrame(): View {
@@ -252,6 +272,25 @@ class SettingsActivity : AppCompatActivity() {
         }
         bar.addView(titleView, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         frame.addView(bar)
+
+        // 即時預覽：輸入法、介面外觀、輸入與按鍵、工具列頁面上方固定一個試打框，鍵盤自動彈出，改設定馬上看得到
+        previewBox = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), 0, dp(16), dp(8))
+            visibility = View.GONE
+        }
+        val previewLayout = com.google.android.material.textfield.TextInputLayout(
+            this, null, com.google.android.material.R.attr.textInputOutlinedStyle
+        ).apply {
+            hint = "試打看看，改設定鍵盤會馬上更新"
+            setBoxCornerRadii(dp(16).toFloat(), dp(16).toFloat(), dp(16).toFloat(), dp(16).toFloat())
+        }
+        previewField = com.google.android.material.textfield.TextInputEditText(previewLayout.context).apply {
+            maxLines = 2
+        }
+        previewLayout.addView(previewField)
+        previewBox.addView(previewLayout)
+        frame.addView(previewBox)
 
         scroll = ScrollView(this).apply {
             isFillViewport = true
@@ -311,6 +350,18 @@ class SettingsActivity : AppCompatActivity() {
         backButton.visibility = if (stack.size > 1) View.VISIBLE else View.GONE
         titleView.setPadding(if (stack.size > 1) dp(4) else dp(16), 0, 0, 0)
         val keepY = scroll.scrollY
+        val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+        if (page in previewPages && isImeSelected()) {
+            if (previewBox.visibility != View.VISIBLE) {
+                previewBox.visibility = View.VISIBLE
+                previewField.requestFocus()
+                previewField.post { imm?.showSoftInput(previewField, InputMethodManager.SHOW_IMPLICIT) }
+            }
+        } else if (previewBox.visibility == View.VISIBLE) {
+            imm?.hideSoftInputFromWindow(previewField.windowToken, 0)
+            previewField.clearFocus()
+            previewBox.visibility = View.GONE
+        }
         content.layoutTransition = null
         content.removeAllViews()
         when (page) {
@@ -623,16 +674,19 @@ class SettingsActivity : AppCompatActivity() {
         if (!ready) button(status, "完成設定") { open(Page.ONBOARDING) }
         testField(status, "在這裡試打…")
 
-        sectionTitle("設定")
+        sectionTitle("鍵盤")
         val nav = card()
         val methods = ChineseMethod.enabled(prefs).joinToString("、") { it.label }
         navRow(nav, R.drawable.ic_set_keyboard, "輸入法", "$methods、英文") { open(Page.METHODS) }
-        navRow(nav, R.drawable.ic_set_palette, "介面外觀", "主題、照片背景、按鍵大小、候選列") { open(Page.APPEARANCE) }
+        navRow(nav, R.drawable.ic_set_palette, "介面外觀", "主題、照片背景、按鍵樣式、數字列") { open(Page.APPEARANCE) }
         navRow(nav, R.drawable.ic_set_engine, "輸入與按鍵", "震動、空白鍵、長按功能") { open(Page.INPUT) }
-        navRow(nav, R.drawable.ic_set_book, "選字引擎", "整句選字、動態感應區、按鍵校正") { open(Page.ENGINE) }
-        navRow(nav, R.drawable.ic_set_book, "字典與學習", "詞庫開關、匯入匯出、學習統計、自建詞") { open(Page.DICTIONARY) }
-        navRow(nav, R.drawable.ic_set_extension, "擴充功能", "工具列的日期時間、常用符號、文字工具等，可以線上安裝") { open(Page.PLUGINS) }
-        navRow(nav, R.drawable.ic_set_info, "關於", "版本與資料來源") { open(Page.ABOUT) }
+        navRow(nav, R.drawable.ic_set_extension, "工具列與擴充功能", "工具列要放哪些工具、最近使用的 Emoji、線上安裝擴充功能") { open(Page.PLUGINS) }
+
+        sectionTitle("選字與詞庫")
+        val more = card()
+        navRow(more, R.drawable.ic_set_book, "選字引擎", "整句選字、動態感應區、按鍵校正") { open(Page.ENGINE) }
+        navRow(more, R.drawable.ic_set_book, "字典與學習", "詞庫開關、匯入匯出、學習統計、自建詞") { open(Page.DICTIONARY) }
+        navRow(more, R.drawable.ic_set_info, "關於", "版本、資料來源、GitHub") { open(Page.ABOUT) }
     }
 
     // ---------- 輸入法 ----------
@@ -724,7 +778,6 @@ class SettingsActivity : AppCompatActivity() {
         val k = card()
         boolSwitch(k, "上方圓角", "鍵盤左上、右上的圓弧角；關掉是直角。", com.p3dro.scorpio.ime.ScorpioImeService.PREF_ROUNDED, true)
         boolSwitch(k, "常駐數字列", "注音鍵盤上方多一排 1～0，打數字不用切到符號鍵盤。", com.p3dro.scorpio.ime.ScorpioImeService.PREF_NUMBER_ROW, false)
-        boolSwitch(k, "最近使用的 Emoji 與顏文字", "工具列下方多一列，常駐顯示最近用過的 Emoji 和顏文字。", com.p3dro.scorpio.ime.ScorpioImeService.PREF_RECENT_BAR, false)
         boolSwitch(k, "按鍵預覽泡泡", "按住按鍵時在上方放大顯示按到的字，長按時泡泡會變色。", "key_preview", true)
 
         sectionTitle("候選字")
@@ -774,7 +827,7 @@ class SettingsActivity : AppCompatActivity() {
         sectionTitle("長按功能")
         val l = card()
         infoRow(l, "注音鍵", "長按後放開，直接輸入注音符號本身（例如「ㄅ」）。長按時泡泡變色，滑開就取消。")
-        infoRow(l, "「，」鍵", "長按開啟這個設定畫面。")
+        infoRow(l, "「，」鍵", "長按輸入句號「。」。")
         infoRow(l, "地球鍵", "長按切換到其他輸入法。")
         infoRow(l, "候選字", "帶小鉛筆的是你自己打出來的詞，長按可以刪除。")
     }
@@ -1059,45 +1112,61 @@ class SettingsActivity : AppCompatActivity() {
     // ---------- 擴充功能 ----------
 
     private fun buildPlugins() {
+        sectionTitle("工具列")
+        val tb = card()
+        boolSwitch(tb, "最近使用的 Emoji 與顏文字", "工具列中間常駐最近用過的 Emoji 和顏文字，可以左右滑。",
+            com.p3dro.scorpio.ime.ScorpioImeService.PREF_RECENT_BAR, false)
+        infoRow(tb, "左邊的工具", "勾選要顯示的工具，用箭頭調整順序；全部不勾也可以。")
+        val tools = com.p3dro.scorpio.ime.engine.Toolbar.all(this)
+        for ((i, t) in tools.withIndex()) {
+            val r = row(tb, t.icon, clickable = true)
+            texts(textColumn(r), t.name, null)
+            fun iconButton(res: Int, desc: String, enabled: Boolean, onClick: () -> Unit) = ImageView(this).apply {
+                setImageResource(res)
+                setColorFilter(if (enabled) cOnSurfaceVariant else (cOnSurfaceVariant and 0x00FFFFFF) or 0x40000000)
+                contentDescription = desc
+                isEnabled = enabled
+                setPadding(dp(8), dp(8), dp(8), dp(8))
+                val tv = android.util.TypedValue()
+                theme.resolveAttribute(android.R.attr.selectableItemBackgroundBorderless, tv, true)
+                setBackgroundResource(tv.resourceId)
+                setOnClickListener { onClick() }
+                r.addView(this, LinearLayout.LayoutParams(dp(40), dp(40)))
+            }
+            iconButton(R.drawable.ic_set_arrow_up, "往前", i > 0) {
+                com.p3dro.scorpio.ime.engine.Toolbar.move(this, t.id, -1)
+                render()
+            }
+            iconButton(R.drawable.ic_set_arrow_down, "往後", i < tools.size - 1) {
+                com.p3dro.scorpio.ime.engine.Toolbar.move(this, t.id, 1)
+                render()
+            }
+            val cb = com.google.android.material.checkbox.MaterialCheckBox(this).apply { isChecked = t.visible }
+            cb.setOnCheckedChangeListener { _, on ->
+                com.p3dro.scorpio.ime.engine.Toolbar.setVisible(this, t.id, on)
+                refreshPreview()
+            }
+            r.addView(cb)
+            r.setOnClickListener { cb.toggle() }
+        }
+
+        sectionTitle("擴充功能")
         val intro = card()
-        infoRow(intro, "工具列的擴充功能",
-            "裝好後直接出現在鍵盤工具列上，順序可以在這裡調整。擴充功能只能插入文字、轉換你選取的文字、用選取的文字開網址；" +
+        infoRow(intro, "線上安裝的工具",
+            "裝好後出現在上面的工具清單裡。擴充功能只能插入文字、轉換你選取的文字、用選取的文字開網址；" +
                 "不含程式碼，也讀不到你打的字，只有你點了它的項目時才會用到目前選取的文字。")
         val installed = com.p3dro.scorpio.ime.engine.Plugins.installed(this)
         if (installed.isNotEmpty()) {
-            sectionTitle("已安裝（工具列上的順序）")
+            sectionTitle("已安裝")
             val c = card()
-            for ((i, p) in installed.withIndex()) {
+            for (p in installed) {
                 val r = row(c, com.p3dro.scorpio.ime.engine.Plugins.iconRes(p.icon), clickable = false)
                 texts(textColumn(r), p.name, "${p.description}\n版本 ${p.version}".trim())
-                fun iconButton(res: Int, desc: String, enabled: Boolean, onClick: () -> Unit) = ImageView(this).apply {
-                    setImageResource(res)
-                    setColorFilter(if (enabled) cOnSurfaceVariant else (cOnSurfaceVariant and 0x00FFFFFF) or 0x40000000)
-                    contentDescription = desc
-                    isEnabled = enabled
-                    setPadding(dp(8), dp(8), dp(8), dp(8))
-                    val tv = android.util.TypedValue()
-                    theme.resolveAttribute(android.R.attr.selectableItemBackgroundBorderless, tv, true)
-                    setBackgroundResource(tv.resourceId)
-                    setOnClickListener { onClick() }
-                    r.addView(this, LinearLayout.LayoutParams(dp(40), dp(40)))
-                }
-                iconButton(R.drawable.ic_set_arrow_up, "往前", i > 0) {
-                    com.p3dro.scorpio.ime.engine.Plugins.move(this, p.id, -1)
-                    render()
-                }
-                iconButton(R.drawable.ic_set_arrow_down, "往後", i < installed.size - 1) {
-                    com.p3dro.scorpio.ime.engine.Plugins.move(this, p.id, 1)
-                    render()
-                }
-                val rm = row(c, null, clickable = false)
-                rm.setPadding(dp(16), 0, dp(4), dp(4))
-                rm.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
-                rm.addView(TextView(this).apply {
+                r.addView(TextView(this).apply {
                     text = "移除"
                     textSize = 14f
                     setTextColor(cError)
-                    setPadding(dp(16), dp(8), dp(16), dp(8))
+                    setPadding(dp(16), dp(8), dp(8), dp(8))
                     setOnClickListener {
                         com.p3dro.scorpio.ime.engine.Plugins.uninstall(this@SettingsActivity, p.id)
                         render()

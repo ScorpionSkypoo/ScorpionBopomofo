@@ -23,54 +23,15 @@
             android:paddingStart="8dp"
             android:paddingEnd="8dp">
 
-            <!-- 1. Emoji 向量圖示 (直接切換 Emoji 鍵盤) -->
-            <FrameLayout
-                android:id="@+id/btn_idle_emoji"
-                android:layout_width="40dp"
-                android:layout_height="36dp"
-                android:background="?android:attr/selectableItemBackgroundBorderless"
-                android:clickable="true"
-                android:focusable="true">
-                <ImageView
-                    android:layout_width="22dp"
-                    android:layout_height="22dp"
-                    android:layout_gravity="center"
-                    android:src="@drawable/ic_ime_emoji" />
-            </FrameLayout>
+            <!-- 工具（Emoji、顏文字、手寫與安裝的擴充功能）：顯示哪些、順序在設定裡調，程式動態加入 -->
+            <LinearLayout
+                android:id="@+id/layout_tools"
+                android:layout_width="wrap_content"
+                android:layout_height="match_parent"
+                android:orientation="horizontal"
+                android:gravity="center_vertical" />
 
-            <!-- 2. 顏文字 向量圖示 (直接切換顏文字庫) -->
-            <FrameLayout
-                android:id="@+id/btn_idle_kaomoji"
-                android:layout_width="40dp"
-                android:layout_height="36dp"
-                android:layout_marginStart="8dp"
-                android:background="?android:attr/selectableItemBackgroundBorderless"
-                android:clickable="true"
-                android:focusable="true">
-                <ImageView
-                    android:layout_width="22dp"
-                    android:layout_height="22dp"
-                    android:layout_gravity="center"
-                    android:src="@drawable/ic_ime_kaomoji" />
-            </FrameLayout>
-
-            <!-- 手寫 -->
-            <FrameLayout
-                android:id="@+id/btn_idle_handwriting"
-                android:layout_width="40dp"
-                android:layout_height="36dp"
-                android:layout_marginStart="8dp"
-                android:background="?android:attr/selectableItemBackgroundBorderless"
-                android:clickable="true"
-                android:focusable="true">
-                <ImageView
-                    android:layout_width="22dp"
-                    android:layout_height="22dp"
-                    android:layout_gravity="center"
-                    android:src="@drawable/ic_ime_handwriting" />
-            </FrameLayout>
-
-            <!-- 安裝的擴充功能（外掛）直接排在工具列上，裝很多時可以左右滑；順序在設定裡調 -->
+            <!-- 常駐最近使用的 Emoji／顏文字（設定開啟才有內容），可以左右滑；沒開時當空白撐開 -->
             <HorizontalScrollView
                 android:layout_width="0dp"
                 android:layout_height="match_parent"
@@ -78,11 +39,13 @@
                 android:scrollbars="none"
                 android:overScrollMode="never">
                 <LinearLayout
-                    android:id="@+id/layout_pinned_plugins"
+                    android:id="@+id/layout_recent"
                     android:layout_width="wrap_content"
                     android:layout_height="match_parent"
                     android:orientation="horizontal"
-                    android:gravity="center_vertical" />
+                    android:gravity="center_vertical"
+                    android:paddingStart="4dp"
+                    android:paddingEnd="4dp" />
             </HorizontalScrollView>
 
             <!-- 3. 設定 / 返回 向量圖示 (返回鍵覆蓋在設定按鈕上，按一下切換/返回) -->
@@ -136,24 +99,6 @@
         </LinearLayout>
     </FrameLayout>
 
-    <!-- 常駐的最近使用 Emoji／顏文字列（設定開啟才顯示） -->
-    <HorizontalScrollView
-        android:id="@+id/recent_bar"
-        android:layout_width="match_parent"
-        android:layout_height="38dp"
-        android:scrollbars="none"
-        android:overScrollMode="never"
-        android:visibility="gone">
-        <LinearLayout
-            android:id="@+id/layout_recent"
-            android:layout_width="wrap_content"
-            android:layout_height="match_parent"
-            android:orientation="horizontal"
-            android:gravity="center_vertical"
-            android:paddingStart="8dp"
-            android:paddingEnd="8dp" />
-    </HorizontalScrollView>
-
     <!-- 2. 展開面板 (包含全螢幕候選字大列表、Emoji 庫與豐富顏文字分類) -->
     <LinearLayout
         android:id="@+id/panel_expanded"
@@ -164,21 +109,44 @@
         android:background="@color/ime_bg">
 
         <!-- 頂部分類頁籤列 (Gboard 風格極簡膠囊分類) -->
-        <HorizontalScrollView
+        <!-- 頁籤列＋刪除鍵（Emoji、顏文字、擴充功能面板裡也能直接刪字） -->
+        <LinearLayout
             android:id="@+id/layout_expanded_header"
             android:layout_width="match_parent"
             android:layout_height="40dp"
-            android:scrollbars="none"
-            android:overScrollMode="never">
-            <LinearLayout
-                android:id="@+id/layout_expanded_tabs"
-                android:layout_width="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical">
+            <HorizontalScrollView
+                android:layout_width="0dp"
                 android:layout_height="match_parent"
-                android:orientation="horizontal"
-                android:gravity="center_vertical"
-                android:paddingStart="8dp"
-                android:paddingEnd="8dp" />
-        </HorizontalScrollView>
+                android:layout_weight="1"
+                android:scrollbars="none"
+                android:overScrollMode="never">
+                <LinearLayout
+                    android:id="@+id/layout_expanded_tabs"
+                    android:layout_width="wrap_content"
+                    android:layout_height="match_parent"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical"
+                    android:paddingStart="8dp"
+                    android:paddingEnd="8dp" />
+            </HorizontalScrollView>
+            <FrameLayout
+                android:id="@+id/btn_panel_backspace"
+                android:layout_width="48dp"
+                android:layout_height="match_parent"
+                android:background="?android:attr/selectableItemBackgroundBorderless"
+                android:clickable="true"
+                android:focusable="true"
+                android:contentDescription="刪除">
+                <ImageView
+                    android:layout_width="22dp"
+                    android:layout_height="22dp"
+                    android:layout_gravity="center"
+                    android:src="@drawable/ic_ime_backspace"
+                    android:tint="@color/ime_text_primary" />
+            </FrameLayout>
+        </LinearLayout>
 
         <androidx.recyclerview.widget.RecyclerView
             android:id="@+id/rv_expanded_grid"
@@ -301,6 +269,16 @@
                     android:text="，"
                     android:textColor="@color/ime_text_primary"
                     android:textSize="18sp" />
+                <!-- 長按輸入句號 -->
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_gravity="top|end"
+                    android:layout_marginTop="2dp"
+                    android:layout_marginEnd="5dp"
+                    android:text="。"
+                    android:textColor="@color/ime_text_secondary"
+                    android:textSize="10sp" />
             </FrameLayout>
 
             <!-- 3. 語言切換球 🌐 -->
