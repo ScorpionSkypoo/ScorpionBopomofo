@@ -239,7 +239,7 @@
                 android:layout_weight="1.4"
                 android:layout_marginStart="2.5dp"
                 android:layout_marginEnd="2.5dp"
-                android:background="@drawable/bg_keyboard_function_key"
+                android:background="?attr/imeKeyFunctionDrawable"
                 android:clickable="true"
                 android:focusable="true">
                 <TextView
@@ -259,7 +259,7 @@
                 android:layout_weight="0.9"
                 android:layout_marginStart="2.5dp"
                 android:layout_marginEnd="2.5dp"
-                android:background="@drawable/bg_keyboard_key"
+                android:background="?attr/imeKeyDrawable"
                 android:clickable="true"
                 android:focusable="true">
                 <TextView
@@ -289,7 +289,7 @@
                 android:layout_weight="0.9"
                 android:layout_marginStart="2.5dp"
                 android:layout_marginEnd="2.5dp"
-                android:background="@drawable/bg_keyboard_function_key"
+                android:background="?attr/imeKeyFunctionDrawable"
                 android:clickable="true"
                 android:focusable="true">
                 <ImageView
@@ -308,7 +308,7 @@
                 android:layout_weight="3.3"
                 android:layout_marginStart="2.5dp"
                 android:layout_marginEnd="2.5dp"
-                android:background="@drawable/bg_keyboard_key"
+                android:background="?attr/imeKeyDrawable"
                 android:clickable="true"
                 android:focusable="true">
                 <TextView
@@ -329,7 +329,7 @@
                 android:layout_weight="0.9"
                 android:layout_marginStart="2.5dp"
                 android:layout_marginEnd="2.5dp"
-                android:background="@drawable/bg_keyboard_key"
+                android:background="?attr/imeKeyDrawable"
                 android:clickable="true"
                 android:focusable="true">
                 <TextView
@@ -349,7 +349,7 @@
                 android:layout_weight="1.5"
                 android:layout_marginStart="2.5dp"
                 android:layout_marginEnd="2.5dp"
-                android:background="@drawable/bg_keyboard_function_key"
+                android:background="?attr/imeKeyFunctionDrawable"
                 android:clickable="true"
                 android:focusable="true">
                 <ImageView
@@ -368,7 +368,7 @@
                 android:layout_weight="1.5"
                 android:layout_marginStart="2.5dp"
                 android:layout_marginEnd="2.5dp"
-                android:background="@drawable/bg_keyboard_action_key"
+                android:background="?attr/imeKeyActionDrawable"
                 android:clickable="true"
                 android:focusable="true">
                 <ImageView
@@ -434,7 +434,7 @@
                 android:layout_weight="14"
                 android:layout_marginStart="2.5dp"
                 android:layout_marginEnd="2.5dp"
-                android:background="@drawable/bg_keyboard_function_key"
+                android:background="?attr/imeKeyFunctionDrawable"
                 android:clickable="true"
                 android:focusable="true">
                 <ImageView
@@ -470,7 +470,7 @@
                 android:layout_weight="16"
                 android:layout_marginStart="2.5dp"
                 android:layout_marginEnd="2.5dp"
-                android:background="@drawable/bg_keyboard_function_key"
+                android:background="?attr/imeKeyFunctionDrawable"
                 android:clickable="true"
                 android:focusable="true">
                 <ImageView
@@ -499,7 +499,7 @@
                 android:layout_weight="1.4"
                 android:layout_marginStart="2.5dp"
                 android:layout_marginEnd="2.5dp"
-                android:background="@drawable/bg_keyboard_function_key"
+                android:background="?attr/imeKeyFunctionDrawable"
                 android:clickable="true"
                 android:focusable="true">
                 <TextView
@@ -518,7 +518,7 @@
                 android:layout_weight="0.9"
                 android:layout_marginStart="2.5dp"
                 android:layout_marginEnd="2.5dp"
-                android:background="@drawable/bg_keyboard_key"
+                android:background="?attr/imeKeyDrawable"
                 android:clickable="true"
                 android:focusable="true">
                 <TextView
@@ -537,7 +537,7 @@
                 android:layout_weight="0.9"
                 android:layout_marginStart="2.5dp"
                 android:layout_marginEnd="2.5dp"
-                android:background="@drawable/bg_keyboard_function_key"
+                android:background="?attr/imeKeyFunctionDrawable"
                 android:clickable="true"
                 android:focusable="true">
                 <ImageView
@@ -555,7 +555,7 @@
                 android:layout_weight="4.7"
                 android:layout_marginStart="2.5dp"
                 android:layout_marginEnd="2.5dp"
-                android:background="@drawable/bg_keyboard_key"
+                android:background="?attr/imeKeyDrawable"
                 android:clickable="true"
                 android:focusable="true">
                 <TextView
@@ -575,7 +575,7 @@
                 android:layout_weight="1.0"
                 android:layout_marginStart="2.5dp"
                 android:layout_marginEnd="2.5dp"
-                android:background="@drawable/bg_keyboard_key"
+                android:background="?attr/imeKeyDrawable"
                 android:clickable="true"
                 android:focusable="true">
                 <TextView
@@ -594,7 +594,7 @@
                 android:layout_weight="1.5"
                 android:layout_marginStart="2.5dp"
                 android:layout_marginEnd="2.5dp"
-                android:background="@drawable/bg_keyboard_action_key"
+                android:background="?attr/imeKeyActionDrawable"
                 android:clickable="true"
                 android:focusable="true">
                 <ImageView

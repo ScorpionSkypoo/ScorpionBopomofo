@@ -786,6 +786,7 @@ class SettingsActivity : AppCompatActivity() {
         val ks = card()
         boolSwitch(ks, "按鍵底色", "關掉後按鍵只剩文字，配照片背景最好看。", com.p3dro.scorpio.ime.ScorpioImeService.PREF_KEY_BG, true)
         boolSwitch(ks, "按鍵邊框", "每個按鍵加一圈細框，按鍵底色關掉時也看得出按鍵的範圍。", com.p3dro.scorpio.ime.ScorpioImeService.PREF_KEY_BORDER, false)
+        boolSwitch(ks, "按鍵漣漪效果", "按下時從手指處擴散的動畫。關掉是按下瞬間變色，每按一鍵少畫三四十幀，比較省電、打字更順。", com.p3dro.scorpio.ime.ScorpioImeService.PREF_KEY_RIPPLE, false)
 
         sectionTitle("按鍵大小")
         val sz = card()

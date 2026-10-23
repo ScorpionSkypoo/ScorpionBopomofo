@@ -29,7 +29,8 @@ class ZhuyinKeyView @JvmOverloads constructor(
     init {
         isClickable = false
         isFocusable = false
-        background = ContextCompat.getDrawable(context, R.drawable.bg_keyboard_key)
+        // 取主題裡的按鍵底圖：設定開了「按鍵漣漪效果」就是漣漪版
+        background = ContextCompat.getDrawable(context, android.util.TypedValue().also { context.theme.resolveAttribute(R.attr.imeKeyDrawable, it, true) }.resourceId)
 
         // 次要標示（英文字母或數字）位於右上角
         val subParams = LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT).apply {

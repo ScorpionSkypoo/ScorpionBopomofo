@@ -158,6 +158,7 @@ class ScorpioImeService : InputMethodService() {
         const val PREF_KEY_BORDER = "key_border"
         const val PREF_KEY_BG = "key_background"
         const val PREF_ROUNDED = "keyboard_rounded"
+        const val PREF_KEY_RIPPLE = "key_ripple"
         const val PREF_NUMBER_ROW = "number_row"
         const val PREF_RECENT_BAR = "recent_bar"
         const val PREF_PHOTO_ALPHA = "photo_alpha"
@@ -209,7 +210,7 @@ class ScorpioImeService : InputMethodService() {
         themeId(), prefs.getInt("photo_dim", 35), keyHeightScale(), photoFile().lastModified(),
         resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK,
         prefs.getBoolean(PREF_KEY_BORDER, false), prefs.getBoolean(PREF_KEY_BG, true), prefs.getBoolean(PREF_ROUNDED, true),
-        prefs.getBoolean(PREF_NUMBER_ROW, false), prefs.getInt(PREF_PHOTO_ALPHA, 100)
+        prefs.getBoolean(PREF_NUMBER_ROW, false), prefs.getInt(PREF_PHOTO_ALPHA, 100), prefs.getBoolean(PREF_KEY_RIPPLE, false)
     ).joinToString("|")
 
     private fun buildThemedContext(): Context {
@@ -229,13 +230,17 @@ class ScorpioImeService : InputMethodService() {
             "photo" -> R.style.ImeTheme_Photo
             else -> R.style.ImeTheme_Classic
         }
-        // 外觀選項疊在主題上：按鍵邊框、按鍵底色、鍵盤上方圓角
+        // 外觀選項疊在主題上：按鍵邊框、按鍵底色、鍵盤上方圓角、按鍵漣漪
         return android.view.ContextThemeWrapper(base, style).apply {
             if (prefs.getBoolean(PREF_KEY_BORDER, false)) getTheme().applyStyle(R.style.ImeOverlay_KeyBorder, true)
             if (!prefs.getBoolean(PREF_KEY_BG, true)) getTheme().applyStyle(R.style.ImeOverlay_NoKeyBg, true)
             if (!prefs.getBoolean(PREF_ROUNDED, true)) getTheme().applyStyle(R.style.ImeOverlay_SquareTop, true)
+            if (prefs.getBoolean(PREF_KEY_RIPPLE, false)) getTheme().applyStyle(R.style.ImeOverlay_Ripple, true)
         }
     }
+
+    /** 按鍵底圖（主題屬性 imeKey*Drawable）：預設按下瞬間變色，開了「按鍵漣漪效果」是漣漪版 */
+    private fun keyDrawable(attr: Int) = ui.getDrawable(android.util.TypedValue().also { ui.theme.resolveAttribute(attr, it, true) }.resourceId)
 
     /** 按鍵高度：把所有 44dp 的按鍵排依比例縮放（觸控定位以實際按鍵大小換算，不受影響） */
     private fun scaleKeyRows(v: View, scale: Float) {
@@ -1016,7 +1021,7 @@ class ScorpioImeService : InputMethodService() {
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, weight).apply {
                 setMargins(dpToPx(2.5f), 0, dpToPx(2.5f), 0)
             }
-            background = ui.getDrawable(R.drawable.bg_keyboard_key)
+            background = keyDrawable(R.attr.imeKeyDrawable)
             isClickable = true
             isFocusable = true
             addView(tv)
@@ -1056,7 +1061,7 @@ class ScorpioImeService : InputMethodService() {
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, weight).apply {
                 setMargins(dpToPx(2.5f), 0, dpToPx(2.5f), 0)
             }
-            background = ui.getDrawable(R.drawable.bg_keyboard_key)
+            background = keyDrawable(R.attr.imeKeyDrawable)
             isClickable = true
             isFocusable = true
             addView(tv)
@@ -1296,7 +1301,7 @@ class ScorpioImeService : InputMethodService() {
 
     private fun createHandwritingViews(panel: LinearLayout) {
         val board = com.p3dro.scorpio.ime.ui.HandwritingView(ui).apply {
-            background = ui.getDrawable(R.drawable.bg_keyboard_key)
+            background = keyDrawable(R.attr.imeKeyDrawable)
         }
         handwritingView = board
         panel.addView(board, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f).apply {
@@ -1335,8 +1340,8 @@ class ScorpioImeService : InputMethodService() {
         }
 
         val row = LinearLayout(ui).apply { orientation = LinearLayout.HORIZONTAL; weightSum = 10.4f }
-        fun key(weight: Float, bg: Int, label: String? = null, icon: Int? = null, onClick: (View) -> Unit) = FrameLayout(ui).apply {
-            background = ui.getDrawable(bg)
+        fun key(weight: Float, bgAttr: Int, label: String? = null, icon: Int? = null, onClick: (View) -> Unit) = FrameLayout(ui).apply {
+            background = keyDrawable(bgAttr)
             isClickable = true
             if (label != null) addView(TextView(ui).apply {
                 text = label
@@ -1350,16 +1355,16 @@ class ScorpioImeService : InputMethodService() {
                 setMargins(dpToPx(2.5f), 0, dpToPx(2.5f), 0)
             })
         }
-        key(1.4f, R.drawable.bg_keyboard_function_key, label = "返回") { collapseCandidates() }
-        key(0.9f, R.drawable.bg_keyboard_key, label = "，") { commitHandwritingTop(); currentInputConnection?.commitText("，", 1) }
-        key(3.4f, R.drawable.bg_keyboard_key, label = "空白") {
+        key(1.4f, R.attr.imeKeyFunctionDrawable, label = "返回") { collapseCandidates() }
+        key(0.9f, R.attr.imeKeyDrawable, label = "，") { commitHandwritingTop(); currentInputConnection?.commitText("，", 1) }
+        key(3.4f, R.attr.imeKeyDrawable, label = "空白") {
             if (handwritingView?.isEmpty == false) commitHandwritingTop() else currentInputConnection?.commitText(" ", 1)
         }
-        key(0.9f, R.drawable.bg_keyboard_key, label = "。") { commitHandwritingTop(); currentInputConnection?.commitText("。", 1) }
-        val del = key(1.4f, R.drawable.bg_keyboard_function_key, icon = R.drawable.ic_ime_backspace) { }
+        key(0.9f, R.attr.imeKeyDrawable, label = "。") { commitHandwritingTop(); currentInputConnection?.commitText("。", 1) }
+        val del = key(1.4f, R.attr.imeKeyFunctionDrawable, icon = R.drawable.ic_ime_backspace) { }
         del.setOnClickListener(null)
         del.setOnTouchListener(com.p3dro.scorpio.ime.ui.RepeatTouchListener { triggerHaptic(del); handleBackspace() })
-        key(1.5f, R.drawable.bg_keyboard_action_key, icon = R.drawable.ic_ime_enter) { commitHandwritingTop(); handleEnterPress() }
+        key(1.5f, R.attr.imeKeyActionDrawable, icon = R.drawable.ic_ime_enter) { commitHandwritingTop(); handleEnterPress() }
         panel.addView(row, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dpToPx(44)))
     }
 
@@ -1950,7 +1955,7 @@ class ScorpioImeService : InputMethodService() {
                 layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f).apply {
                     setMargins(dpToPx(2.5f), 0, dpToPx(2.5f), 0)
                 }
-                background = ui.getDrawable(R.drawable.bg_keyboard_key)
+                background = keyDrawable(R.attr.imeKeyDrawable)
                 isClickable = true
                 addView(com.p3dro.scorpio.ime.ui.KeyLabelView(ui).apply {
                     text = c.toString()
@@ -2399,11 +2404,11 @@ class ScorpioImeService : InputMethodService() {
             this.weightSum = weightSum
         }
 
-        fun keyFrame(weight: Float, bgRes: Int) = FrameLayout(ui).apply {
+        fun keyFrame(weight: Float, bgAttr: Int) = FrameLayout(ui).apply {
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, weight).apply {
                 setMargins(dpToPx(2.5f), 0, dpToPx(2.5f), 0)
             }
-            background = ui.getDrawable(bgRes)
+            background = keyDrawable(bgAttr)
             isClickable = true
             isFocusable = true
         }
@@ -2425,13 +2430,13 @@ class ScorpioImeService : InputMethodService() {
             layoutParams = FrameLayout.LayoutParams(dpToPx(20), dpToPx(20), android.view.Gravity.CENTER)
         }
 
-        fun symbolKey(sym: String, weight: Float = 1f) = keyFrame(weight, R.drawable.bg_keyboard_key).apply {
+        fun symbolKey(sym: String, weight: Float = 1f) = keyFrame(weight, R.attr.imeKeyDrawable).apply {
             addView(label(sym, 18f))
             symPanel.registerKey(this, sym[0])
         }
 
         // 功能鍵只參與最近鍵判定，點擊交還給按鈕本身
-        fun functionKey(weight: Float, bgRes: Int) = keyFrame(weight, bgRes).also { symPanel.registerKey(it, null) }
+        fun functionKey(weight: Float, bgAttr: Int) = keyFrame(weight, bgAttr).also { symPanel.registerKey(it, null) }
 
         // 第 1、2 排：各 10 鍵
         for ((index, row) in rows.withIndex()) {
@@ -2442,7 +2447,7 @@ class ScorpioImeService : InputMethodService() {
 
         // 第 3 排：翻頁鍵 + 7 個符號 + 刪除鍵（同 Gboard）
         val thirdRow = newRow(2, 10f)
-        thirdRow.addView(functionKey(1.5f, R.drawable.bg_keyboard_function_key).apply {
+        thirdRow.addView(functionKey(1.5f, R.attr.imeKeyFunctionDrawable).apply {
             addView(label(if (symbolsPage == 0) "=\\<" else "?123", 14f))
             setOnClickListener {
                 triggerHaptic(it)
@@ -2451,7 +2456,7 @@ class ScorpioImeService : InputMethodService() {
             }
         })
         for (sym in row3) thirdRow.addView(symbolKey(sym))
-        thirdRow.addView(functionKey(1.5f, R.drawable.bg_keyboard_function_key).apply {
+        thirdRow.addView(functionKey(1.5f, R.attr.imeKeyFunctionDrawable).apply {
             addView(icon(R.drawable.ic_ime_backspace))
             setOnTouchListener(RepeatTouchListener {
                 triggerHaptic(symPanel)
@@ -2462,7 +2467,7 @@ class ScorpioImeService : InputMethodService() {
 
         // 第 4 排：返回、逗號、語言切換、空白、句號、Enter（權重總和 10.4，與注音／英文底排對齊）
         val bottomRow = newRow(3, 10.4f)
-        bottomRow.addView(functionKey(1.4f, R.drawable.bg_keyboard_function_key).apply {
+        bottomRow.addView(functionKey(1.4f, R.attr.imeKeyFunctionDrawable).apply {
             addView(label(if (chinese) "注音" else "ABC", 14f))
             setOnClickListener {
                 triggerHaptic(it)
@@ -2471,7 +2476,7 @@ class ScorpioImeService : InputMethodService() {
         })
         val comma = if (chinese) "，" else ","
         bottomRow.addView(symbolKey(comma, 0.9f))
-        bottomRow.addView(functionKey(0.9f, R.drawable.bg_keyboard_function_key).apply {
+        bottomRow.addView(functionKey(0.9f, R.attr.imeKeyFunctionDrawable).apply {
             addView(icon(R.drawable.ic_ime_globe))
             setOnClickListener {
                 triggerHaptic(it)
@@ -2479,7 +2484,7 @@ class ScorpioImeService : InputMethodService() {
                 switchToNextLanguage()
             }
         })
-        bottomRow.addView(functionKey(4.8f, R.drawable.bg_keyboard_key).apply {
+        bottomRow.addView(functionKey(4.8f, R.attr.imeKeyDrawable).apply {
             addView(label("空白", 13f, R.color.ime_text_secondary))
             setOnClickListener {
                 triggerHaptic(it)
@@ -2487,7 +2492,7 @@ class ScorpioImeService : InputMethodService() {
             }
         })
         bottomRow.addView(symbolKey(if (chinese) "。" else ".", 0.9f))
-        bottomRow.addView(functionKey(1.5f, R.drawable.bg_keyboard_action_key).apply {
+        bottomRow.addView(functionKey(1.5f, R.attr.imeKeyActionDrawable).apply {
             addView(icon(R.drawable.ic_ime_enter, tint = false))
             setOnClickListener {
                 triggerHaptic(it)

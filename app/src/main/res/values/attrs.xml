@@ -17,4 +17,8 @@
     <attr name="imeKeyStroke" format="dimension" />
     <attr name="imeKeyStrokeColor" format="color|reference" />
     <attr name="imeKeyboardRadius" format="dimension" />
+    <!-- 按鍵底圖：預設按下瞬間變色，ImeOverlay.Ripple 換成漣漪版 -->
+    <attr name="imeKeyDrawable" format="reference" />
+    <attr name="imeKeyFunctionDrawable" format="reference" />
+    <attr name="imeKeyActionDrawable" format="reference" />
 </resources>

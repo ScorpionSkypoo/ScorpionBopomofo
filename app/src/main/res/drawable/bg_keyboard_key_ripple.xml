@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 設定「按鍵漣漪效果」打開時用的版本（ImeOverlay.Ripple）：按下有漣漪動畫，每按一鍵會多畫三四十幀 -->
+<ripple xmlns:android="http://schemas.android.com/apk/res/android"
+    android:color="@color/ime_key_pressed">
+    <item>
+        <shape android:shape="rectangle">
+            <solid android:color="@color/ime_key_bg" />
+            <corners android:radius="8dp" />
+            <stroke android:width="?attr/imeKeyStroke" android:color="?attr/imeKeyStrokeColor" />
+        </shape>
+    </item>
+</ripple>

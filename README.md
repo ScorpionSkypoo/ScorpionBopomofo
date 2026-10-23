@@ -103,7 +103,7 @@ cd ScorpionBopomofo
 ```
 
 - 本機建置的 release 版用 debug 金鑰簽章，只適合自己測試。
-- Releases 上的 APK 用正式金鑰簽章（`CN=Scorpio IME, O=ScorpionSkypoo, C=TW`，SHA-256 `66:61:33:38:84:99:0E:79:69:E0:4A:E6:63:B5:C8:DA:D9:F3:73:F6:09:A0:9D:AB:23:1D:11:52:5B:5F:CE:F0`）。v1.1.0 以前是 debug 金鑰，之後的版本附金鑰輪替證明（[`signing/lineage.bin`](signing/lineage.bin)），舊版可以直接覆蓋更新、資料保留。簽章流程見 [`tools/sign_release.sh`](tools/sign_release.sh)，推 `v*` tag 時由 GitHub Actions 執行；一般 push 和 PR 只建置、跑測試。
+- Releases 上的 APK 用正式金鑰簽章（`CN=Scorpio IME, O=ScorpionSkypoo, C=TW`，SHA-256 `66:61:33:38:84:99:0E:79:69:E0:4A:E6:63:B5:C8:DA:D9:F3:73:F6:09:A0:9D:AB:23:1D:11:52:5B:5F:CE:F0`）。簽章流程見 [`tools/sign_release.sh`](tools/sign_release.sh)，推 `v*` tag 時由 GitHub Actions 執行；一般 push 和 PR 只建置、跑測試。
 - 只打包 arm64-v8a（`app/build.gradle.kts` 的 `abiFilters`）。
 - 在 arm64 Linux 上建置時，Maven 上的 aapt2 是 x86 版，需要在 `~/.gradle/gradle.properties` 指定 arm64 版：`android.aapt2FromMavenOverride=/path/to/aapt2`。
 - 版本號跟著 git 產生：versionName 是最近的 `v*` tag（之後有 commit 會變成 `1.0.0-3-gabc1234`），versionCode 是 100 加上 commit 數。
