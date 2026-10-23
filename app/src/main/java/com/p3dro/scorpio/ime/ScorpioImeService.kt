@@ -261,8 +261,18 @@ class ScorpioImeService : InputMethodService() {
         val root = LayoutInflater.from(ui).inflate(R.layout.keyboard_view, null)
         keyboardRootView = root
         deleteConfirmBar = null
-        // 左上、右上圓角：依背景形狀裁切，候選列與按鍵的漣漪效果也不會畫出圓角外
-        root.clipToOutline = true
+        // 候選列在鍵盤最上面：依鍵盤的圓角裁切，候選字左右滑、按下的底色才不會畫到圓角外。
+        // 只裁這一條（幾個字），不必整個鍵盤每一幀都經過圓角裁切
+        val radius = android.util.TypedValue().also { ui.theme.resolveAttribute(R.attr.imeKeyboardRadius, it, true) }
+            .getDimension(resources.displayMetrics)
+        if (radius > 0f) root.findViewById<View>(R.id.candidate_bar_container)?.apply {
+            outlineProvider = object : android.view.ViewOutlineProvider() {
+                // 往下多延伸一個半徑：只有上面兩個角是圓的
+                override fun getOutline(view: View, outline: android.graphics.Outline) =
+                    outline.setRoundRect(0, 0, view.width, view.height + radius.toInt(), radius)
+            }
+            clipToOutline = true
+        }
         val scale = keyHeightScale()
         if (scale != 1.0f) {
             scaleKeyRows(root, scale)
@@ -270,9 +280,11 @@ class ScorpioImeService : InputMethodService() {
         }
 
         // 照片主題：照片鋪在鍵盤後面（置中裁切＋調暗），按鍵半透明
+        // 左上、右上圓角：只有開了漣漪效果才把整個鍵盤依圓角裁切（漣漪會畫到圓角外）；
+        // 每一幀整個鍵盤都要經過圓角裁切很花 GPU 準備時間，沒必要就不裁（其他東西都不會畫到圓角上，照片另外自己裁）
         val keyboardFrame = FrameLayout(ui).apply {
             background = ui.getDrawable(R.drawable.bg_keyboard_root)
-            clipToOutline = true
+            clipToOutline = prefs.getBoolean(PREF_KEY_RIPPLE, false)
         }
         val photo = photoFile()
         if (themeId() == "photo" && photo.exists()) {
@@ -282,10 +294,16 @@ class ScorpioImeService : InputMethodService() {
                 null
             }
             if (bmp != null) {
+                // 照片自己一層、自己依圓角裁切（只裁照片這兩個東西，不必整個鍵盤每一幀都裁）
+                val photoLayer = FrameLayout(ui).apply {
+                    background = ui.getDrawable(R.drawable.bg_keyboard_root)
+                    clipToOutline = true
+                }
+                keyboardFrame.addView(photoLayer, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
                 // 照片底下墊一層黑：照片調透明時透出來的是黑底，不是後面的 App
-                keyboardFrame.addView(View(ui).apply { setBackgroundColor(android.graphics.Color.BLACK) },
+                photoLayer.addView(View(ui).apply { setBackgroundColor(android.graphics.Color.BLACK) },
                     FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
-                keyboardFrame.addView(ImageView(ui).apply {
+                photoLayer.addView(ImageView(ui).apply {
                     setImageBitmap(bmp)
                     scaleType = ImageView.ScaleType.CENTER_CROP
                     val dim = prefs.getInt("photo_dim", 35).coerceIn(0, 85)
@@ -1812,9 +1830,10 @@ class ScorpioImeService : InputMethodService() {
         val row = LinearLayout(ui).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setBackgroundColor(ui.getColor(R.color.ime_bg))
             setPadding(dpToPx(14), 0, dpToPx(8), 0)
             isClickable = true // 擋住底下的候選字
+            // 底色用鍵盤的圓角底（鍵盤不一定整個依圓角裁切，直接塗方形底色左上右上會露出直角）
+            background = ui.getDrawable(R.drawable.bg_keyboard_root)
             addView(TextView(ui).apply {
                 text = "從個人學習庫移除「$word」？"
                 textSize = 15f
@@ -2012,9 +2031,7 @@ class ScorpioImeService : InputMethodService() {
                 gravity = Gravity.CENTER
                 setTextColor(ui.getColor(R.color.ime_text_primary))
                 setPadding(dpToPx(10), 0, dpToPx(10), 0)
-                val tv = android.util.TypedValue()
-                ui.theme.resolveAttribute(android.R.attr.selectableItemBackgroundBorderless, tv, true)
-                setBackgroundResource(tv.resourceId)
+                background = keyDrawable(R.attr.imeItemBackgroundBorderless)
                 setOnClickListener {
                     triggerHaptic(it)
                     if (composer.isComposing) commitTopCandidateOrRaw()
@@ -2037,9 +2054,7 @@ class ScorpioImeService : InputMethodService() {
         for (t in com.p3dro.scorpio.ime.engine.Toolbar.visible(this)) {
             box.addView(FrameLayout(ui).apply {
                 contentDescription = t.name
-                val tv = android.util.TypedValue()
-                ui.theme.resolveAttribute(android.R.attr.selectableItemBackgroundBorderless, tv, true)
-                setBackgroundResource(tv.resourceId)
+                background = keyDrawable(R.attr.imeItemBackgroundBorderless)
                 addView(ImageView(ui).apply { setImageResource(t.icon) }, FrameLayout.LayoutParams(dpToPx(22), dpToPx(22), Gravity.CENTER))
                 setOnClickListener {
                     triggerHaptic(it)
@@ -2530,7 +2545,8 @@ class ScorpioImeService : InputMethodService() {
         override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): Holder {
             val tv = TextView(parent.context).apply {
                 val outValue = android.util.TypedValue()
-                parent.context.theme.resolveAttribute(android.R.attr.selectableItemBackground, outValue, true)
+                // 按下效果跟著「按鍵漣漪效果」：關著是瞬間變色
+                parent.context.theme.resolveAttribute(R.attr.imeItemBackground, outValue, true)
                 setBackgroundResource(outValue.resourceId)
                 setTextColor(parent.context.getColor(R.color.ime_candidate_text))
                 textLocale = java.util.Locale.TAIWAN

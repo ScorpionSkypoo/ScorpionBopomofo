@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 工具列圖示：按下瞬間出現圓形底色（「按鍵漣漪效果」關著時；開著時換成系統的無邊界漣漪） -->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_pressed="true">
+        <shape android:shape="oval">
+            <solid android:color="@color/ime_key_pressed" />
+        </shape>
+    </item>
+    <item android:drawable="@android:color/transparent" />
+</selector>

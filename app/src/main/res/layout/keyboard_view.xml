@@ -53,7 +53,7 @@
                 android:id="@+id/btn_idle_settings"
                 android:layout_width="40dp"
                 android:layout_height="36dp"
-                android:background="?android:attr/selectableItemBackgroundBorderless"
+                android:background="?attr/imeItemBackgroundBorderless"
                 android:clickable="true"
                 android:focusable="true">
                 <ImageView
@@ -87,7 +87,7 @@
                 android:layout_height="match_parent"
                 android:clickable="true"
                 android:focusable="true"
-                android:background="?android:attr/selectableItemBackgroundBorderless">
+                android:background="?attr/imeItemBackgroundBorderless">
                 <ImageView
                     android:id="@+id/iv_expand_chevron"
                     android:layout_width="20dp"
@@ -135,7 +135,7 @@
                 android:id="@+id/btn_panel_backspace"
                 android:layout_width="48dp"
                 android:layout_height="match_parent"
-                android:background="?android:attr/selectableItemBackgroundBorderless"
+                android:background="?attr/imeItemBackgroundBorderless"
                 android:clickable="true"
                 android:focusable="true"
                 android:contentDescription="刪除">

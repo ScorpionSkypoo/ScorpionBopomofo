@@ -14,7 +14,7 @@
         android:paddingEnd="15dp"
         android:textColor="@color/ime_candidate_text"
         android:textSize="21sp"
-        android:background="?android:attr/selectableItemBackgroundBorderless" />
+        android:background="?attr/imeItemBackground" />
 
     <View
         android:id="@+id/candidate_divider"

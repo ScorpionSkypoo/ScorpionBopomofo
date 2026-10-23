@@ -23,6 +23,8 @@
         <item name="imeKeyDrawable">@drawable/bg_keyboard_key</item>
         <item name="imeKeyFunctionDrawable">@drawable/bg_keyboard_function_key</item>
         <item name="imeKeyActionDrawable">@drawable/bg_keyboard_action_key</item>
+        <item name="imeItemBackground">@drawable/bg_item_pressed</item>
+        <item name="imeItemBackgroundBorderless">@drawable/bg_item_pressed_round</item>
     </style>
 
     <!-- 外觀選項：疊在鍵盤主題上（設定「介面外觀 → 按鍵、鍵盤」） -->
@@ -41,6 +43,8 @@
         <item name="imeKeyDrawable">@drawable/bg_keyboard_key_ripple</item>
         <item name="imeKeyFunctionDrawable">@drawable/bg_keyboard_function_key_ripple</item>
         <item name="imeKeyActionDrawable">@drawable/bg_keyboard_action_key_ripple</item>
+        <item name="imeItemBackground">?android:attr/selectableItemBackground</item>
+        <item name="imeItemBackgroundBorderless">?android:attr/selectableItemBackgroundBorderless</item>
     </style>
 
     <!-- 設定 App：Material 3，Android 12 以上跟著桌布取色 -->

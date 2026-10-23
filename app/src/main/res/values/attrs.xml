@@ -21,4 +21,7 @@
     <attr name="imeKeyDrawable" format="reference" />
     <attr name="imeKeyFunctionDrawable" format="reference" />
     <attr name="imeKeyActionDrawable" format="reference" />
+    <!-- 候選字／面板格子、工具列圖示的按下效果：預設瞬間變色，ImeOverlay.Ripple 換成系統漣漪 -->
+    <attr name="imeItemBackground" format="reference" />
+    <attr name="imeItemBackgroundBorderless" format="reference" />
 </resources>
