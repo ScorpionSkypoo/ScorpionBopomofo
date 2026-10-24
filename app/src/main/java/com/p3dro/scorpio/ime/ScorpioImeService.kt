@@ -2725,16 +2725,43 @@ class ScorpioImeService : InputMethodService() {
             symPanel.addView(rowLayout)
         }
 
-        // 第 3 排：翻頁鍵 + 7 個符號 + 刪除鍵（同 Gboard）
+        // 第 3 排：翻頁鍵與全形／半形鍵（同一格上下兩個）+ 7 個符號 + 刪除鍵
         val thirdRow = newRow(2, 10f)
-        thirdRow.addView(functionKey(1.5f, R.attr.imeKeyFunctionDrawable).apply {
-            addView(label(if (symbolsPage == 0) "=\\<" else "?123", 14f))
+        val stacked = LinearLayout(ui).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1.5f).apply {
+                setMargins(dpToPx(2.5f), 0, dpToPx(2.5f), 0)
+            }
+        }
+        fun stackedKey(top: Boolean) = FrameLayout(ui).apply {
+            background = keyDrawable(R.attr.imeKeyFunctionDrawable)
+            isClickable = true
+            isFocusable = true
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f).apply {
+                if (top) bottomMargin = dpToPx(1.5f) else topMargin = dpToPx(1.5f)
+            }
+            symPanel.registerKey(this, null)
+        }
+        stacked.addView(stackedKey(top = true).apply {
+            addView(label(if (symbolsPage == 0) "=\\<" else "?123", 13f))
             setOnClickListener {
                 triggerHaptic(it)
                 symbolsPage = 1 - symbolsPage
                 buildSymbolsPanel()
             }
         })
+        stacked.addView(stackedKey(top = false).apply {
+            addView(com.p3dro.scorpio.ime.ui.WidthToggleGlyph(ui, full, ui.getColor(R.color.ime_text_primary), ui.getColor(R.color.ime_text_secondary).let {
+                android.graphics.Color.argb(110, android.graphics.Color.red(it), android.graphics.Color.green(it), android.graphics.Color.blue(it))
+            }), FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+            contentDescription = if (full) "全形，點一下換成半形" else "半形，點一下換成全形"
+            setOnClickListener {
+                triggerHaptic(it)
+                prefs.edit().putBoolean(symbolsFullWidthKey(chinese), !full).apply()
+                buildSymbolsPanel()
+            }
+        })
+        thirdRow.addView(stacked)
         for (sym in row3) thirdRow.addView(symbolKey(sym))
         thirdRow.addView(functionKey(1.5f, R.attr.imeKeyFunctionDrawable).apply {
             addView(icon(R.drawable.ic_ime_backspace))
@@ -2745,22 +2772,13 @@ class ScorpioImeService : InputMethodService() {
         })
         symPanel.addView(thirdRow)
 
-        // 第 4 排：返回、全形／半形、逗號、語言切換、空白、句號、Enter（權重總和 10.4，與注音／英文底排對齊）
+        // 第 4 排：返回、逗號、語言切換、空白、句號、Enter（權重總和 10.4，與注音／英文底排對齊）
         val bottomRow = newRow(3, 10.4f)
         bottomRow.addView(functionKey(1.4f, R.attr.imeKeyFunctionDrawable).apply {
             addView(label(if (chinese) "注音" else "ABC", 14f))
             setOnClickListener {
                 triggerHaptic(it)
                 setKeyboardMode(previousMode)
-            }
-        })
-        bottomRow.addView(functionKey(1.0f, R.attr.imeKeyFunctionDrawable).apply {
-            addView(label(if (full) "全形" else "半形", 13f))
-            contentDescription = if (full) "全形，點一下換成半形" else "半形，點一下換成全形"
-            setOnClickListener {
-                triggerHaptic(it)
-                prefs.edit().putBoolean(symbolsFullWidthKey(chinese), !full).apply()
-                buildSymbolsPanel()
             }
         })
         bottomRow.addView(symbolKey(symbolWidth(if (chinese) "，" else ",", full), 0.9f))
@@ -2772,7 +2790,7 @@ class ScorpioImeService : InputMethodService() {
                 switchToNextLanguage()
             }
         })
-        bottomRow.addView(functionKey(3.8f, R.attr.imeKeyDrawable).apply {
+        bottomRow.addView(functionKey(4.8f, R.attr.imeKeyDrawable).apply {
             addView(label("空白", 13f, R.color.ime_text_secondary))
             setOnClickListener {
                 triggerHaptic(it)

@@ -78,7 +78,9 @@ object PackUpdater {
         val minAppVersion: Int,
         val requires: List<String> = emptyList(),
         /** 版面要用到的資料包下載大小合計（設定頁顯示用） */
-        val requiresSize: Long = 0
+        val requiresSize: Long = 0,
+        val language: String = "zh-TW",
+        val languageName: String = "中文（台灣）"
     )
 
     data class Result(val updated: List<Pair<String, String>>, val failed: List<String>, val error: String? = null)
@@ -126,7 +128,8 @@ object PackUpdater {
             ManifestLayout(
                 o.getString("id"), o.optString("name", o.getString("id")), o.optString("description", ""),
                 o.getString("version"), o.optLong("size", -1), o.getString("sha256"), o.getString("url"),
-                o.optInt("minAppVersion", 0), requires, requires.sumOf { sizes[it]?.coerceAtLeast(0) ?: 0 }
+                o.optInt("minAppVersion", 0), requires, requires.sumOf { sizes[it]?.coerceAtLeast(0) ?: 0 },
+                o.optString("language").ifEmpty { "zh-TW" }, o.optString("languageName").ifEmpty { "中文（台灣）" }
             )
         }
     }

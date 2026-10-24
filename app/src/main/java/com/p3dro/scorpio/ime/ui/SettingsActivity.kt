@@ -46,6 +46,8 @@ class SettingsActivity : AppCompatActivity() {
         ENGINE("選字引擎"),
         DICTIONARY("字典與學習"),
         USER_WORDS("自建詞"),
+        ADD_METHOD("新增輸入法"),
+        LANGUAGE_LAYOUTS("版面"),
         DICT_DETAIL("詞庫內容"),
         PLUGINS("工具列與擴充功能"),
         ABOUT("關於")
@@ -381,6 +383,8 @@ class SettingsActivity : AppCompatActivity() {
             Page.ENGINE -> buildEngine()
             Page.DICTIONARY -> buildDictionary()
             Page.USER_WORDS -> buildUserWords()
+            Page.ADD_METHOD -> buildAddMethod()
+            Page.LANGUAGE_LAYOUTS -> buildLanguageLayouts()
             Page.DICT_DETAIL -> buildDictDetail()
             Page.PLUGINS -> buildPlugins()
             Page.ABOUT -> buildAbout()
@@ -713,7 +717,7 @@ class SettingsActivity : AppCompatActivity() {
     // ---------- 輸入法 ----------
 
     private fun buildMethods() {
-        sectionTitle("中文輸入法")
+        sectionTitle("輸入法")
         val c = card()
         val installed = ChineseMethod.installed(this)
         val enabled = ChineseMethod.enabled(this, prefs).map { it.id }.toSet()
@@ -724,15 +728,16 @@ class SettingsActivity : AppCompatActivity() {
                 if (ChineseMethod.enabled(this, prefs).map { it.id }.toSet() != (if (on) enabled + m.id else enabled - m.id)) render()
             }
         }
+        navRow(card(), R.drawable.ic_set_add, "新增輸入法", "先選語言，再選要安裝的版面") { open(Page.ADD_METHOD) }
         infoRow(card(), "切換方式", "按鍵盤上的地球鍵，依上面的順序切換啟用的輸入法，最後是英文。拼音與 26 鍵注音共用同一套詞庫、整句選字與學習紀錄；倉頡、速成選字後一樣會出現接續詞。")
 
-        sectionTitle("線上安裝的版面")
         val extra = installed.filter { it != ChineseMethod.DACHEN }
         if (extra.isNotEmpty()) {
+            sectionTitle("線上安裝的版面")
             val inst = card()
             for (m in extra) {
                 val r = row(inst, null, clickable = false)
-                texts(textColumn(r), m.label, "版本 ${m.version}")
+                texts(textColumn(r), m.label, "${m.languageName}・版本 ${m.version}")
                 r.addView(TextView(this).apply {
                     text = "移除"
                     textSize = 14f
@@ -740,7 +745,7 @@ class SettingsActivity : AppCompatActivity() {
                     setPadding(dp(16), dp(8), dp(8), dp(8))
                     setOnClickListener {
                         ChineseMethod.uninstall(this@SettingsActivity, prefs, m.id)
-                        // 沒有別的版面用到的資料包（倉頡碼表）一起刪掉
+                        // 沒有別的版面用到的資料包一起刪掉
                         val still = ChineseMethod.requiredPacks(this@SettingsActivity)
                         val unused = m.requires.filter { it !in still }
                         lifecycleScope.launch {
@@ -751,36 +756,77 @@ class SettingsActivity : AppCompatActivity() {
                 })
             }
         }
+    }
+
+    /** 新增輸入法：線上的版面依語言分組，先選語言 */
+    private var selectedLanguage: Pair<String, String>? = null
+
+    private fun buildAddMethod() {
+        val c = card()
+        val loading = loadingText(c)
+        lifecycleScope.launch {
+            val list = com.p3dro.scorpio.ime.engine.PackUpdater.availableLayouts(this@SettingsActivity)
+            if (stack.lastOrNull() != Page.ADD_METHOD) return@launch
+            c.removeView(loading)
+            if (list == null) {
+                infoRow(c, "連不上版面清單", "確認網路後再試一次。")
+                return@launch
+            }
+            val installed = ChineseMethod.installed(this@SettingsActivity).map { it.id }.toSet()
+            for ((lang, layouts) in list.groupBy { it.language to it.languageName }) {
+                val have = layouts.count { it.id in installed }
+                navRow(c, null, lang.second, "${layouts.size} 個版面" + if (have > 0) "（已安裝 $have 個）" else "") {
+                    selectedLanguage = lang
+                    open(Page.LANGUAGE_LAYOUTS)
+                }
+            }
+            infoRow(card(), "大千注音", "內建在 App，不用安裝。")
+        }
+    }
+
+    /** 某個語言的版面：安裝或看已安裝 */
+    private fun buildLanguageLayouts() {
+        val lang = selectedLanguage ?: return
+        titleView.text = lang.second
         val avail = card()
         val loading = loadingText(avail)
         lifecycleScope.launch {
             val list = com.p3dro.scorpio.ime.engine.PackUpdater.availableLayouts(this@SettingsActivity)
-            if (stack.lastOrNull() != Page.METHODS) return@launch
+            if (stack.lastOrNull() != Page.LANGUAGE_LAYOUTS) return@launch
             avail.removeView(loading)
-            val ids = installed.map { it.id }.toSet()
-            val todo = list?.filter { it.id !in ids }
-            when {
-                list == null -> infoRow(avail, "連不上版面清單", "確認網路後再試一次。")
-                todo.isNullOrEmpty() -> infoRow(avail, "全部都裝好了", null)
-                else -> for (l in todo) {
-                    val r = row(avail, null, clickable = false)
-                    val size = if (l.requiresSize > 0) "\n含碼表，約 ${"%.1f".format(l.requiresSize / 1048576.0)} MB" else ""
-                    texts(textColumn(r), l.name, l.description + size)
-                    val b = MaterialButton(this@SettingsActivity, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
-                        text = "安裝"
-                        isAllCaps = false
-                    }
-                    b.setOnClickListener {
-                        b.isEnabled = false
-                        b.text = "安裝中…"
-                        lifecycleScope.launch {
-                            val ok = com.p3dro.scorpio.ime.engine.PackUpdater.installLayout(this@SettingsActivity, l)
-                            android.widget.Toast.makeText(this@SettingsActivity, if (ok) "已安裝「${l.name}」" else "安裝失敗", android.widget.Toast.LENGTH_SHORT).show()
-                            if (stack.lastOrNull() == Page.METHODS) render()
-                        }
-                    }
-                    r.addView(b, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = dp(12) })
+            val todo = list?.filter { it.language == lang.first }
+            if (todo.isNullOrEmpty()) {
+                infoRow(avail, "連不上版面清單", "確認網路後再試一次。")
+                return@launch
+            }
+            val installed = ChineseMethod.installed(this@SettingsActivity).map { it.id }.toSet()
+            for (l in todo) {
+                val r = row(avail, null, clickable = false)
+                val size = if (l.requiresSize > 0) "\n含資料，約 ${"%.1f".format(l.requiresSize / 1048576.0)} MB" else ""
+                texts(textColumn(r), l.name, l.description + size)
+                if (l.id in installed) {
+                    r.addView(TextView(this@SettingsActivity).apply {
+                        text = "已安裝"
+                        textSize = 14f
+                        setTextColor(cOnSurfaceVariant)
+                        setPadding(dp(16), dp(8), dp(8), dp(8))
+                    })
+                    continue
                 }
+                val b = MaterialButton(this@SettingsActivity, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+                    text = "安裝"
+                    isAllCaps = false
+                }
+                b.setOnClickListener {
+                    b.isEnabled = false
+                    b.text = "安裝中…"
+                    lifecycleScope.launch {
+                        val ok = com.p3dro.scorpio.ime.engine.PackUpdater.installLayout(this@SettingsActivity, l)
+                        android.widget.Toast.makeText(this@SettingsActivity, if (ok) "已安裝「${l.name}」，可以用地球鍵切換" else "安裝失敗", android.widget.Toast.LENGTH_SHORT).show()
+                        if (stack.lastOrNull() == Page.LANGUAGE_LAYOUTS) render()
+                    }
+                }
+                r.addView(b, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = dp(12) })
             }
         }
     }

@@ -25,7 +25,10 @@ data class ChineseMethod(
     /** 這個版面要用到的資料包（例如倉頡碼表），安裝版面時一起下載 */
     val requires: List<String> = emptyList(),
     /** 設定頁與地球鍵切換的順序（小的在前） */
-    val sort: Int = 99
+    val sort: Int = 99,
+    /** 語言（BCP 47）與顯示名稱：設定頁「新增輸入法」先選語言再選版面 */
+    val language: String = "zh-TW",
+    val languageName: String = "中文（台灣）"
 ) {
 
     enum class Engine(val id: String) { DACHEN("dachen"), ZHUYIN26("zhuyin26"), PINYIN("pinyin"), CANGJIE("cangjie"), QUICK("quick") }
@@ -71,7 +74,9 @@ data class ChineseMethod(
                     id, o.getString("name"), o.optString("spaceLabel").ifEmpty { o.getString("name") }, o.optString("description", ""),
                     engine, keymap, o.optString("version", ""),
                     o.optJSONArray("requires")?.let { a -> (0 until a.length()).map { a.getString(it) } } ?: emptyList(),
-                    o.optInt("sort", 99)
+                    o.optInt("sort", 99),
+                    o.optString("language").ifEmpty { "zh-TW" },
+                    o.optString("languageName").ifEmpty { "中文（台灣）" }
                 )
             }
         } catch (e: Exception) {
