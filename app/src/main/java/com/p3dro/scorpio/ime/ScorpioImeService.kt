@@ -716,6 +716,14 @@ class ScorpioImeService : InputMethodService() {
             ivExpandChevron?.setImageResource(R.drawable.ic_ime_chevron_down)
         }
 
+        // 展開面板（候選字、Emoji、顏文字、擴充功能）跟它蓋掉的鍵盤一樣高：版面檔的 246dp 是 5 排的設計值，
+        // 開了數字列或調過按鍵高度時跟鍵盤實際高度不同，展開時整個鍵盤會縮或長
+        if (mode == KeyboardMode.EXPANDED) {
+            val shown = listOf(panelZhuyin, panelEnglish, panelSymbols, panelNumpad, panelHandwriting)
+                .firstOrNull { it != null && it.visibility == View.VISIBLE && it.height > 0 }
+            if (shown != null) panelExpanded?.let { it.layoutParams = it.layoutParams.apply { height = shown.height } }
+        }
+
         val qwertyChinese = mode == KeyboardMode.ZHUYIN && chineseMethod.usesQwerty
         panelZhuyin?.visibility = if (mode == KeyboardMode.ZHUYIN && !qwertyChinese) View.VISIBLE else View.GONE
         panelEnglish?.visibility = if (mode == KeyboardMode.ENGLISH || qwertyChinese) View.VISIBLE else View.GONE
