@@ -23,13 +23,21 @@
             android:paddingStart="8dp"
             android:paddingEnd="8dp">
 
-            <!-- 工具（Emoji、顏文字、手寫與安裝的擴充功能）：顯示哪些、順序在設定裡調，程式動態加入 -->
-            <LinearLayout
-                android:id="@+id/layout_tools"
+            <!-- 工具（Emoji、顏文字、手寫與安裝的擴充功能）：顯示哪些、順序在設定裡調，程式動態加入；
+                 開著最近使用列時只放前兩個＋「更多」，其他時候整條都是工具、可以左右滑（寬度由程式依狀態調整） -->
+            <HorizontalScrollView
+                android:id="@+id/scroll_tools"
                 android:layout_width="wrap_content"
                 android:layout_height="match_parent"
-                android:orientation="horizontal"
-                android:gravity="center_vertical" />
+                android:scrollbars="none"
+                android:overScrollMode="never">
+                <LinearLayout
+                    android:id="@+id/layout_tools"
+                    android:layout_width="wrap_content"
+                    android:layout_height="match_parent"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical" />
+            </HorizontalScrollView>
 
             <!-- 工具與右邊的最近使用列（或自動填入建議）之間的分隔線：兩邊都有東西才顯示 -->
             <View
@@ -42,12 +50,13 @@
                 android:background="@color/ime_text_secondary"
                 android:visibility="gone" />
 
-            <!-- 自動填入服務給的建議（簡訊驗證碼、密碼、地址）：有建議時取代最近使用列，點了由系統填進輸入框 -->
+            <!-- 自動填入服務給的建議（簡訊驗證碼、密碼、地址）：有建議時整條只放建議、置中，點了由系統填進輸入框 -->
             <HorizontalScrollView
                 android:id="@+id/scroll_inline_suggestions"
                 android:layout_width="0dp"
                 android:layout_height="match_parent"
                 android:layout_weight="1"
+                android:fillViewport="true"
                 android:scrollbars="none"
                 android:overScrollMode="never"
                 android:visibility="gone">
@@ -56,7 +65,7 @@
                     android:layout_width="wrap_content"
                     android:layout_height="match_parent"
                     android:orientation="horizontal"
-                    android:gravity="center_vertical"
+                    android:gravity="center"
                     android:paddingStart="4dp"
                     android:paddingEnd="4dp" />
             </HorizontalScrollView>

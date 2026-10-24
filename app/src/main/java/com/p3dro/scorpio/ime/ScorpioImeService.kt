@@ -181,6 +181,8 @@ class ScorpioImeService : InputMethodService() {
         private const val RECENT_SEP = "\u001F"
         // 最近用過的 Emoji、顏文字最多記幾個
         private const val MAX_RECENT_SYMBOLS = 10
+        // 開著最近使用列時，工具列先放幾個工具（多的收進「更多」）
+        private const val MAX_TOOLS_WITH_RECENT = 2
 
         /** 展開候選格的字級（sp），不因詞長縮小 */
         const val EXPANDED_TEXT_SP = 20f
@@ -478,6 +480,7 @@ class ScorpioImeService : InputMethodService() {
         if (method != chineseMethod || composer.decoder?.kind != method.decoderKind) applyChineseMethod(method)
         finishEnglishWord(learn = false)
         setKeyboardMode(KeyboardMode.ZHUYIN)
+        toolsExpanded = false
         keyboardRootView?.let { refreshToolbar(it) }
         refreshRecentBar()
         updateBarVisibility()
@@ -578,10 +581,7 @@ class ScorpioImeService : InputMethodService() {
                 marginEnd = (6 * d).toInt()
             })
         }
-        val has = views.isNotEmpty()
-        scrollInlineSuggestions?.visibility = if (has) View.VISIBLE else View.GONE
-        scrollRecent?.visibility = if (has) View.GONE else View.VISIBLE
-        updateToolDivider()
+        arrangeIdleBar()
     }
 
     /** 使用者自己移動游標（點到別處）：英文暫存的字就地確定，不跟著游標跑 */
@@ -2217,7 +2217,6 @@ class ScorpioImeService : InputMethodService() {
     private fun refreshRecentBar() {
         val box = keyboardRootView?.findViewById<LinearLayout>(R.id.layout_recent) ?: return
         box.removeAllViews()
-        updateToolDivider()
         if (!prefs.getBoolean(PREF_RECENT_BAR, false)) return
         val list = recentSymbols()
         if (list.isEmpty()) {
@@ -2253,38 +2252,78 @@ class ScorpioImeService : InputMethodService() {
     private var openPluginId: String? = null
 
     /** 工具列左邊的工具（Emoji、顏文字、手寫、擴充功能），顯示哪些與順序依設定；點了開面板、再點一下收起 */
-    private fun refreshToolbar(root: View) {
-        val box = root.findViewById<LinearLayout>(R.id.layout_tools) ?: return
-        box.removeAllViews()
-        for (t in com.p3dro.scorpio.ime.engine.Toolbar.visible(this)) {
-            box.addView(FrameLayout(ui).apply {
-                contentDescription = t.name
-                background = keyDrawable(R.attr.imeItemBackgroundBorderless)
-                addView(ImageView(ui).apply { setImageResource(t.icon) }, FrameLayout.LayoutParams(dpToPx(22), dpToPx(22), Gravity.CENTER))
-                setOnClickListener {
-                    triggerHaptic(it)
-                    when (t.id) {
-                        "emoji" -> if (currentMode == KeyboardMode.EXPANDED && currentExpandedType == ExpandedType.EMOJI) collapseCandidates() else openEmojiPanel(root)
-                        "kaomoji" -> if (currentMode == KeyboardMode.EXPANDED && currentExpandedType == ExpandedType.KAOMOJI) collapseCandidates() else openKaomojiPanel(root)
-                        "handwriting" -> if (currentMode == KeyboardMode.HANDWRITING) collapseCandidates() else setKeyboardMode(KeyboardMode.HANDWRITING)
-                        else -> {
-                            val id = t.id.removePrefix("plugin:")
-                            if (currentMode == KeyboardMode.EXPANDED && currentExpandedType == ExpandedType.PLUGINS && openPluginId == id) collapseCandidates()
-                            else openPluginPanel(root, id)
-                        }
-                    }
-                }
-            }, LinearLayout.LayoutParams(dpToPx(40), dpToPx(36)).apply { marginEnd = dpToPx(4) })
-        }
-        updateToolDivider()
+    private fun refreshToolbar(@Suppress("UNUSED_PARAMETER") root: View) {
+        arrangeIdleBar()
     }
 
-    /** 工具與最近使用列（或自動填入建議）中間的分隔線：左邊有工具、右邊也有東西時才顯示 */
-    private fun updateToolDivider() {
+    // 開著最近使用列、工具又多於兩個時：先只放前兩個＋「更多」，按了收起最近使用列、整條都是工具
+    private var toolsExpanded = false
+
+    /**
+     * 閒置工具列的排法：
+     * - 有自動填入建議：整條只放建議（置中），工具、最近使用列、設定都先收起來
+     * - 開著最近使用列：前兩個工具＋「更多」｜最近使用列；展開後整條是工具（可左右滑）＋「收合」
+     * - 沒開最近使用列：整條都是工具，可以左右滑
+     */
+    private fun arrangeIdleBar() {
         val root = keyboardRootView ?: return
-        val tools = root.findViewById<LinearLayout>(R.id.layout_tools)?.childCount ?: 0
-        val right = prefs.getBoolean(PREF_RECENT_BAR, false) || scrollInlineSuggestions?.visibility == View.VISIBLE
-        root.findViewById<View>(R.id.tool_divider)?.visibility = if (tools > 0 && right) View.VISIBLE else View.GONE
+        val scrollTools = root.findViewById<View>(R.id.scroll_tools) ?: return
+        val box = root.findViewById<LinearLayout>(R.id.layout_tools) ?: return
+        val divider = root.findViewById<View>(R.id.tool_divider)
+        val settings = root.findViewById<View>(R.id.btn_idle_settings)
+        if (inlineSuggestionViews.isNotEmpty()) {
+            for (v in listOf(scrollTools, divider, scrollRecent, settings)) v?.visibility = View.GONE
+            scrollInlineSuggestions?.visibility = View.VISIBLE
+            return
+        }
+        scrollInlineSuggestions?.visibility = View.GONE
+        settings?.visibility = View.VISIBLE
+        scrollTools.visibility = View.VISIBLE
+
+        val all = com.p3dro.scorpio.ime.engine.Toolbar.visible(this)
+        val recentOn = prefs.getBoolean(PREF_RECENT_BAR, false)
+        val canFold = recentOn && all.size > MAX_TOOLS_WITH_RECENT
+        val compact = canFold && !toolsExpanded
+        box.removeAllViews()
+        for (t in if (compact) all.take(MAX_TOOLS_WITH_RECENT) else all) box.addView(toolButton(root, t), toolButtonParams())
+        if (canFold) {
+            box.addView(barButton(if (compact) R.drawable.ic_ime_more else R.drawable.ic_ime_chevron_left, if (compact) "更多工具" else "收合工具") {
+                toolsExpanded = !toolsExpanded
+                arrangeIdleBar()
+            }, toolButtonParams())
+        }
+        // 只有工具時佔滿整條（可滑）；跟最近使用列並排時只佔自己的寬度
+        val showRecent = recentOn && !(canFold && toolsExpanded)
+        scrollTools.layoutParams = LinearLayout.LayoutParams(
+            if (showRecent) ViewGroup.LayoutParams.WRAP_CONTENT else 0, ViewGroup.LayoutParams.MATCH_PARENT, if (showRecent) 0f else 1f
+        )
+        scrollRecent?.visibility = if (showRecent) View.VISIBLE else View.GONE
+        divider?.visibility = if (showRecent && box.childCount > 0) View.VISIBLE else View.GONE
+    }
+
+    private fun toolButtonParams() = LinearLayout.LayoutParams(dpToPx(40), dpToPx(36)).apply { marginEnd = dpToPx(4) }
+
+    private fun barButton(icon: Int, description: String, onClick: (View) -> Unit) = FrameLayout(ui).apply {
+        contentDescription = description
+        background = keyDrawable(R.attr.imeItemBackgroundBorderless)
+        addView(ImageView(ui).apply { setImageResource(icon) }, FrameLayout.LayoutParams(dpToPx(22), dpToPx(22), Gravity.CENTER))
+        setOnClickListener {
+            triggerHaptic(it)
+            onClick(it)
+        }
+    }
+
+    private fun toolButton(root: View, t: com.p3dro.scorpio.ime.engine.Toolbar.Tool) = barButton(t.icon, t.name) {
+        when (t.id) {
+            "emoji" -> if (currentMode == KeyboardMode.EXPANDED && currentExpandedType == ExpandedType.EMOJI) collapseCandidates() else openEmojiPanel(root)
+            "kaomoji" -> if (currentMode == KeyboardMode.EXPANDED && currentExpandedType == ExpandedType.KAOMOJI) collapseCandidates() else openKaomojiPanel(root)
+            "handwriting" -> if (currentMode == KeyboardMode.HANDWRITING) collapseCandidates() else setKeyboardMode(KeyboardMode.HANDWRITING)
+            else -> {
+                val id = t.id.removePrefix("plugin:")
+                if (currentMode == KeyboardMode.EXPANDED && currentExpandedType == ExpandedType.PLUGINS && openPluginId == id) collapseCandidates()
+                else openPluginPanel(root, id)
+            }
+        }
     }
 
     /** 外掛面板：一個分頁一個頁籤 */
@@ -2298,15 +2337,17 @@ class ScorpioImeService : InputMethodService() {
         layoutExpandedHeader?.visibility = View.VISIBLE
         val tabsLayout = root.findViewById<LinearLayout>(R.id.layout_expanded_tabs)
         val rvGrid = root.findViewById<RecyclerView>(R.id.rv_expanded_grid)
-        rvGrid.layoutManager = GridLayoutManager(this, 4)
         setExpandedDividers(rvGrid, false)
         fun show(name: String) {
             val tab = plugin.tabs.firstOrNull { it.name == name } ?: return
             val now = java.util.Date()
-            val shown = tab.items.map { com.p3dro.scorpio.ime.engine.Plugins.expand(it.label, now) }
-            rvGrid.adapter = ExpandedGridAdapter(shown, { picked ->
-                tab.items.getOrNull(shown.indexOf(picked))?.let { runPluginItem(it) }
-            }, autoSizeText = true)
+            val shown = tab.items.map { item ->
+                item.title?.let { com.p3dro.scorpio.ime.engine.Plugins.expand(it, now) } to com.p3dro.scorpio.ime.engine.Plugins.expand(item.label, now)
+            }
+            // 有小標題或內容較長的分頁一排兩個，短的符號一排四個；同一頁字一樣大
+            val wide = shown.any { it.first != null || it.second.length > 5 }
+            rvGrid.layoutManager = GridLayoutManager(this, if (wide) 2 else 4)
+            rvGrid.adapter = PluginGridAdapter(shown, if (wide) 16f else 19f) { i -> tab.items.getOrNull(i)?.let { runPluginItem(it) } }
         }
         renderPillTabs(tabsLayout, plugin.tabs.map { it.name }) { show(it) }
         plugin.tabs.firstOrNull()?.let { show(it.name) }
@@ -2741,6 +2782,61 @@ class ScorpioImeService : InputMethodService() {
 
     private fun dpToPx(dp: Float): Int {
         return (dp * resources.displayMetrics.density).toInt()
+    }
+
+    /** 擴充功能面板的格子：小標題（可省略）＋內容，同一頁字一樣大，太長的以 … 結尾 */
+    private class PluginGridAdapter(
+        private val items: List<Pair<String?, String>>,
+        private val textSp: Float,
+        private val onSelect: (Int) -> Unit
+    ) : RecyclerView.Adapter<PluginGridAdapter.Holder>() {
+
+        class Holder(val view: LinearLayout, val title: TextView, val value: TextView) : RecyclerView.ViewHolder(view)
+
+        override fun getItemCount() = items.size
+
+        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): Holder {
+            val ctx = parent.context
+            val d = ctx.resources.displayMetrics.density
+            val hasTitles = items.any { it.first != null }
+            fun text(sp: Float, color: Int) = TextView(ctx).apply {
+                textSize = sp
+                setTextColor(ctx.getColor(color))
+                textLocale = java.util.Locale.TAIWAN
+                gravity = android.view.Gravity.CENTER
+                isSingleLine = true
+                ellipsize = android.text.TextUtils.TruncateAt.END
+            }
+            val title = text(12f, R.color.ime_text_secondary)
+            val value = text(textSp, R.color.ime_candidate_text)
+            val cell = LinearLayout(ctx).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = android.view.Gravity.CENTER
+                val outValue = android.util.TypedValue()
+                ctx.theme.resolveAttribute(R.attr.imeItemBackground, outValue, true)
+                setBackgroundResource(outValue.resourceId)
+                setPadding((6 * d).toInt(), 0, (6 * d).toInt(), 0)
+                addView(title)
+                addView(value)
+                layoutParams = ViewGroup.MarginLayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ((if (hasTitles) 56 else 44) * d).toInt()).apply {
+                    val m = (2 * d).toInt()
+                    setMargins(m, m, m, m)
+                }
+            }
+            return Holder(cell, title, value)
+        }
+
+        override fun onBindViewHolder(holder: Holder, position: Int) {
+            val (title, value) = items[position]
+            holder.title.text = title.orEmpty()
+            holder.title.visibility = if (title == null) View.GONE else View.VISIBLE
+            holder.value.text = value
+            holder.view.contentDescription = listOfNotNull(title, value).joinToString(" ")
+            holder.view.setOnClickListener {
+                val i = holder.bindingAdapterPosition
+                if (i >= 0) onSelect(i)
+            }
+        }
     }
 
     private class ExpandedGridAdapter(

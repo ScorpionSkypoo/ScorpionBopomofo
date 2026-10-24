@@ -12,7 +12,9 @@ import java.util.Locale
 
 /**
  * 工具列擴充功能（外掛）：宣告式 JSON，只能組合下面這幾種內建動作，不含可執行的程式碼
- *   insert     插入文字（可用 {date:格式}、{time:格式}、{weekday}、{weekday:short}、{roc}、{selection}）
+ *   insert     插入文字（可用 {date:格式}、{time:格式}、{weekday}、{weekday:short}、{roc}、{selection}；
+ *              date、weekday、roc 可加天數，例如 {date+1:M/d} 是明天、{weekday-1} 是昨天星期幾）
+ * 項目可以有 title：面板上顯示在內容上方的小標題（例如「今天」「明天」），也會展開上面的標記
  *   transform  轉換選取的文字（fullwidth、halfwidth、upper、lower、title、trim_spaces）
  *   open_url   用選取的文字開網址（只接受 https，{selection} 會先 URL 編碼）
  * 外掛從資料 repo（scorpio-ime-data）的 plugins/ 線上安裝，格式見該 repo 的 README
@@ -21,7 +23,7 @@ object Plugins {
 
     const val SCHEMA = 1
 
-    data class Item(val label: String, val action: String, val insert: String?, val op: String?, val url: String?)
+    data class Item(val label: String, val action: String, val insert: String?, val op: String?, val url: String?, val title: String? = null)
     data class Tab(val name: String, val items: List<Item>)
     data class Plugin(
         val id: String,
@@ -54,7 +56,8 @@ object Plugins {
             val action = raw.optString("action", "insert")
             val item = Item(
                 raw.getString("label"), action, raw.optString("insert").ifEmpty { null },
-                raw.optString("op").ifEmpty { null }, raw.optString("url").ifEmpty { null }
+                raw.optString("op").ifEmpty { null }, raw.optString("url").ifEmpty { null },
+                raw.optString("title").ifEmpty { null }
             )
             when {
                 action == "insert" && item.insert != null -> item
@@ -66,17 +69,18 @@ object Plugins {
         else -> null
     }
 
-    private val TOKEN = Regex("\\{(date|time|weekday|roc|selection)(?::([^}]*))?\\}")
+    private val TOKEN = Regex("\\{(date|time|weekday|roc|selection)([+-]\\d{1,3})?(?::([^}]*))?\\}")
     private val WEEKDAYS = listOf("星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六")
     private val WEEKDAYS_SHORT = listOf("日", "一", "二", "三", "四", "五", "六")
 
     /** 展開文字裡的 {date:…} 等標記；encode 用在網址（{selection} 會 URL 編碼） */
     fun expand(template: String, now: Date = Date(), selection: String = "", encode: Boolean = false): String {
-        val cal = Calendar.getInstance().apply { time = now }
         return TOKEN.replace(template) { m ->
-            val arg = m.groupValues[2]
+            val days = m.groupValues[2].takeIf { it.isNotEmpty() }?.toInt() ?: 0
+            val cal = Calendar.getInstance().apply { time = now; add(Calendar.DAY_OF_MONTH, days) }
+            val arg = m.groupValues[3]
             when (m.groupValues[1]) {
-                "date", "time" -> SimpleDateFormat(arg.ifEmpty { if (m.groupValues[1] == "date") "yyyy/MM/dd" else "HH:mm" }, Locale.TAIWAN).format(now)
+                "date", "time" -> SimpleDateFormat(arg.ifEmpty { if (m.groupValues[1] == "date") "yyyy/MM/dd" else "HH:mm" }, Locale.TAIWAN).format(cal.time)
                 "weekday" -> (if (arg == "short") WEEKDAYS_SHORT else WEEKDAYS)[cal.get(Calendar.DAY_OF_WEEK) - 1]
                 "roc" -> (cal.get(Calendar.YEAR) - 1911).toString()
                 "selection" -> if (encode) java.net.URLEncoder.encode(selection, "UTF-8") else selection
