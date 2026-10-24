@@ -2804,22 +2804,26 @@ class ScorpioImeService : InputMethodService() {
             else listOf("%", "©", "®", "™", "✓", "[", "]")
         }
 
-        // 整個符號鍵盤跟「切過來的那個鍵盤」同高（實際量到的高度；尚未量到時用另一個，再沒有用 5 排的設計值），切換時畫面不跳動
-        // （注音與英文鍵盤高度差一點點，取比較高的那個，從注音切過來會整個長高、按鍵移位）
-        // 比照 Gboard：按鍵維持 44dp 不變，多出來的高度平均分給排與排之間的間距
+        // 版面照切過來的那個鍵盤：大千注音鍵盤（底排有 ㄦ 與刪除鍵）或 QWERTY（英文、26 鍵注音、拼音）
+        val fromZhuyinPanel = chinese && !chineseMethod.usesQwerty
+
+        // 整個符號鍵盤跟「切過來的那個鍵盤」同高（實際量到的高度；尚未量到時用另一個，再沒有用 5 排的設計值），切換時畫面不跳動。
+        // 最下排跟來源鍵盤的最下排一樣高、一樣位置；上面三排把來源鍵盤多一排的高度分掉（按鍵加高，排距同樣 4dp，比照 Gboard）
         val referenceHeight = sourcePanelHeight()
         val panelHeight = if (referenceHeight > 0) referenceHeight else (5 * keyRowHeightPx() + dpToPx(4 * 4 + 4 + 6))
         symPanel.layoutParams = symPanel.layoutParams.apply { height = panelHeight }
         val keyHeight = keyRowHeightPx()
-        // 三個排距平分多出來的高度，除不盡的像素給最後一個：最下排才會跟注音／英文鍵盤的最下排對齊
-        val gapSpace = panelHeight - symPanel.paddingTop - symPanel.paddingBottom - 4 * keyHeight
-        val rowGap = (gapSpace / 3).coerceAtLeast(dpToPx(4))
-        val lastGap = (gapSpace - 2 * rowGap).coerceAtLeast(dpToPx(4))
+        val rowGap = dpToPx(4)
+        val upperSpace = panelHeight - symPanel.paddingTop - symPanel.paddingBottom - keyHeight - 3 * rowGap
+        val upperHeight = upperSpace / 3
+        // 除不盡的像素給第三排，最下排才會剛好對齊
+        val thirdHeight = upperSpace - 2 * upperHeight
 
         fun newRow(index: Int, weightSum: Float) = LinearLayout(ui).apply {
             orientation = LinearLayout.HORIZONTAL
-            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, keyHeight).apply {
-                setMargins(0, when (index) { 0 -> 0; 3 -> lastGap; else -> rowGap }, 0, 0)
+            val h = when (index) { 2 -> thirdHeight; 3 -> keyHeight; else -> upperHeight }
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, h).apply {
+                setMargins(0, if (index == 0) 0 else rowGap, 0, 0)
             }
             this.weightSum = weightSum
         }
@@ -2833,16 +2837,21 @@ class ScorpioImeService : InputMethodService() {
             isFocusable = true
         }
 
-        fun label(text: String, size: Float, colorRes: Int = R.color.ime_text_primary) = TextView(ui).apply {
-            this.text = text
-            textSize = size
-            setTextColor(ui.getColor(colorRes))
-            layoutParams = FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                android.view.Gravity.CENTER
-            )
-        }
+        // 功能鍵只參與最近鍵判定，點擊交還給按鈕本身
+        fun functionKey(weight: Float, bgAttr: Int) = keyFrame(weight, bgAttr).also { symPanel.registerKey(it, null) }
+
+        // 鍵上的字照來源鍵盤的置中方式：注音鍵去掉字型上下的預留空白；英文鍵以字形實際的中心置中（KeyLabelView）
+        fun label(text: String, size: Float, colorRes: Int = R.color.ime_text_primary): TextView =
+            (if (fromZhuyinPanel) TextView(ui).apply { includeFontPadding = false } else com.p3dro.scorpio.ime.ui.KeyLabelView(ui)).apply {
+                this.text = text
+                textSize = size
+                setTextColor(ui.getColor(colorRes))
+                layoutParams = FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    android.view.Gravity.CENTER
+                )
+            }
 
         fun icon(res: Int, tint: Boolean = true) = ImageView(ui).apply {
             setImageDrawable(ui.getDrawable(res))
@@ -2850,25 +2859,31 @@ class ScorpioImeService : InputMethodService() {
             layoutParams = FrameLayout.LayoutParams(dpToPx(20), dpToPx(20), android.view.Gravity.CENTER)
         }
 
+        fun backspaceKey(weight: Float) = functionKey(weight, R.attr.imeKeyFunctionDrawable).apply {
+            addView(icon(R.drawable.ic_ime_backspace))
+            setOnTouchListener(RepeatTouchListener {
+                triggerHaptic(symPanel)
+                handleBackspace()
+            })
+        }
+
         // 字的大小跟來源鍵盤一樣：注音鍵盤 18sp、英文字母 23sp；底排的逗號、句點兩邊都是 18sp
-        fun symbolKey(sym: String, weight: Float = 1f, size: Float = if (chinese) 18f else 23f) = keyFrame(weight, R.attr.imeKeyDrawable).apply {
+        fun symbolKey(sym: String, weight: Float = 1f, size: Float = if (fromZhuyinPanel) 18f else 23f) = keyFrame(weight, R.attr.imeKeyDrawable).apply {
             addView(label(sym, size))
             symPanel.registerKey(this, sym[0])
         }
 
-        // 功能鍵只參與最近鍵判定，點擊交還給按鈕本身
-        fun functionKey(weight: Float, bgAttr: Int) = keyFrame(weight, bgAttr).also { symPanel.registerKey(it, null) }
 
         // 第 1、2 排：各 10 鍵
         for ((index, row) in rows.withIndex()) {
             val rowLayout = newRow(index, row.size.toFloat())
             // 第 1 頁第一排的數字跟來源鍵盤的數字列一樣大（英文 20sp、注音 19sp）
             val digitRow = symbolsPage == 0 && index == 0
-            for (sym in row) rowLayout.addView(if (digitRow) symbolKey(sym, size = if (chinese) 19f else 20f) else symbolKey(sym))
+            for (sym in row) rowLayout.addView(if (digitRow) symbolKey(sym, size = if (fromZhuyinPanel) 19f else 20f) else symbolKey(sym))
             symPanel.addView(rowLayout)
         }
 
-        // 第 3 排：翻頁鍵 + 7 個符號 + 刪除鍵（同 Gboard）
+        // 第 3 排：翻頁鍵 + 7 個符號 + 刪除鍵（同 Gboard）；從大千注音來的刪除鍵在最下排（跟注音鍵盤一樣），這格換成「、」
         val thirdRow = newRow(2, 10f)
         thirdRow.addView(functionKey(1.5f, R.attr.imeKeyFunctionDrawable).apply {
             addView(label(if (symbolsPage == 0) "=\\<" else "?123", 14f))
@@ -2879,16 +2894,12 @@ class ScorpioImeService : InputMethodService() {
             }
         })
         for (sym in row3) thirdRow.addView(symbolKey(sym))
-        thirdRow.addView(functionKey(1.5f, R.attr.imeKeyFunctionDrawable).apply {
-            addView(icon(R.drawable.ic_ime_backspace))
-            setOnTouchListener(RepeatTouchListener {
-                triggerHaptic(symPanel)
-                handleBackspace()
-            })
-        })
+        if (fromZhuyinPanel) thirdRow.addView(symbolKey("、", 1.5f)) else thirdRow.addView(backspaceKey(1.5f))
         symPanel.addView(thirdRow)
 
-        // 第 4 排：返回、逗號、語言切換、空白、句號、Enter（權重總和 10.4，與注音／英文底排對齊）
+        // 第 4 排：跟來源鍵盤的最下排同樣的鍵寬與位置（權重總和 10.4）
+        //   英文／QWERTY：返回 1.4、逗號 0.9、語言 0.9、空白 4.7、句號 1.0、Enter 1.5
+        //   大千注音：返回 1.4、逗號 0.9、語言 0.9、空白 3.3、句號 0.9（ㄦ 的位置）、刪除 1.5、Enter 1.5
         val bottomRow = newRow(3, 10.4f)
         bottomRow.addView(functionKey(1.4f, R.attr.imeKeyFunctionDrawable).apply {
             addView(label(if (chinese) "注音" else "ABC", 14f))
@@ -2907,15 +2918,15 @@ class ScorpioImeService : InputMethodService() {
                 switchToNextLanguage()
             }
         })
-        // 英文來的：空白 4.7、句點 1.0，跟英文鍵盤底排一樣寬、一樣位置
-        bottomRow.addView(functionKey(if (chinese) 4.8f else 4.7f, R.attr.imeKeyDrawable).apply {
+        bottomRow.addView(functionKey(if (fromZhuyinPanel) 3.3f else 4.7f, R.attr.imeKeyDrawable).apply {
             addView(label("空白", 13f, R.color.ime_text_secondary))
             setOnClickListener {
                 triggerHaptic(it)
                 currentInputConnection?.commitText(" ", 1)
             }
         })
-        bottomRow.addView(symbolKey(if (chinese) "。" else ".", if (chinese) 0.9f else 1.0f, size = 18f))
+        bottomRow.addView(symbolKey(if (chinese) "。" else ".", if (fromZhuyinPanel) 0.9f else 1.0f, size = 18f))
+        if (fromZhuyinPanel) bottomRow.addView(backspaceKey(1.5f))
         bottomRow.addView(functionKey(1.5f, R.attr.imeKeyActionDrawable).apply {
             addView(icon(R.drawable.ic_ime_enter, tint = false))
             setOnClickListener {

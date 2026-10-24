@@ -169,6 +169,9 @@ class ScorpioDictManager private constructor(private val context: Context) {
         /** 學習加分：疊加在字典分數上，讓選過的字在同一層級內勝出，而非蓋過所有正確讀音 */
         fun learnBonus(count: Int): Double = minOf(3.0 + count * 1.5, 12.0)
 
+        /** 多音節輸入時，只蓋到前幾個音節的詞加完上文分數的上限：低於整句（115）與整句備選（108、107） */
+        const val PARTIAL_CAP = 106.0
+
         // 顏文字關鍵字 → 分類（打「笑臉」「開心」等詞時同步穿插對應顏文字；分類見 tools/build_kaomoji.py）
         val KAOMOJI_KEYWORDS: Map<String, String> = buildMap {
             fun reg(cat: String, vararg words: String) { words.forEach { put(it, cat) } }
@@ -1227,10 +1230,16 @@ class ScorpioDictManager private constructor(private val context: Context) {
         // 個人學習加分（僅限讀音完全吻合的選字紀錄）
         val learnBoostMap = mutableMapOf<String, Double>()
 
+        // 只蓋到前幾個音節的詞（打 ㄉㄜㄈㄨㄏㄠ 的「的」）：上文搭配加分最多加到 PARTIAL_CAP，
+        // 不會因為常在「鍵盤」後面接「的」就排到整句「的符號」前面；本來就比這高的不受影響
+        val fullLength = segmentationsToUse.firstOrNull()?.size ?: 0
         fun addScoredWord(word: String, baseScore: Double) {
             if (word.isNotBlank() && !word.startsWith("MACRO@")) {
                 val contextBoost = contextBoostOf(word)
-                val finalScore = baseScore + contextBoost + (learnBoostMap[word] ?: 0.0)
+                var finalScore = baseScore + contextBoost + (learnBoostMap[word] ?: 0.0)
+                if (fullLength > 1 && hanLength(word) in 1 until fullLength && finalScore > PARTIAL_CAP) {
+                    finalScore = maxOf(PARTIAL_CAP, baseScore)
+                }
                 val cur = bestWordScores[word]
                 if (cur == null || finalScore > cur) {
                     bestWordScores[word] = finalScore
