@@ -1056,6 +1056,13 @@ class ScorpioDictManager private constructor(private val context: Context) {
             val cur = scored[word]
             if (cur == null || score > cur) scored[word] = score
         }
+        fun learnedScore(count: Int) = 2000.0 + minOf(800.0 + count * 400.0, 2800.0)
+        // 改錯字也要找學過的字（gboard、人名、專有名詞不在內建字典裡）：整個字吻合才算
+        fun addLearnedFix(variant: String, penalty: Double) {
+            val e = user.englishWord(variant) ?: return
+            display[variant] = e.word
+            add(variant, learnedScore(e.count) - penalty)
+        }
 
         // 1. 個人學習的英文字（前綴吻合）
         val learned = HashMap<String, Int>()
@@ -1067,7 +1074,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
         var exact = learned.containsKey(lower)
         for ((k, cnt) in learned) {
             if (k == lower) continue
-            add(k, 2000.0 + minOf(800.0 + cnt * 400.0, 2800.0))
+            add(k, learnedScore(cnt))
         }
 
         if (index != null) {
@@ -1089,6 +1096,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
                         ?: BopomofoComposer.TouchPoint(lower[i])
                     for ((nb, pen) in englishNeighborKeys(tp)) {
                         val variant = lower.substring(0, i) + nb + lower.substring(i + 1)
+                        addLearnedFix(variant, pen * 1000.0)
                         val vr = index.range(variant)
                         var taken = 0
                         // 區間內依詞頻取前幾名
@@ -1110,7 +1118,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
 
         // 4. 打錯字（比照 Gboard）：打的不是一個字時，除了上面的鄰鍵替換，再找少打、多打一個字母、
         //    相鄰兩個字母對調的整個字（懲罰 1.2，同鄰鍵替換的尺度；teh → the、recieve → receive）
-        if (!exact && index != null && lower.length >= 3 && lower.all { it in 'a'..'z' }) {
+        if (!exact && lower.length >= 3 && lower.all { it in 'a'..'z' }) {
             val variants = HashSet<String>()
             for (i in lower.indices) variants.add(lower.removeRange(i, i + 1))
             for (i in 0 until lower.length - 1) {
@@ -1119,7 +1127,8 @@ class ScorpioDictManager private constructor(private val context: Context) {
             for (i in 0..lower.length) for (c in 'a'..'z') variants.add(lower.substring(0, i) + c + lower.substring(i))
             variants.remove(lower)
             for (v in variants) {
-                val r = index.range(v)
+                addLearnedFix(v, 1200.0)
+                val r = index?.range(v) ?: continue
                 if (!r.isEmpty() && index.word(r.first) == v) add(v, index.score(r.first) - 1200.0)
             }
         }

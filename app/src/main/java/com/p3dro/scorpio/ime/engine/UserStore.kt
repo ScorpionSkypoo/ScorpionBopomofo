@@ -174,5 +174,8 @@ class UserStore {
     }
 
     @Synchronized
+    fun englishWord(key: String): English? = english[key]
+
+    @Synchronized
     fun englishCount() = english.size
 }
