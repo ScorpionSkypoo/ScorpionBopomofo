@@ -57,7 +57,11 @@ class BopomofoComposer {
         /**
          * 將按鍵序列解析為注音音節（附各音節的觸控點）；供 composer 與鄰鍵修正共用
          */
-        fun parseSyllables(points: List<TouchPoint>, allowSwap: Boolean = false): List<ParsedSyllable> {
+        /**
+         * keepIncompatible：聲母後面接了拼不起來的介音（ㄏ＋ㄩ）也不拆開，整個當一個（拼不起來的）音節。
+         * 一般組字會拆成「ㄏ（簡拼）＋ㄩㄢ」；按錯鄰鍵的修正與學習要用不拆開的看（ㄏㄩㄢ 其實是 ㄒㄩㄢ）
+         */
+        fun parseSyllables(points: List<TouchPoint>, allowSwap: Boolean = false, keepIncompatible: Boolean = false): List<ParsedSyllable> {
             val syllables = mutableListOf<ParsedSyllable>()
             var curInit: Char? = null
             var curMed: Char? = null
@@ -101,7 +105,7 @@ class BopomofoComposer {
                     }
                     MEDIALS.contains(c) -> {
                         // 若當前聲母與該介母不相容（如 ㄎ與ㄧ、ㄍ與ㄧ、ㄓ與ㄧ、ㄅ與ㄩ等），聲母必須獨立成音節，介母開展新音節
-                        val isIncompatible = (curInit != null) && (
+                        val isIncompatible = !keepIncompatible && (curInit != null) && (
                             (c == 'ㄧ' && INCOMPATIBLE_WITH_I.contains(curInit)) ||
                             (c == 'ㄩ' && INCOMPATIBLE_WITH_U.contains(curInit))
                         )
@@ -193,6 +197,10 @@ class BopomofoComposer {
     }
 
     fun getTouchPoints(): List<TouchPoint> = touchHistory.toList()
+
+    /** 不把拼不起來的聲母＋介音拆開時的音節數（ㄏ＋ㄩㄢ 算一個 ㄏㄩㄢ）；字母鍵輸入法照解碼結果 */
+    fun mergedSyllableCount(): Int =
+        if (decoder != null) parsed().size else parseSyllables(touchHistory, keepIncompatible = true).size
 
     /**
      * 退格刪除：保證一次只精準刪除最後輸入的一個注音符號

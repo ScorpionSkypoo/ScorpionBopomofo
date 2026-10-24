@@ -733,7 +733,6 @@ class ScorpioDictManager private constructor(private val context: Context) {
 
     suspend fun recordTouchSamples(points: List<BopomofoComposer.TouchPoint>, word: String) = withContext(Dispatchers.IO) {
         if (learningPaused) return@withContext
-        val parsed = BopomofoComposer.parseSyllables(points)
         val chars = ArrayList<String>()
         var i = 0
         while (i < word.length) {
@@ -741,6 +740,9 @@ class ScorpioDictManager private constructor(private val context: Context) {
             chars.add(String(Character.toChars(cp)))
             i += Character.charCount(cp)
         }
+        // 音節數對不上時，看看是不是聲母＋拼不起來的介音被拆開了（ㄏ＋ㄩㄢ 其實是想打 ㄒㄩㄢ）
+        val parsed = BopomofoComposer.parseSyllables(points).takeIf { it.size == chars.size }
+            ?: BopomofoComposer.parseSyllables(points, keepIncompatible = true)
         if (parsed.isEmpty() || parsed.size != chars.size) return@withContext
         var added = 0
         for (k in parsed.indices) {
@@ -1205,6 +1207,37 @@ class ScorpioDictManager private constructor(private val context: Context) {
             }
         }
 
+        // 聲母後面接了拼不起來的介音（ㄏ＋ㄩㄢ）：組字會拆成「ㄏ（簡拼）＋ㄩㄢ」，每段都合法，上面的修正不會啟動。
+        // 不拆開再看一次：拼不起來就試鄰鍵與慣性打錯（ㄏ→ㄒ）；修好的整句比拆開的更像一句話才排第一，否則當備選
+        if (precomputedLattice == null && touchPoints != null && primaryInput.size > 1) {
+            val mergedParse = BopomofoComposer.parseSyllables(touchPoints, keepIncompatible = true)
+            if (mergedParse.size in 2 until primaryInput.size && mergedParse.any { !isValidSyllable(it.text) }) {
+                val repairs = repairByNeighborKeys(touchPoints, mergedParse.size, merged = true)
+                if (repairs.isNotEmpty()) {
+                    val scored = repairs.map { r ->
+                        val lattice = solveLatticeViterbi(r.syllables, r.touches, prevWord)
+                        Triple(r, lattice, lattice.bestScore - r.penalty * 1.8)
+                    }.sortedByDescending { it.third }
+                    val best = scored.first()
+                    val split = solveLatticeViterbi(primaryInput, primaryTouches, prevWord, trace)
+                    if (best.third > split.bestScore) {
+                        primaryTouches = best.first.touches
+                        precomputedLattice = best.second
+                        segmentationsToUse = buildList {
+                            add(best.first.syllables)
+                            addAll(allSegmentations)
+                        }
+                        repairAlternatives = listOfNotNull(split.fullSentence.takeIf { it.isNotEmpty() }) +
+                            scored.drop(1).take(3).mapNotNull { it.second.fullSentence.takeIf { s -> s.isNotEmpty() } }
+                    } else {
+                        precomputedLattice = split
+                        segmentationsToUse = allSegmentations + listOf(best.first.syllables)
+                        repairAlternatives = listOfNotNull(best.second.fullSentence.takeIf { it.isNotEmpty() })
+                    }
+                    trace?.add("不拆開的修正：${best.first.syllables.joinToString("-")}（%.2f）對拆開的 %.2f".format(best.third, split.bestScore))
+                }
+            }
+        }
         AllocProbe.add("g.repair", repairStart)
         val bodyStart = AllocProbe.now()
         val result = mutableListOf<String>()
@@ -1628,7 +1661,8 @@ class ScorpioDictManager private constructor(private val context: Context) {
      * 輸入中有拼不起來的音節時（例如 ㄐㄞ、ㄅㄧㄤ），逐一把每個按鍵換成實體相鄰鍵（或視為多按一下而刪除）重新切分，
      * 保留所有音節皆合法、且音節數不變的組合（音節數不變才能與部分選字的消費音節數對齊）。
      */
-    private fun repairByNeighborKeys(points: List<BopomofoComposer.TouchPoint>, syllableCount: Int): List<RepairedParse> {
+    /** merged：以不拆開聲母＋拼不起來介音的切法為準（ㄏㄩㄢ），找修正後音節數是 syllableCount 的讀法 */
+    private fun repairByNeighborKeys(points: List<BopomofoComposer.TouchPoint>, syllableCount: Int, merged: Boolean = false): List<RepairedParse> {
         val found = LinkedHashMap<String, RepairedParse>()
         fun consider(list: List<BopomofoComposer.TouchPoint>, pen: Double) {
             val parsed = BopomofoComposer.parseSyllables(list)
@@ -1640,7 +1674,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
             if (cur == null || pen < cur.penalty) found[key] = RepairedParse(syls, parsed.map { it.touches }, pen)
         }
         // 個人慣性打錯：整個音節直接換成以前選過的正確讀音（ㄉㄨㄠ → ㄉㄧㄠ），不受鄰鍵距離限制
-        val parsedNow = BopomofoComposer.parseSyllables(points)
+        val parsedNow = BopomofoComposer.parseSyllables(points, keepIncompatible = merged)
         if (parsedNow.size == syllableCount) {
             for ((idx, ps) in parsedNow.withIndex()) {
                 val tl = toToneless(ps.text)
@@ -1656,9 +1690,19 @@ class ScorpioDictManager private constructor(private val context: Context) {
                 }
             }
         }
+        // 不拆開的切法：只修拼不起來的那幾個音節裡的鍵（不能靠改別的鍵湊出音節數，例如把後面的 ㄗ 改成聲調）
+        val fixable: Set<Int>? = if (!merged) null else {
+            val out = HashSet<Int>()
+            for (ps in parsedNow) {
+                if (isValidSyllable(ps.text)) continue
+                for (t in ps.touches.values) points.indexOfFirst { it === t }.takeIf { it >= 0 }?.let { out.add(it) }
+            }
+            out
+        }
         for (i in points.indices) {
             val p = points[i]
             if (BopomofoComposer.TONES.contains(p.char)) continue
+            if (fixable != null && i !in fixable) continue
             for ((nb, pen) in neighborKeys(p)) {
                 val copy = points.toMutableList()
                 copy[i] = p.copy(char = nb)

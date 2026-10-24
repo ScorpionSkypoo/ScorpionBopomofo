@@ -1735,7 +1735,9 @@ class ScorpioImeService : InputMethodService() {
             }
             val syllables = if (composer.isComposing) composer.getAllSyllables() else emptyList()
 
-            if (composer.isComposing && isChineseWord && candidate.length < syllables.size) {
+            // 聲母＋拼不起來的介音被拆開（ㄏ＋ㄩㄢ）時，選了修正後的整句（字數＝不拆開的音節數）是整個送出，不是只選前幾個音節
+            val coversAll = composer.isComposing && candidate.length == composer.mergedSyllableCount()
+            if (composer.isComposing && isChineseWord && candidate.length < syllables.size && !coversAll) {
                 // 部分音節選字（例如輸入「ㄏㄠˇ ㄉㄚ」選了「好」，保留「ㄉㄚ」繼續選字）
                 val consumedCount = candidate.length
                 val consumedReading = syllables.take(consumedCount).joinToString("-")
@@ -1764,7 +1766,7 @@ class ScorpioImeService : InputMethodService() {
                 val fullCompoundWord = if (sessionCommittedWords.size > 1) sessionCommittedWords.joinToString("") else null
                 val fullCompoundReading = if (sessionComposingReadings.size > 1) sessionComposingReadings.joinToString("-") else null
 
-                if (composer.isComposing && isChineseWord && candidate.length == syllables.size) {
+                if (composer.isComposing && isChineseWord && (candidate.length == syllables.size || coversAll)) {
                     recordTouchSamples(composer.getTouchPoints(), candidate)
                 }
                 ic?.commitText(candidate, 1)
@@ -1888,7 +1890,7 @@ class ScorpioImeService : InputMethodService() {
         val ic = currentInputConnection ?: return null
         val topWord = candidateAdapter?.topCandidate ?: composer.rawInputText
         val reading = composer.getDictLookupKey()
-        if (topWord.isNotEmpty() && topWord.length == composer.getAllSyllables().size) {
+        if (topWord.isNotEmpty() && (topWord.length == composer.getAllSyllables().size || topWord.length == composer.mergedSyllableCount())) {
             recordTouchSamples(composer.getTouchPoints(), topWord)
         }
         ic.commitText(topWord, 1)
