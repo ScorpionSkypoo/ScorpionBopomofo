@@ -329,6 +329,16 @@ class SpatialModel {
 
     fun sampleCount(): Int = globalBias.n.toInt()
 
+    /** 一個鍵的落點分佈（鍵距單位）：平均偏移、標準差與樣本數；sdX/sdY 為 null 表示散佈樣本還太少 */
+    class KeySpread(val dx: Double, val dy: Double, val sdX: Double?, val sdY: Double?, val n: Double)
+
+    /** 設定頁的落點分佈圖用：每個學過的鍵的原始統計（不含向全體平均的收斂） */
+    @Synchronized
+    fun keySpreads(): Map<Char, KeySpread> = keyBias.mapValues { (_, b) ->
+        val hasSpread = b.m >= 5.0
+        KeySpread(b.dx, b.dy, if (hasSpread) sqrt(b.vx) else null, if (hasSpread) sqrt(b.vy) else null, b.n)
+    }
+
     /** 序列化：「鍵:dx,dy,n;…」，全體平均以 * 為鍵 */
     @Synchronized
     fun serialize(): String {

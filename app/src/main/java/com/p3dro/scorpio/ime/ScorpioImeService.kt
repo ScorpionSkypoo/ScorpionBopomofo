@@ -176,6 +176,8 @@ class ScorpioImeService : InputMethodService() {
         const val PREF_PHOTO_ALPHA = "photo_alpha"
         const val PREF_RECENT_LIST = "recent_symbols"
         private const val RECENT_SEP = "\u001F"
+        // 最近用過的 Emoji、顏文字最多記幾個
+        private const val MAX_RECENT_SYMBOLS = 10
 
         /** 展開候選格的字級（sp），不因詞長縮小 */
         const val EXPANDED_TEXT_SP = 20f
@@ -1207,7 +1209,7 @@ class ScorpioImeService : InputMethodService() {
 
     /** 結束目前的英文單字（空白、標點、Enter 等），打完的字寫入英文學習 */
     private fun finishEnglishWord(learn: Boolean = true) {
-        if (learn && englishWordBuffer.length >= 2) {
+        if (learn && englishWordBuffer.length >= 2 && personalizationAllowed()) {
             val word = englishWordBuffer.toString()
             serviceScope.launch { dictManager.recordEnglishWord(word) }
         }
@@ -1242,7 +1244,7 @@ class ScorpioImeService : InputMethodService() {
             endEnglishPhrase()
             return
         }
-        lastEnglishWord?.let { prev -> serviceScope.launch { dictManager.recordBigram(prev, clean) } }
+        if (personalizationAllowed()) lastEnglishWord?.let { prev -> serviceScope.launch { dictManager.recordBigram(prev, clean) } }
         lastEnglishWord = clean
         englishCandidateJob?.cancel()
         englishCandidateJob = serviceScope.launch {
@@ -1315,7 +1317,7 @@ class ScorpioImeService : InputMethodService() {
         // 剛刪掉一個鍵、馬上改按別的鍵：學「按歪的那一下其實想按這個鍵」（離太遠的由空間模型自己略過）
         val wrong = retypeCandidate
         if (wrong != null && lastActionWasBackspace && wrong.char != touch.char &&
-            System.currentTimeMillis() - retypeAt < RETYPE_WINDOW_MS
+            System.currentTimeMillis() - retypeAt < RETYPE_WINDOW_MS && personalizationAllowed()
         ) {
             dictManager.learnRetypeCorrection(touch.char, wrong)
         }
@@ -1327,7 +1329,7 @@ class ScorpioImeService : InputMethodService() {
     /** 開始打一個新詞、又沒有上一個送出的詞時：讀游標前幾個字，找出最後一個詞當上文（密碼欄、無痕模式不讀） */
     private fun captureScreenContext() {
         screenContextWord = null
-        if (!screenContextAllowed()) return
+        if (!personalizationAllowed()) return
         val before = try {
             currentInputConnection?.getTextBeforeCursor(8, 0)
         } catch (e: Exception) {
@@ -1336,8 +1338,11 @@ class ScorpioImeService : InputMethodService() {
         screenContextWord = dictManager.lastWordOf(before)
     }
 
-    /** 密碼欄、要求不要個人化學習的輸入框（瀏覽器無痕分頁等）不讀畫面上的字 */
-    private fun screenContextAllowed(): Boolean {
+    /**
+     * 密碼欄、要求不要個人化學習的輸入框（瀏覽器無痕分頁等）：不讀畫面上的字，也不學任何東西
+     * （選字、接續詞、英文字、按鍵落點、慣性打錯、最近用過的 Emoji 都不記）
+     */
+    private fun personalizationAllowed(): Boolean {
         val info = currentInputEditorInfo ?: return false
         if ((info.imeOptions and EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING) != 0) return false
         val cls = info.inputType and EditorInfo.TYPE_MASK_CLASS
@@ -1665,7 +1670,7 @@ class ScorpioImeService : InputMethodService() {
             // 暫存中的字直接被選中的字取代（commitText 會換掉暫存區）
             ic?.commitText("$candidate ", 1)
             finishEnglishWord(learn = false)
-            serviceScope.launch { dictManager.recordEnglishWord(candidate) }
+            if (personalizationAllowed()) serviceScope.launch { dictManager.recordEnglishWord(candidate) }
             onEnglishWordDone(candidate)
             updateBarVisibility()
         } else if (codeBuffer.isNotEmpty()) {
@@ -1757,7 +1762,7 @@ class ScorpioImeService : InputMethodService() {
 
     private fun recordTouchSamples(points: List<BopomofoComposer.TouchPoint>, word: String) {
         // 落點學習只適用大千注音鍵盤
-        if (composer.decoder != null) return
+        if (composer.decoder != null || !personalizationAllowed()) return
         if (points.isEmpty() || !word.all { Character.UnicodeScript.of(it.code) == Character.UnicodeScript.HAN }) return
         serviceScope.launch { dictManager.recordTouchSamples(points, word) }
     }
@@ -1874,7 +1879,7 @@ class ScorpioImeService : InputMethodService() {
         val prevReading = lastCommittedReading
         val now = System.currentTimeMillis()
 
-        serviceScope.launch {
+        if (personalizationAllowed()) serviceScope.launch {
             // 1. 記錄本次單詞至自主學習詞庫
             if (reading.isNotEmpty() && word.isNotEmpty()) {
                 dictManager.recordSelection(reading, word)
@@ -2144,10 +2149,11 @@ class ScorpioImeService : InputMethodService() {
         (s.length >= 2 || Character.getType(s[0]) == Character.OTHER_SYMBOL.toInt())
 
     private fun recentSymbols(): List<String> =
-        prefs.getString(PREF_RECENT_LIST, "")!!.split(RECENT_SEP).filter { it.isNotEmpty() }
+        prefs.getString(PREF_RECENT_LIST, "")!!.split(RECENT_SEP).filter { it.isNotEmpty() }.take(MAX_RECENT_SYMBOLS)
 
     private fun recordRecentSymbol(s: String) {
-        val list = (listOf(s) + recentSymbols().filter { it != s }).take(24)
+        if (!personalizationAllowed()) return
+        val list = (listOf(s) + recentSymbols().filter { it != s }).take(MAX_RECENT_SYMBOLS)
         prefs.edit().putString(PREF_RECENT_LIST, list.joinToString(RECENT_SEP)).apply()
         refreshRecentBar()
     }

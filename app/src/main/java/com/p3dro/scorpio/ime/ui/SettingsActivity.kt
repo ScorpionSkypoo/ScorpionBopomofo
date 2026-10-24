@@ -878,6 +878,26 @@ class SettingsActivity : AppCompatActivity() {
                 render()
             }
         }
+
+        sectionTitle("我的按鍵落點")
+        val h = card()
+        val spreads = dict.spatial.keySpreads()
+        if (spreads.isEmpty()) {
+            infoRow(h, "還沒有資料", "用注音鍵盤打字、選字之後，這裡會畫出你按每個鍵的習慣。")
+        } else {
+            h.addView(
+                TapHeatmapView(this, spreads, keyColor = cSurfaceHighest, labelColor = cOnSurface, heatColor = cPrimary),
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                    setMargins(dp(12), dp(12), dp(12), dp(4))
+                }
+            )
+            infoRow(h, "怎麼看", "圓點是你瞄準這個鍵時平均按到的位置，細線從鍵中心指向它；暈開的範圍是落點的散佈，顏色越深代表這個鍵的樣本越多。")
+            val acc = dict.tapAccuracy()
+            if (acc[0] > 0) {
+                fun pct(v: Long) = "%.1f%%".format(java.util.Locale.ROOT, v * 100.0 / acc[0])
+                infoRow(h, "按鍵判對率：${pct(acc[1])}", "共 ${acc[0]} 次。不看散佈、只看偏移的話是 ${pct(acc[2])}。")
+            }
+        }
     }
 
     // ---------- 字典與學習 ----------
