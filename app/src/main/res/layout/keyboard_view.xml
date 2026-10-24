@@ -248,7 +248,7 @@
         </com.p3dro.scorpio.ime.ui.ZhuyinGridLayout>
 
         <!-- 第 5 排 (44dp, 刪除鍵加寬至 1.5, 送出鍵 1.5 鎖定右側) -->
-        <LinearLayout
+        <com.p3dro.scorpio.ime.ui.KeyRowLayout
             android:id="@+id/row_5"
             android:layout_width="match_parent"
             android:layout_height="44dp"
@@ -402,7 +402,7 @@
                     android:layout_gravity="center"
                     android:src="@drawable/ic_ime_enter" />
             </FrameLayout>
-        </LinearLayout>
+        </com.p3dro.scorpio.ime.ui.KeyRowLayout>
     </LinearLayout>
 
     <!-- 4. 英文 QWERTY 鍵盤 (高度維持 44dp 與注音完全 1:1，底排送出鍵絕對對齊) -->
@@ -509,7 +509,7 @@
 
         <!-- 第 4 排：底排 (?123, 逗號, 🌐, Space, 句號, Enter)
              權重總和 10.4，送出鍵位於 8.9~10.4 與注音排完全重合，絕不位移 -->
-        <LinearLayout
+        <com.p3dro.scorpio.ime.ui.KeyRowLayout
             android:id="@+id/en_row_4"
             android:layout_width="match_parent"
             android:layout_height="44dp"
@@ -628,7 +628,7 @@
                     android:layout_gravity="center"
                     android:src="@drawable/ic_ime_enter" />
             </FrameLayout>
-        </LinearLayout>
+        </com.p3dro.scorpio.ime.ui.KeyRowLayout>
     </com.p3dro.scorpio.ime.ui.SpatialKeyLayout>
 
     <!-- 5. 數字與常用標點鍵盤 (44dp，空間座標定位) -->
