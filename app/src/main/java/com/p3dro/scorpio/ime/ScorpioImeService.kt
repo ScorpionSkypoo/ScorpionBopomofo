@@ -2772,11 +2772,11 @@ class ScorpioImeService : InputMethodService() {
                 handleBackspace()
             })
         })
-        // 翻頁鍵與全／半鍵那一格往上長，用掉第 2、3 排之間大部分的空隙（只留 4dp），兩個鍵才不會太扁；
-        // 這排其他鍵維持原本高度、貼齊底部
-        val extra = (rowGap - dpToPx(4)).coerceAtLeast(0)
+        // 翻頁鍵與全／半鍵那一格往上、往下長，用掉上下兩個排距（各至少留 4dp），兩個鍵才不會太扁；
+        // 最多長到兩個鍵都跟一般按鍵一樣高（中間留 3dp）。這排其他鍵維持原本的位置與高度
+        val extra = minOf(rowGap - dpToPx(4), (keyHeight + dpToPx(3)) / 2).coerceAtLeast(0)
         (thirdRow.layoutParams as LinearLayout.LayoutParams).apply {
-            height = keyHeight + extra
+            height = keyHeight + 2 * extra
             topMargin = rowGap - extra
         }
         for (i in 0 until thirdRow.childCount) {
@@ -2784,13 +2784,15 @@ class ScorpioImeService : InputMethodService() {
             if (child === stacked) continue
             child.layoutParams = (child.layoutParams as LinearLayout.LayoutParams).apply {
                 height = keyHeight
-                gravity = Gravity.BOTTOM
+                topMargin = extra
+                gravity = Gravity.TOP
             }
         }
         symPanel.addView(thirdRow)
 
         // 第 4 排：返回、逗號、語言切換、空白、句號、Enter（權重總和 10.4，與注音／英文底排對齊）
         val bottomRow = newRow(3, 10.4f)
+        (bottomRow.layoutParams as LinearLayout.LayoutParams).topMargin = rowGap - extra
         bottomRow.addView(functionKey(1.4f, R.attr.imeKeyFunctionDrawable).apply {
             addView(label(if (chinese) "注音" else "ABC", 14f))
             setOnClickListener {
