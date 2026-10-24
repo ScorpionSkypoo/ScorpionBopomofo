@@ -1453,6 +1453,16 @@ class ScorpioImeService : InputMethodService() {
         }
     }
 
+    /**
+     * 程式建立的面板（符號、數字、手寫）要跟哪個鍵盤一樣高：切過來的那個（英文、或用 QWERTY 的中文輸入法是英文鍵盤，大千是注音鍵盤）。
+     * 還沒量到就用另一個；注音與英文鍵盤高度差一點點，取錯了切換時整個鍵盤會長高、按鍵移位
+     */
+    private fun sourcePanelHeight(): Int {
+        val english = previousMode == KeyboardMode.ENGLISH || chineseMethod.usesQwerty
+        val from = (if (english) panelEnglish?.height else panelZhuyin?.height) ?: 0
+        return if (from > 0) from else maxOf(panelZhuyin?.height ?: 0, panelEnglish?.height ?: 0)
+    }
+
     /** 英文鍵盤逗號鍵的字：Email 欄是 @、網址欄是 /，其他是逗號 */
     private fun englishCommaKey() = when (fieldKind) {
         FieldKind.EMAIL -> "@"
@@ -1492,7 +1502,7 @@ class ScorpioImeService : InputMethodService() {
         pad.keyPreview = keyPreview
         pad.onKeyTapListener = { char, _, _ -> currentInputConnection?.commitText(char.toString(), 1) }
 
-        val referenceHeight = maxOf(panelZhuyin?.height ?: 0, panelEnglish?.height ?: 0)
+        val referenceHeight = sourcePanelHeight()
         val panelHeight = if (referenceHeight > 0) referenceHeight else (5 * keyRowHeightPx() + dpToPx(4 * 4 + 4 + 6))
         pad.layoutParams = pad.layoutParams.apply { height = panelHeight }
         val gap = dpToPx(5)
@@ -1622,7 +1632,7 @@ class ScorpioImeService : InputMethodService() {
      */
     private fun buildHandwritingPanel() {
         val panel = panelHandwriting ?: return
-        val referenceHeight = maxOf(panelZhuyin?.height ?: 0, panelEnglish?.height ?: 0)
+        val referenceHeight = sourcePanelHeight()
         panel.layoutParams = panel.layoutParams.apply { height = if (referenceHeight > 0) referenceHeight else (5 * keyRowHeightPx() + dpToPx(4 * 4 + 4 + 6)) }
         if (panel.childCount == 0) createHandwritingViews(panel)
         val board = handwritingView ?: return
@@ -2794,9 +2804,10 @@ class ScorpioImeService : InputMethodService() {
             else listOf("%", "©", "®", "™", "✓", "[", "]")
         }
 
-        // 整個符號鍵盤與注音／英文鍵盤同高（實際量到的高度；尚未量到時用 5 排 44dp 的設計值），切換時畫面不跳動
+        // 整個符號鍵盤跟「切過來的那個鍵盤」同高（實際量到的高度；尚未量到時用另一個，再沒有用 5 排的設計值），切換時畫面不跳動
+        // （注音與英文鍵盤高度差一點點，取比較高的那個，從注音切過來會整個長高、按鍵移位）
         // 比照 Gboard：按鍵維持 44dp 不變，多出來的高度平均分給排與排之間的間距
-        val referenceHeight = maxOf(panelZhuyin?.height ?: 0, panelEnglish?.height ?: 0)
+        val referenceHeight = sourcePanelHeight()
         val panelHeight = if (referenceHeight > 0) referenceHeight else (5 * keyRowHeightPx() + dpToPx(4 * 4 + 4 + 6))
         symPanel.layoutParams = symPanel.layoutParams.apply { height = panelHeight }
         val keyHeight = keyRowHeightPx()
@@ -2839,9 +2850,9 @@ class ScorpioImeService : InputMethodService() {
             layoutParams = FrameLayout.LayoutParams(dpToPx(20), dpToPx(20), android.view.Gravity.CENTER)
         }
 
-        // 字的大小跟來源鍵盤一樣：注音鍵盤 18sp、英文字母 23sp
-        fun symbolKey(sym: String, weight: Float = 1f) = keyFrame(weight, R.attr.imeKeyDrawable).apply {
-            addView(label(sym, if (chinese) 18f else 23f))
+        // 字的大小跟來源鍵盤一樣：注音鍵盤 18sp、英文字母 23sp；底排的逗號、句點兩邊都是 18sp
+        fun symbolKey(sym: String, weight: Float = 1f, size: Float = if (chinese) 18f else 23f) = keyFrame(weight, R.attr.imeKeyDrawable).apply {
+            addView(label(sym, size))
             symPanel.registerKey(this, sym[0])
         }
 
@@ -2885,7 +2896,7 @@ class ScorpioImeService : InputMethodService() {
             }
         })
         val comma = if (chinese) "，" else ","
-        bottomRow.addView(symbolKey(comma, 0.9f))
+        bottomRow.addView(symbolKey(comma, 0.9f, size = 18f))
         bottomRow.addView(functionKey(0.9f, R.attr.imeKeyFunctionDrawable).apply {
             addView(icon(R.drawable.ic_ime_globe))
             setOnClickListener {
@@ -2902,7 +2913,7 @@ class ScorpioImeService : InputMethodService() {
                 currentInputConnection?.commitText(" ", 1)
             }
         })
-        bottomRow.addView(symbolKey(if (chinese) "。" else ".", if (chinese) 0.9f else 1.0f))
+        bottomRow.addView(symbolKey(if (chinese) "。" else ".", if (chinese) 0.9f else 1.0f, size = 18f))
         bottomRow.addView(functionKey(1.5f, R.attr.imeKeyActionDrawable).apply {
             addView(icon(R.drawable.ic_ime_enter, tint = false))
             setOnClickListener {
