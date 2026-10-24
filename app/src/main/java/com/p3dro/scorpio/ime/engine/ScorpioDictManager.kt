@@ -47,7 +47,9 @@ class ScorpioDictManager private constructor(private val context: Context) {
         private const val LITERAL_MARGIN = 1.5
         private const val PREF_USER_DICT_CANONICAL = "user_dict_canonical_v1"
         private const val PREF_SPATIAL_BIAS = "spatial_bias_v1"
-        private const val PREF_TAP_STATS = "tap_stats_v1"
+        // v2：判對統計改成比「有／沒有移動偏差」（v1 比的是散佈，已拿掉）
+        private const val PREF_TAP_STATS = "tap_stats_v2"
+        private const val PREF_MOTION = "motion_bias_v1"
         private const val PREF_QWERTY_BIAS = "qwerty_bias_v1"
         private const val PREF_QWERTY_STATS = "qwerty_tap_stats_v1"
 
@@ -284,10 +286,12 @@ class ScorpioDictManager private constructor(private val context: Context) {
         val saved = user
         realUser = saved
         val savedSpatial = spatial.serialize()
+        val savedMotion = spatial.motion.serialize()
         val savedQwerty = qwerty.serialize()
         user = UserStore()
         synchronized(typoMemory) { typoMemory.clear() }
         spatial.restore(null)
+        spatial.motion.restore(null)
         qwerty.restore(null)
         invalidateCandidateCaches()
         try {
@@ -296,6 +300,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
             user = saved
             realUser = null
             spatial.restore(savedSpatial)
+            spatial.motion.restore(savedMotion)
             qwerty.restore(savedQwerty)
             learningPaused = false
             loadTypoMemory()
@@ -715,19 +720,20 @@ class ScorpioDictManager private constructor(private val context: Context) {
         out
     }
 
-    /** 按下注音鍵當下判定實際的鍵（空間模型 + 音節合法性） */
+    /** 按下注音鍵當下判定實際的鍵（空間模型 + 音節合法性）；previous：連續打字時的上一下（算移動造成的偏差） */
     fun resolveZhuyinTap(
         rawChar: Char,
         offsetX: Float,
         offsetY: Float,
-        history: List<BopomofoComposer.TouchPoint>
-    ): BopomofoComposer.TouchPoint = spatial.resolveTap(rawChar, offsetX, offsetY, history)
+        history: List<BopomofoComposer.TouchPoint>,
+        previous: BopomofoComposer.TouchPoint? = null
+    ): BopomofoComposer.TouchPoint = spatial.resolveTap(rawChar, offsetX, offsetY, history, previous?.let { spatial.physicalPoint(it) })
 
     /**
      * 個人化偏移學習：確定選字後，比對每個音節的按鍵與該字的正確讀音，
      * 打對的鍵與只錯一個鍵的音節都是「想按某鍵、實際落在某處」的樣本
      */
-    /** 基準測試（withoutUserData）進行中：不學按鍵偏移與慣性打錯 */
+    /** 基準測試（withoutUserData）進行中：不學按鍵偏移、移動偏差與慣性打錯 */
     @Volatile
     private var learningPaused = false
 
@@ -758,14 +764,14 @@ class ScorpioDictManager private constructor(private val context: Context) {
             for (j in typed.indices) {
                 val touch = parsed[k].touches[typed[j]] ?: continue
                 if (SpatialModel.isTone(touch.rawChar)) continue
-                // 學之前先拿這一下來比：有／沒有個人化散佈，按下當下各會判成哪個鍵（只記次數）
+                // 學之前先拿這一下來比：有／沒有移動偏差，按下當下各會判成哪個鍵（只算連續打字的那幾下，只記次數）
                 val idx = points.indexOfFirst { it === touch }
-                if (idx >= 0) {
+                if (idx >= 0 && touch.from != null) {
                     val history = points.subList(0, idx)
-                    val withSpread = spatial.resolveTap(touch.rawChar, touch.offsetX, touch.offsetY, history).char == intended[j]
-                    val without = spatial.resolveTap(touch.rawChar, touch.offsetX, touch.offsetY, history, useSpread = false).char == intended[j]
+                    val withMotion = spatial.resolveTap(touch.rawChar, touch.offsetX, touch.offsetY, history, touch.from).char == intended[j]
+                    val without = spatial.resolveTap(touch.rawChar, touch.offsetX, touch.offsetY, history, touch.from, useMotion = false).char == intended[j]
                     tapStats[0]++
-                    if (withSpread) tapStats[1]++
+                    if (withMotion) tapStats[1]++
                     if (without) tapStats[2]++
                 }
                 spatial.learn(intended[j], touch)
@@ -776,6 +782,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
             spatialDirty += added
             if (spatialDirty >= 8) {
                 spatialPrefs.edit().putString(PREF_SPATIAL_BIAS, spatial.serialize())
+                    .putString(PREF_MOTION, spatial.motion.serialize())
                     .putString(PREF_TAP_STATS, tapStats.joinToString(",")).apply()
                 spatialDirty = 0
             }
@@ -783,8 +790,8 @@ class ScorpioDictManager private constructor(private val context: Context) {
     }
 
     /**
-     * 按下當下判對的次數（確定選字時拿真的想按的鍵來對）：[總數, 有個人化散佈時判對, 沒有散佈時判對]。
-     * 用來看散佈學習有沒有讓按鍵判斷更準；只記次數，不記打了什麼
+     * 連續打字時按下當下判對的次數（確定選字時拿真的想按的鍵來對）：[總數, 有移動偏差時判對, 沒有時判對]。
+     * 用來看移動偏差的學習有沒有讓按鍵判斷更準；只記次數，不記打了什麼
      */
     private val tapStats: LongArray = spatialPrefs.getString(PREF_TAP_STATS, null)?.split(',')?.mapNotNull { it.toLongOrNull() }
         ?.takeIf { it.size == 3 }?.toLongArray() ?: LongArray(3)
@@ -797,7 +804,8 @@ class ScorpioDictManager private constructor(private val context: Context) {
         if (SpatialModel.isTone(intended) || SpatialModel.isTone(wrong.rawChar)) return
         spatial.learn(intended, wrong)
         if (++spatialDirty >= 8) {
-            spatialPrefs.edit().putString(PREF_SPATIAL_BIAS, spatial.serialize()).apply()
+            spatialPrefs.edit().putString(PREF_SPATIAL_BIAS, spatial.serialize())
+                .putString(PREF_MOTION, spatial.motion.serialize()).apply()
             spatialDirty = 0
         }
     }
@@ -2766,8 +2774,9 @@ class ScorpioDictManager private constructor(private val context: Context) {
     /** 重設個人化按鍵校正（落點偏移，注音與 QWERTY 鍵盤） */
     fun resetTouchCalibration() {
         spatial.restore(null)
+        spatial.motion.restore(null)
         qwerty.restore(null)
-        spatialPrefs.edit().remove(PREF_SPATIAL_BIAS).remove(PREF_QWERTY_BIAS).apply()
+        spatialPrefs.edit().remove(PREF_SPATIAL_BIAS).remove(PREF_MOTION).remove(PREF_QWERTY_BIAS).apply()
         candidatesCache.evictAll()
     }
 
@@ -2848,6 +2857,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
         remount(true, updateSpatial = false)
         initUserDatabase()
         spatial.restore(spatialPrefs.getString(PREF_SPATIAL_BIAS, null))
+        spatial.motion.restore(spatialPrefs.getString(PREF_MOTION, null))
         qwerty.restore(spatialPrefs.getString(PREF_QWERTY_BIAS, null))
         // 背景預先載入按鍵當下要用的資料：第一個按鍵就有音節先驗
         Thread {

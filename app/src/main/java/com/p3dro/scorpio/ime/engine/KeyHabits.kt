@@ -5,8 +5,8 @@ import kotlin.math.sqrt
 /**
  * 每個鍵的個人化落點習慣（大千注音 SpatialModel 與 QWERTY 的 QwertyModel 共用）
  * - 偏移：每鍵的平均偏移與樣本數，樣本少的鍵向全體平均收斂，全體平均再向 0 收斂，最多校正 MAX_BIAS
- * - 散佈：每鍵落點的變異數，相對於所有鍵的平均變異數放寬或收窄（樣本少向 1 收斂）
- * 座標單位由使用的模型決定（都是鍵距）；沒有任何資料時偏移為 0、散佈比例為 1
+ * - 散佈：每鍵落點的變異數，只給設定頁的落點分佈圖看（拿來放寬／收窄感應範圍試過，判對率沒有差別，已拿掉）
+ * 座標單位由使用的模型決定（都是鍵距）；沒有任何資料時偏移為 0
  */
 class KeyHabits {
 
@@ -16,11 +16,6 @@ class KeyHabits {
         private const val GLOBAL_PRIOR = 30.0
         private const val MAX_BIAS = 0.35
         private const val MAX_SAMPLES = 300.0
-
-        // 個人化散佈：每鍵變異數向「所有鍵的平均變異數」收斂的強度（樣本少的鍵維持原本寬度），以及放寬／收窄的上下限
-        private const val SPREAD_PRIOR = 40.0
-        private const val MIN_SPREAD = 0.6
-        private const val MAX_SPREAD = 1.6
     }
 
     /**
@@ -46,9 +41,6 @@ class KeyHabits {
     private val keyBias = HashMap<Char, Bias>()
     private val globalBias = Bias()
 
-    /** 所有鍵落點變異數的平均（依樣本數加權），散佈比例的基準；學習、還原時重算 */
-    private var refVar: Pair<Double, Double>? = null
-
     /** 個人化偏移（鍵距單位）：樣本少的鍵以全體平均為準 */
     @Synchronized
     fun effectiveBias(key: Char): Pair<Double, Double> {
@@ -68,38 +60,11 @@ class KeyHabits {
         return (x / len * MAX_BIAS) to (y / len * MAX_BIAS)
     }
 
-    /**
-     * 這個鍵的散佈相對於使用者所有鍵的平均（x, y 各一個比例，1 = 跟平均一樣）：
-     * 樣本少的鍵向 1 收斂；沒有任何散佈資料時都是 1（跟沒有這個功能時完全一樣）
-     */
-    @Synchronized
-    fun spreadRatio(key: Char): Pair<Double, Double> {
-        val ref = refVar ?: computeRefVar().also { refVar = it }
-        val k = keyBias[key]
-        if (k == null || k.m <= 0.0) return 1.0 to 1.0
-        fun ratio(v: Double, r: Double) = if (r <= 0.0) 1.0 else ((k.m * v + SPREAD_PRIOR * r) / (k.m + SPREAD_PRIOR) / r).coerceIn(MIN_SPREAD, MAX_SPREAD)
-        return ratio(k.vx, ref.first) to ratio(k.vy, ref.second)
-    }
-
-    private fun computeRefVar(): Pair<Double, Double> {
-        var w = 0.0
-        var sx = 0.0
-        var sy = 0.0
-        for (b in keyBias.values) {
-            if (b.m <= 0.0) continue
-            w += b.m
-            sx += b.m * b.vx
-            sy += b.m * b.vy
-        }
-        return if (w > 0) (sx / w) to (sy / w) else 0.0 to 0.0
-    }
-
     /** 一筆「想按 key、落點相對該鍵中心 (dx, dy)」的樣本（鍵距單位） */
     @Synchronized
     fun add(key: Char, dx: Double, dy: Double) {
         keyBias.getOrPut(key) { Bias() }.add(dx, dy)
         globalBias.add(dx, dy)
-        refVar = null
     }
 
     fun sampleCount(): Int = globalBias.n.toInt()
@@ -130,7 +95,6 @@ class KeyHabits {
         keyBias.clear()
         globalBias.dx = 0.0; globalBias.dy = 0.0; globalBias.n = 0.0
         globalBias.vx = 0.0; globalBias.vy = 0.0; globalBias.m = 0.0
-        refVar = null
         if (data.isNullOrBlank()) return
         for (part in data.split(';')) {
             val idx = part.indexOf(':')

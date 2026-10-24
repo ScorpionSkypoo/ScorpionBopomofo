@@ -145,7 +145,17 @@ class BopomofoComposer {
      * 一次按鍵：char 為判定後的鍵；rawChar 為手指實際落在的鍵，offset 是相對 rawChar 中心的落點（半鍵為 1）
      * 空間模型可能依落點、個人偏移或音節合法性把 rawChar 改判成鄰鍵
      */
-    data class TouchPoint(val char: Char, val offsetX: Float = 0f, val offsetY: Float = 0f, val rawChar: Char = char)
+    data class TouchPoint(
+        val char: Char,
+        val offsetX: Float = 0f,
+        val offsetY: Float = 0f,
+        val rawChar: Char = char,
+        /** 上一下的落點（大千鍵盤座標，鍵距單位）；連續打字才有，沒有是 NaN（剛開始打、停頓太久、中間按了別的鍵） */
+        val fromX: Float = Float.NaN,
+        val fromY: Float = Float.NaN
+    ) {
+        val from: Pair<Double, Double>? get() = if (fromX.isNaN()) null else fromX.toDouble() to fromY.toDouble()
+    }
 
     // 儲存原始輸入的注音符號歷史堆疊與 (x, y) 座標偏移，保證按一下 Backspace 絕對只刪除一個鍵！
     private val touchHistory = mutableListOf<TouchPoint>()

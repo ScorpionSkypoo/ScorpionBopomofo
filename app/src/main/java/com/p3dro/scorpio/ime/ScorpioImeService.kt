@@ -918,6 +918,7 @@ class ScorpioImeService : InputMethodService() {
     }
 
     private fun handleBackspace() {
+        lastZhuyinTap = null
         val ic = currentInputConnection
         if (currentMode == KeyboardMode.ENGLISH) {
             if (englishWordBuffer.isNotEmpty()) {
@@ -1290,6 +1291,10 @@ class ScorpioImeService : InputMethodService() {
         }
     }
 
+    // 上一下注音鍵（連續打字時算移動造成的偏差）；中間按了別的鍵就不算連續
+    private var lastZhuyinTap: BopomofoComposer.TouchPoint? = null
+    private var lastZhuyinTapAt = 0L
+
     // 刪一個鍵後重打的校正學習
     private var retypeCandidate: BopomofoComposer.TouchPoint? = null
     private var retypeAt = 0L
@@ -1337,8 +1342,12 @@ class ScorpioImeService : InputMethodService() {
     private fun onZhuyinKeyPressed(c: Char, offsetX: Float = 0f, offsetY: Float = 0f) {
         predictionJob?.cancel()
         if (!composer.isComposing && lastCommittedWord == null) captureScreenContext()
-        // 空間模型判定實際的鍵：落點 + 個人化偏移 + 音節是否拼得起來（保留原始落點供解碼回頭修正）
-        val touch = dictManager.resolveZhuyinTap(c, offsetX, offsetY, composer.getTouchPoints())
+        // 空間模型判定實際的鍵：落點 + 個人化偏移 + 從上一下移過來的偏差 + 音節是否拼得起來（保留原始落點供解碼回頭修正）
+        val now = android.os.SystemClock.uptimeMillis()
+        val previous = lastZhuyinTap?.takeIf { now - lastZhuyinTapAt < com.p3dro.scorpio.ime.engine.MotionBias.MAX_GAP_MS }
+        val touch = dictManager.resolveZhuyinTap(c, offsetX, offsetY, composer.getTouchPoints(), previous)
+        lastZhuyinTap = touch
+        lastZhuyinTapAt = now
         composer.append(touch)
         // 剛刪掉一個鍵、馬上改按別的鍵：學「按歪的那一下其實想按這個鍵」（離太遠的由空間模型自己略過）
         val wrong = retypeCandidate
@@ -1698,6 +1707,7 @@ class ScorpioImeService : InputMethodService() {
     }
 
     private fun onCandidateSelected(candidate: String) {
+        lastZhuyinTap = null
         if (isSymbolCandidate(candidate)) recordRecentSymbol(candidate)
         retypeCandidate = null
         lastActionWasBackspace = false
@@ -1825,6 +1835,7 @@ class ScorpioImeService : InputMethodService() {
      * - 連按兩下（350ms 內）：依設定「送出第一個候選字」或「送出注音符號本身」
      */
     private fun onZhuyinSpace() {
+        lastZhuyinTap = null
         if (codeBuffer.isNotEmpty()) {
             // 倉頡／速成：空白送出第一個候選字
             val top = candidateAdapter?.topCandidate
@@ -2055,6 +2066,7 @@ class ScorpioImeService : InputMethodService() {
     }
 
     private fun handleEnterPress() {
+        lastZhuyinTap = null
         if (currentMode == KeyboardMode.ENGLISH) endEnglishPhrase()
         if (codeBuffer.isNotEmpty()) {
             val top = candidateAdapter?.topCandidate

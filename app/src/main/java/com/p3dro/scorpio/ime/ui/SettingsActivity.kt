@@ -992,7 +992,7 @@ class SettingsActivity : AppCompatActivity() {
             val grid = com.p3dro.scorpio.ime.engine.SpatialModel.GRID
             val keys = buildMap { for (r in grid.indices) for (c in grid[r].indices) put(grid[r][c], c.toDouble() to r.toDouble()) }
             val acc = dict.tapAccuracy()
-            infoRow(h, "注音鍵盤", if (acc[0] > 0) "判對率 ${pct(acc[1], acc[0])}（共 ${acc[0]} 次）；不看散佈、只看偏移是 ${pct(acc[2], acc[0])}。" else null)
+            infoRow(h, "注音鍵盤", if (acc[0] > 0) "連續打字時判對率 ${pct(acc[1], acc[0])}（共 ${acc[0]} 次）；不算移動造成的偏差是 ${pct(acc[2], acc[0])}。" else "連續打字時會學「從上一個鍵移過來時容易偏哪邊」，用一陣子後這裡會顯示有沒有比較準。")
             heatmap(keys, grid[0].size, grid.size, zhuyin)
         }
         if (qwerty.isNotEmpty()) {

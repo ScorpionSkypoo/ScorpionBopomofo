@@ -8,8 +8,7 @@ import kotlin.math.abs
  * 1. 每個鍵是一個二元高斯分佈：落點到鍵中心的距離（以鍵距為單位、x/y 各自的標準差）決定機率，
  *    懲罰 = 負對數機率差，與解碼器的 log 機率同一尺度
  * 2. 個人化偏移校正：每次確定選字後，用「想按的鍵」與實際落點更新該鍵的系統性偏移（例如習慣按在鍵的下緣），
- *    樣本少的鍵向全體平均收斂；同時學每個鍵落點的散佈：按得比較散的鍵（相對於自己其他鍵）感應範圍放大、按得準的縮小，
- *    以所有鍵的平均散佈為準，只調各鍵之間的相對大小
+ *    樣本少的鍵向全體平均收斂；連續打字時再加上移動造成的偏差（MotionBias：從上一下移過來，常沿著移動方向多衝或沒到位）
  * 3. 逐鍵音節合法性：按下當下若最近的鍵會讓目前音節拼不起來（ㄉㄨ + ㄠ），而旁邊的鍵可以（ㄛ），
  *    且落點本來就靠近兩鍵交界，就改判為旁邊的鍵；落點在鍵中央時尊重實際按下的鍵
  *
@@ -68,8 +67,11 @@ class SpatialModel {
         if (halfKeysPerPitchY in 1.5..4.0) pitchY = halfKeysPerPitchY
     }
 
-    /** 每鍵的個人化偏移與散佈（鍵距單位） */
+    /** 每鍵的個人化偏移（鍵距單位） */
     private val habits = KeyHabits()
+
+    /** 移動造成的偏差（連續打字時） */
+    val motion = MotionBias()
 
     /** 用來判斷音節是否拼得起來（含尚未打完的開頭）；未載入前不做合法性判斷 */
     @Volatile
@@ -100,7 +102,7 @@ class SpatialModel {
     // ---------- 座標 ----------
 
     /** 落點的實體座標（鍵距單位，原點為左上角鍵中心）；null 表示不在注音網格上（例如 ㄦ） */
-    private fun physicalPoint(touch: BopomofoComposer.TouchPoint): Pair<Double, Double>? {
+    fun physicalPoint(touch: BopomofoComposer.TouchPoint): Pair<Double, Double>? {
         val (r, c) = POS[touch.rawChar] ?: return null
         return Pair(c + touch.offsetX / pitchX, r + touch.offsetY / pitchY)
     }
@@ -108,21 +110,24 @@ class SpatialModel {
     /** 個人化偏移（鍵距單位）：樣本少的鍵以全體平均為準 */
     fun effectiveBias(key: Char): Pair<Double, Double> = habits.effectiveBias(key)
 
-    /** 這個鍵的散佈相對於使用者所有鍵的平均（1 = 跟平均一樣；沒有散佈資料時都是 1） */
-    fun spreadRatio(key: Char): Pair<Double, Double> = habits.spreadRatio(key)
+    /** 從 from 移到 key 時，移動造成的偏差（沒有上一下時是 0） */
+    private fun motionShift(key: Char, from: Pair<Double, Double>?): Pair<Double, Double> {
+        if (from == null) return 0.0 to 0.0
+        val (r, c) = POS[key] ?: return 0.0 to 0.0
+        return motion.shift(c - from.first, r - from.second)
+    }
 
     /**
-     * 落點相對某鍵的高斯代價（負對數機率）：先扣掉使用者瞄準該鍵時的習慣偏移，再依這個鍵的散佈放寬或收窄感應範圍
-     * （按得散的鍵範圍大、按得準的鍵範圍小；鍵中央的代價都是 0）。
-     * 不加常態分佈的正規化項：這裡的高斯寬度是調過的懲罰尺度（比手指實際的散佈寬很多），加了反而讓放寬的鍵在自己附近變貴
+     * 落點相對某鍵的高斯代價（負對數機率）：先扣掉使用者瞄準該鍵時的習慣偏移、從上一下移過來的偏差（鍵中央的代價是 0）。
+     * 不加常態分佈的正規化項：這裡的高斯寬度是調過的懲罰尺度（比手指實際的散佈寬很多）
      */
-    private fun cost(point: Pair<Double, Double>, key: Char, useSpread: Boolean = true): Double {
+    private fun cost(point: Pair<Double, Double>, key: Char, from: Pair<Double, Double>? = null, useMotion: Boolean = true): Double {
         val (r, c) = POS[key] ?: return Double.MAX_VALUE
         val (bx, by) = effectiveBias(key)
-        val (sx, sy) = if (useSpread) spreadRatio(key) else 1.0 to 1.0
-        val dx = point.first - (c + bx)
-        val dy = point.second - (r + by)
-        return 0.5 * (dx * dx / (VAR_X * sx) + dy * dy / (VAR_Y * sy))
+        val (mx, my) = if (useMotion) motionShift(key, from) else 0.0 to 0.0
+        val dx = point.first - (c + bx + mx)
+        val dy = point.second - (r + by + my)
+        return 0.5 * (dx * dx / VAR_X + dy * dy / VAR_Y)
     }
 
     private fun gridNeighbors(key: Char): List<Char> {
@@ -144,11 +149,12 @@ class SpatialModel {
     fun neighborPenalties(touch: BopomofoComposer.TouchPoint): List<Pair<Char, Double>> {
         if (!POS.containsKey(touch.char)) return emptyList()
         val point = physicalPoint(touch) ?: return emptyList()
-        val base = cost(point, touch.char)
+        val from = touch.from
+        val base = cost(point, touch.char, from)
         val keys = LinkedHashSet(gridNeighbors(touch.char))
         // 被改判過的鍵，原本按到的鍵一定要列為候選
         if (touch.rawChar != touch.char && POS.containsKey(touch.rawChar)) keys.add(touch.rawChar)
-        return keys.map { k -> k to (cost(point, k) - base).coerceIn(MIN_PENALTY, MAX_PENALTY) }
+        return keys.map { k -> k to (cost(point, k, from) - base).coerceIn(MIN_PENALTY, MAX_PENALTY) }
     }
 
     // ---------- 按下當下：判定這一鍵 ----------
@@ -156,23 +162,29 @@ class SpatialModel {
     /**
      * 依落點、個人化偏移與音節合法性決定這一鍵實際算哪個鍵
      * - 不會把一般按鍵改判成聲調鍵（聲調會直接結束音節，改錯代價太高）；聲調鍵可改判回一般鍵
-     * - 回傳的 TouchPoint 保留原始按鍵與落點（rawChar / offset），解碼時仍能回頭考慮原本的鍵
+     * - 回傳的 TouchPoint 保留原始按鍵與落點（rawChar / offset），解碼時仍能回頭考慮原本的鍵；
+     *   連續打字時也記下上一下的落點（from），解碼與學習時用來算移動造成的偏差
      */
     fun resolveTap(
         rawChar: Char,
         offsetX: Float,
         offsetY: Float,
         history: List<BopomofoComposer.TouchPoint>,
-        /** false：不看個人化散佈（只用來跟有散佈的版本比判對率） */
-        useSpread: Boolean = true
+        /** 上一下的落點（大千鍵盤座標）；剛開始打、停頓太久時是 null */
+        from: Pair<Double, Double>? = null,
+        /** false：不看移動造成的偏差（只用來跟有的版本比判對率） */
+        useMotion: Boolean = true
     ): BopomofoComposer.TouchPoint {
-        val raw = BopomofoComposer.TouchPoint(rawChar, offsetX, offsetY)
+        val raw = BopomofoComposer.TouchPoint(
+            rawChar, offsetX, offsetY,
+            fromX = from?.first?.toFloat() ?: Float.NaN, fromY = from?.second?.toFloat() ?: Float.NaN
+        )
         if (!POS.containsKey(rawChar)) return raw
         val point = physicalPoint(raw) ?: return raw
 
         val options = listOf(rawChar) + gridNeighbors(rawChar).filter { !isTone(it) }
         val priors = priorPenalties(history, options)
-        fun score(k: Char) = cost(point, k, useSpread) + (priors[k] ?: 0.0)
+        fun score(k: Char) = cost(point, k, from, useMotion) + (priors[k] ?: 0.0)
 
         var best = rawChar
         var bestScore = score(rawChar)
@@ -242,7 +254,10 @@ class SpatialModel {
 
     // ---------- 個人化偏移學習 ----------
 
-    /** 記錄一筆「想按 intended、實際落在 touch」的樣本 */
+    /**
+     * 記錄一筆「想按 intended、實際落在 touch」的樣本。
+     * 連續打字（有上一下的落點）時拆成兩部分學：扣掉移動偏差的部分學進這個鍵的習慣偏移，扣掉這個鍵習慣偏移的部分學進移動偏差
+     */
     fun learn(intended: Char, touch: BopomofoComposer.TouchPoint) {
         val (r, c) = POS[intended] ?: return
         val point = physicalPoint(touch) ?: return
@@ -250,7 +265,15 @@ class SpatialModel {
         val dy = point.second - r
         // 離目標超過一個半鍵距多半是解析錯位而非手滑，不納入
         if (abs(dx) > 1.5 || abs(dy) > 1.5) return
-        habits.add(intended, dx, dy)
+        val from = touch.from
+        if (from == null) {
+            habits.add(intended, dx, dy)
+            return
+        }
+        val (mx, my) = motion.shift(c - from.first, r - from.second)
+        val (bx, by) = effectiveBias(intended)
+        habits.add(intended, dx - mx, dy - my)
+        motion.add(c - from.first, r - from.second, dx - bx, dy - by)
     }
 
     fun sampleCount(): Int = habits.sampleCount()

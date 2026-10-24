@@ -5,7 +5,7 @@ import kotlin.math.abs
 /**
  * QWERTY 字母鍵的空間模型：英文、26 鍵注音、漢語拼音、倉頡、速成共用同一個實體鍵盤，所以共用一份落點習慣
  * - 每個鍵是一個二元高斯分佈（鍵寬單位，同排鄰鍵懲罰約 1.2、上下約 1.0）
- * - 個人化：跟大千的 SpatialModel 一樣學每鍵的平均偏移與散佈（KeyHabits）；沒有資料時跟沒有這個功能完全一樣
+ * - 個人化：跟大千的 SpatialModel 一樣學每鍵的平均偏移（KeyHabits）；沒有資料時跟沒有這個功能完全一樣
  *
  * 座標：鍵寬為 1（x）、排距為 1（y），原點為 q 的中心；觸控偏移沿用 SpatialKeyLayout 的單位（半個鍵寬／鍵高為 1）
  */
@@ -48,13 +48,12 @@ class QwertyModel {
         return (p.first + bx) to (p.second + by)
     }
 
-    /** 落點相對某鍵的高斯代價（負對數機率）：扣掉習慣偏移、依這個鍵的散佈放寬或收窄；鍵中央的代價是 0 */
+    /** 落點相對某鍵的高斯代價（負對數機率）：扣掉習慣偏移；鍵中央的代價是 0 */
     fun cost(px: Double, py: Double, key: Char, useHabits: Boolean = true): Double {
         val (cx, cy) = center(key, useHabits) ?: return Double.MAX_VALUE
-        val (sx, sy) = if (useHabits) habits.spreadRatio(key) else 1.0 to 1.0
         val dx = px - cx
         val dy = py - cy
-        return 0.5 * (dx * dx / (VAR_X * sx) + dy * dy / (VAR_Y * sy))
+        return 0.5 * (dx * dx / VAR_X + dy * dy / VAR_Y)
     }
 
     /** 只看落點（不看字母先驗）時最像的鍵：用來比有／沒有個人化時各判對幾次 */

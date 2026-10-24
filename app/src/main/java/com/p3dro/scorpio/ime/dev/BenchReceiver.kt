@@ -57,11 +57,10 @@ class BenchReceiver : BroadcastReceiver() {
         for (c in keys) composer.append(c)
         val trace = ArrayList<String>()
         val acc = dict.tapAccuracy()
-        trace.add("按下當下判對（確定選字時對答案）：有個人化散佈 ${acc[1]}/${acc[0]}、沒有散佈 ${acc[2]}/${acc[0]}")
+        trace.add("連續打字時按下當下判對（確定選字時對答案）：有移動偏差 ${acc[1]}/${acc[0]}、沒有 ${acc[2]}/${acc[0]}；移動偏差 ${dict.spatial.motion.describe()}")
         for (c in keys.toSet()) {
             val pen = dict.spatial.neighborPenalties(BopomofoComposer.TouchPoint(c))
-            val (sx, sy) = dict.spatial.spreadRatio(c)
-            trace.add("鄰鍵 $c（散佈 x%.2f y%.2f）：".format(sx, sy) + pen.sortedBy { it.second }.take(4).joinToString(" ") { "${it.first}%.2f".format(it.second) })
+            trace.add("鄰鍵 $c：" + pen.sortedBy { it.second }.take(4).joinToString(" ") { "${it.first}%.2f".format(it.second) })
         }
         runBlocking { dict.getCandidateGroups(composer.getAllSegmentations(), composer.hasExplicitTone(), prev, composer.getTouchPoints(), trace) }
         File(outDir(context), "explain.txt").writeText(trace.joinToString("\n") + "\n")
