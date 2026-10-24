@@ -643,6 +643,18 @@
         android:paddingStart="3dp"
         android:paddingEnd="3dp" />
 
+    <!-- 數字／電話／日期時間鍵盤（輸入框要的是數字時自動出現；內容由程式建立，高度同注音／英文鍵盤） -->
+    <com.p3dro.scorpio.ime.ui.SpatialKeyLayout
+        android:id="@+id/panel_numpad"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:visibility="gone"
+        android:paddingTop="4dp"
+        android:paddingBottom="6dp"
+        android:paddingStart="3dp"
+        android:paddingEnd="3dp" />
+
     <!-- 手寫面板（內容由程式建立，高度同注音／英文鍵盤） -->
     <LinearLayout
         android:id="@+id/panel_handwriting"

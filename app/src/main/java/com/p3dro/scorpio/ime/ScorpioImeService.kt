@@ -45,8 +45,11 @@ import kotlinx.coroutines.withContext
 class ScorpioImeService : InputMethodService() {
 
     enum class KeyboardMode {
-        ZHUYIN, ENGLISH, SYMBOLS, EXPANDED, HANDWRITING
+        ZHUYIN, ENGLISH, SYMBOLS, EXPANDED, HANDWRITING, NUMPAD
     }
+
+    /** 輸入框要什麼（依 EditorInfo.inputType）：決定一打開是哪個鍵盤 */
+    private enum class FieldKind { TEXT, NUMBER, PHONE, DATETIME, PASSWORD, EMAIL, URI }
 
     enum class ShiftState {
         OFF, ONCE, LOCKED
@@ -76,6 +79,8 @@ class ScorpioImeService : InputMethodService() {
     private var panelEnglish: View? = null
     private var panelSymbols: View? = null
     private var panelHandwriting: LinearLayout? = null
+    private var panelNumpad: View? = null
+    private var fieldKind = FieldKind.TEXT
     private var handwritingView: com.p3dro.scorpio.ime.ui.HandwritingView? = null
     private val handwriting by lazy { com.p3dro.scorpio.ime.engine.HandwritingRecognizer() }
     private var handwritingJob: Job? = null
@@ -356,6 +361,7 @@ class ScorpioImeService : InputMethodService() {
         panelEnglish = root.findViewById(R.id.panel_english)
         panelSymbols = root.findViewById(R.id.panel_symbols)
         panelHandwriting = root.findViewById(R.id.panel_handwriting)
+        panelNumpad = root.findViewById(R.id.panel_numpad)
         panelExpanded = root.findViewById(R.id.panel_expanded)
         setupNumberRow(root)
         refreshRecentBar()
@@ -466,7 +472,15 @@ class ScorpioImeService : InputMethodService() {
         val method = methods.firstOrNull { it.id == savedId } ?: methods.first()
         if (method != chineseMethod || composer.decoder?.kind != method.decoderKind) applyChineseMethod(method)
         finishEnglishWord(learn = false)
-        setKeyboardMode(KeyboardMode.ZHUYIN)
+        // 依輸入框類型開對的鍵盤：數字、電話、日期時間開數字鍵盤；密碼、Email、網址開英文鍵盤；其他照常開中文
+        fieldKind = fieldKindOf(info)
+        setKeyboardMode(
+            when (fieldKind) {
+                FieldKind.NUMBER, FieldKind.PHONE, FieldKind.DATETIME -> KeyboardMode.NUMPAD
+                FieldKind.PASSWORD, FieldKind.EMAIL, FieldKind.URI -> KeyboardMode.ENGLISH
+                FieldKind.TEXT -> KeyboardMode.ZHUYIN
+            }
+        )
         toolsExpanded = false
         keyboardRootView?.let { refreshToolbar(it) }
         refreshRecentBar()
@@ -692,6 +706,8 @@ class ScorpioImeService : InputMethodService() {
         panelEnglish?.visibility = if (mode == KeyboardMode.ENGLISH || qwertyChinese) View.VISIBLE else View.GONE
         if (mode == KeyboardMode.ENGLISH || mode == KeyboardMode.ZHUYIN) applyQwertyLabels()
         panelSymbols?.visibility = if (mode == KeyboardMode.SYMBOLS) View.VISIBLE else View.GONE
+        if (mode == KeyboardMode.NUMPAD) buildNumpad()
+        panelNumpad?.visibility = if (mode == KeyboardMode.NUMPAD) View.VISIBLE else View.GONE
         if (mode == KeyboardMode.HANDWRITING) buildHandwritingPanel()
         panelHandwriting?.visibility = if (mode == KeyboardMode.HANDWRITING) View.VISIBLE else View.GONE
         if (mode != KeyboardMode.HANDWRITING) {
@@ -1083,7 +1099,7 @@ class ScorpioImeService : InputMethodService() {
             }
             finishEnglishWord()
             endEnglishPhrase()
-            currentInputConnection?.commitText(",", 1)
+            currentInputConnection?.commitText(englishCommaKey(), 1)
             updateBarVisibility()
         }
 
@@ -1431,6 +1447,115 @@ class ScorpioImeService : InputMethodService() {
         }
     }
 
+    /** 英文鍵盤逗號鍵的字：Email 欄是 @、網址欄是 /，其他是逗號 */
+    private fun englishCommaKey() = when (fieldKind) {
+        FieldKind.EMAIL -> "@"
+        FieldKind.URI -> "/"
+        else -> ","
+    }
+
+    private fun fieldKindOf(info: EditorInfo?): FieldKind {
+        val type = info?.inputType ?: return FieldKind.TEXT
+        val variation = type and EditorInfo.TYPE_MASK_VARIATION
+        return when (type and EditorInfo.TYPE_MASK_CLASS) {
+            EditorInfo.TYPE_CLASS_NUMBER -> FieldKind.NUMBER
+            EditorInfo.TYPE_CLASS_PHONE -> FieldKind.PHONE
+            EditorInfo.TYPE_CLASS_DATETIME -> FieldKind.DATETIME
+            EditorInfo.TYPE_CLASS_TEXT -> when (variation) {
+                EditorInfo.TYPE_TEXT_VARIATION_PASSWORD, EditorInfo.TYPE_TEXT_VARIATION_WEB_PASSWORD,
+                EditorInfo.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD -> FieldKind.PASSWORD
+                EditorInfo.TYPE_TEXT_VARIATION_EMAIL_ADDRESS, EditorInfo.TYPE_TEXT_VARIATION_WEB_EMAIL_ADDRESS -> FieldKind.EMAIL
+                EditorInfo.TYPE_TEXT_VARIATION_URI -> FieldKind.URI
+                else -> FieldKind.TEXT
+            }
+            else -> FieldKind.TEXT
+        }
+    }
+
+    /**
+     * 數字鍵盤（比照 Gboard）：3×3 數字＋0，右邊一排功能鍵，按鍵比一般鍵盤高（同樣總高度分 4 排）
+     *   數字：右邊 － 空白 ⌫ ↵，下排 ， 0 .（金額、數量、PIN 碼）
+     *   電話：右邊 ＋ 空白 ⌫ ↵，下排 * 0 #
+     *   日期時間：右邊 / : ⌫ ↵，下排 - 0 空白
+     */
+    private fun buildNumpad() {
+        val pad = panelNumpad as? com.p3dro.scorpio.ime.ui.SpatialKeyLayout ?: return
+        pad.removeAllViews()
+        pad.clearKeys()
+        pad.onKeyHapticListener = { triggerHaptic(it) }
+        pad.keyPreview = keyPreview
+        pad.onKeyTapListener = { char, _, _ -> currentInputConnection?.commitText(char.toString(), 1) }
+
+        val referenceHeight = maxOf(panelZhuyin?.height ?: 0, panelEnglish?.height ?: 0)
+        val panelHeight = if (referenceHeight > 0) referenceHeight else dpToPx(5 * 44 * keyHeightScale() + 4 * 4 + 4 + 6)
+        pad.layoutParams = pad.layoutParams.apply { height = panelHeight }
+        val gap = dpToPx(5)
+        val keyHeight = (panelHeight - pad.paddingTop - pad.paddingBottom - 3 * gap) / 4
+
+        val (side, bottom) = when (fieldKind) {
+            FieldKind.PHONE -> listOf("+", " ") to listOf("*", "0", "#")
+            FieldKind.DATETIME -> listOf("/", ":") to listOf("-", "0", " ")
+            else -> listOf("-", " ") to listOf(",", "0", ".")
+        }
+        fun key(parent: LinearLayout, bgAttr: Int, weight: Float = 1f) = FrameLayout(ui).apply {
+            background = keyDrawable(bgAttr)
+            isClickable = true
+            isFocusable = true
+            parent.addView(this, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, weight).apply {
+                setMargins(dpToPx(2.5f), 0, dpToPx(2.5f), 0)
+            })
+        }
+        fun label(text: String, size: Float, colorRes: Int = R.color.ime_text_primary) = TextView(ui).apply {
+            this.text = text
+            textSize = size
+            setTextColor(ui.getColor(colorRes))
+            layoutParams = FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER)
+        }
+        fun charKey(parent: LinearLayout, s: String, function: Boolean = false) {
+            key(parent, if (function) R.attr.imeKeyFunctionDrawable else R.attr.imeKeyDrawable).apply {
+                if (s == " ") addView(label("空白", 14f, R.color.ime_text_secondary)) else addView(label(s, if (s[0].isDigit()) 24f else 20f))
+                pad.registerKey(this, s[0])
+            }
+        }
+        val rows = listOf(listOf("1", "2", "3"), listOf("4", "5", "6"), listOf("7", "8", "9"), bottom)
+        for ((r, digits) in rows.withIndex()) {
+            val row = LinearLayout(ui).apply {
+                orientation = LinearLayout.HORIZONTAL
+                layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, keyHeight).apply {
+                    if (r > 0) topMargin = gap
+                }
+            }
+            for (d in digits) charKey(row, d, function = !d[0].isDigit())
+            when (r) {
+                0, 1 -> charKey(row, side[r], function = true)
+                2 -> key(row, R.attr.imeKeyFunctionDrawable).apply {
+                    addView(ImageView(ui).apply {
+                        setImageDrawable(ui.getDrawable(R.drawable.ic_ime_backspace))
+                        setColorFilter(ui.getColor(R.color.ime_text_primary))
+                        layoutParams = FrameLayout.LayoutParams(dpToPx(22), dpToPx(22), Gravity.CENTER)
+                    })
+                    pad.registerKey(this, null)
+                    setOnTouchListener(com.p3dro.scorpio.ime.ui.RepeatTouchListener {
+                        triggerHaptic(pad)
+                        handleBackspace()
+                    })
+                }
+                3 -> key(row, R.attr.imeKeyActionDrawable).apply {
+                    addView(ImageView(ui).apply {
+                        setImageDrawable(ui.getDrawable(R.drawable.ic_ime_enter))
+                        layoutParams = FrameLayout.LayoutParams(dpToPx(22), dpToPx(22), Gravity.CENTER)
+                    })
+                    pad.registerKey(this, null)
+                    setOnClickListener {
+                        triggerHaptic(it)
+                        handleEnterPress()
+                    }
+                }
+            }
+            pad.addView(row)
+        }
+    }
+
     /** QWERTY 鍵盤在中文輸入法時鍵上顯示的符號（拼音為字母、26 鍵注音為該鍵的注音） */
     private fun qwertyLabel(c: Char): String {
         if (chineseMethod.isCodeTable) return com.p3dro.scorpio.ime.engine.ChineseMethod.CANGJIE_RADICALS[c]?.toString() ?: c.toString()
@@ -1454,6 +1579,8 @@ class ScorpioImeService : InputMethodService() {
             tv.textSize = if (zhuyinLabels) (if (tv.text.length > 1) 15f else 19f) else 23f
         }
         keyboardRootView?.findViewById<TextView>(R.id.tv_en_space_label)?.text = if (chinese) chineseMethod.spaceLabel else "English"
+        // Email 欄的逗號鍵換成 @、網址欄換成 /
+        (keyboardRootView?.findViewById<ViewGroup>(R.id.btn_en_comma)?.getChildAt(0) as? TextView)?.text = if (chinese) "，" else englishCommaKey()
         keyboardRootView?.findViewById<TextView>(R.id.tv_space_label)?.text = chineseMethod.spaceLabel
         // Shift：英文是大小寫；拼音是分隔號；其他中文輸入法不用
         val pinyin = chinese && chineseMethod.isPinyin
