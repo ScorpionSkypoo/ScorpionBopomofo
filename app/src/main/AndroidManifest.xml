@@ -42,12 +42,6 @@
             </intent-filter>
         </activity>
 
-        <!-- 選字基準測試（開發用，見 dev/BenchReceiver）：要求 DUMP 權限，只有 adb／Shizuku 的 shell 觸發得了 -->
-        <receiver
-            android:name=".dev.BenchReceiver"
-            android:exported="true"
-            android:permission="android.permission.DUMP" />
-
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.files"

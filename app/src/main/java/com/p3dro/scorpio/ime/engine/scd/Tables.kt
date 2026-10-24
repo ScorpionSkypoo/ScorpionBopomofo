@@ -177,9 +177,7 @@ class WordStore(val tables: List<WordTable>) {
     /** SELECT … WHERE (initials = ? OR initials = ? OR …) AND toneless LIKE ? ORDER BY score DESC LIMIT n */
     fun byInitialsLike(initials: Collection<String>, pattern: String, limit: Int): List<WordHit> {
         val keys = initials.toSortedSet()
-        return cached("n$limit\u0000$pattern\u0000" + keys.joinToString("\u0001")) {
-            com.p3dro.scorpio.ime.engine.AllocProbe.measure("n.miss") { initialsLike(keys, pattern, limit) }
-        }
+        return cached("n$limit\u0000$pattern\u0000" + keys.joinToString("\u0001")) { initialsLike(keys, pattern, limit) }
     }
 
     private fun initialsLike(keys: Set<String>, pattern: String, limit: Int): List<WordHit> {
