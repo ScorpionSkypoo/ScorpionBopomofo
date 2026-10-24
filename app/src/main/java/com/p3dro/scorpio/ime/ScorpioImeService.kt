@@ -295,6 +295,9 @@ class ScorpioImeService : InputMethodService() {
         val keyboardFrame = FrameLayout(ui).apply {
             background = ui.getDrawable(R.drawable.bg_keyboard_root)
             clipToOutline = prefs.getBoolean(PREF_KEY_RIPPLE, false)
+            // 鍵盤上的東西一律不拿焦點：終端機這類輸入框會把送出的字轉成實體按鍵事件，系統因此離開觸控模式，
+            // 原本能拿焦點的按鍵、工具列按鈕、候選列就會畫出焦點底色（看起來像整條反白）
+            descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
         }
         val photo = photoFile()
         if (themeId() == "photo" && photo.exists()) {
@@ -1259,6 +1262,15 @@ class ScorpioImeService : InputMethodService() {
     private fun onEnglishCharInput(char: Char, offsetX: Float = 0f, offsetY: Float = 0f) {
         // 按下當下判定：落點（高斯）＋前面字母接上哪個字母比較像一個字（有上限，點在鍵中央一定照按的鍵）
         val raw = char.lowercaseChar()
+        if (isRawKeyEditor()) {
+            // 終端機：不暫存（App 收不到暫存中的字，要等空白才一次送出），照按的鍵直接送出、不修正也不列候選
+            currentInputConnection?.commitText((if (shiftState != ShiftState.OFF) char.uppercaseChar() else raw).toString(), 1)
+            if (shiftState == ShiftState.ONCE) {
+                shiftState = ShiftState.OFF
+                updateShiftVisuals()
+            }
+            return
+        }
         val resolved = dictManager.resolveEnglishTap(raw, offsetX, offsetY, englishWordBuffer.toString().lowercase())
         fun cased(c: Char) = if (shiftState != ShiftState.OFF) c.uppercaseChar() else c
         val outChar = cased(resolved)
@@ -1427,6 +1439,9 @@ class ScorpioImeService : InputMethodService() {
      * 密碼欄、要求不要個人化學習的輸入框（瀏覽器無痕分頁等）：不讀畫面上的字，也不學任何東西
      * （選字、接續詞、英文字、按鍵落點、慣性打錯、最近用過的 Emoji 都不記）
      */
+    /** 終端機這類輸入框（inputType＝TYPE_NULL）：只吃按鍵事件，暫存中的字 App 看不到 */
+    private fun isRawKeyEditor(): Boolean = currentInputEditorInfo?.inputType == EditorInfo.TYPE_NULL
+
     private fun personalizationAllowed(): Boolean {
         val info = currentInputEditorInfo ?: return false
         if ((info.imeOptions and EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING) != 0) return false
