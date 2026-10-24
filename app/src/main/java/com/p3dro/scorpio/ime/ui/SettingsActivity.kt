@@ -930,10 +930,10 @@ class SettingsActivity : AppCompatActivity() {
 
         sectionTitle("空白鍵")
         val s = card()
-        infoRow(s, "按一下", "還沒打聲調時是一聲（大千標準）；已經打完聲調時送出第一個候選字。")
+        infoRow(s, "第一下", "一聲（大千標準）；已經打了聲調的話這一下不做事。")
         switchRow(
-            s, "連按兩下送出注音符號",
-            "關閉：連按兩下送出第一個候選字。\n開啟：直接送出打的注音，例如「ㄏㄠˇ」。",
+            s, "第二下送出注音符號",
+            "關閉：第二下送出第一個候選字。\n開啟：第二下直接送出打的注音，例如「ㄏㄠˇ」。",
             prefs.getString("double_space_action", "candidate") == "raw"
         ) { prefs.edit().putString("double_space_action", if (it) "raw" else "candidate").apply() }
 

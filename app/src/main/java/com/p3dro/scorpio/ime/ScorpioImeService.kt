@@ -2159,18 +2159,13 @@ class ScorpioImeService : InputMethodService() {
         serviceScope.launch { dictManager.recordTouchSamples(points, word) }
     }
 
-    private enum class SpaceAction { TONE, COMMIT }
-
-    private var lastSpaceTime = 0L
-    private var lastSpaceAction: SpaceAction? = null
-    // 空白鍵送出的字與當時的注音（連按兩下「送出注音」時換回注音用）
-    private var lastSpaceCommitted: String? = null
-    private var lastSpaceRaw: String? = null
+    // 按了第一下空白之後的注音；再按空白時注音沒變（中間沒打字、沒刪）就是「第二下」
+    private var spaceArmedFor: String? = null
 
     /**
      * 注音鍵盤空白鍵
-     * - 按一下：音節還沒打完 → 一聲（大千標準）；已打完（有聲調） → 送出第一個候選
-     * - 連按兩下（350ms 內）：依設定「送出第一個候選字」或「送出注音符號本身」
+     * - 第一下：一聲（大千標準；已經打了聲調的音節不再加）
+     * - 第二下：依設定送出第一個候選字，或送出打的注音本身（例如「ㄏㄠˇ」）
      */
     private fun onZhuyinSpace() {
         lastZhuyinTap = null
@@ -2180,48 +2175,23 @@ class ScorpioImeService : InputMethodService() {
             if (top != null) commitCodeCandidate(top) else clearCodeBuffer()
             return
         }
-        val now = System.currentTimeMillis()
-        val isDouble = now - lastSpaceTime < 350L
-        val rawMode = prefs.getString("double_space_action", "candidate") == "raw"
         val ic = currentInputConnection
-        lastSpaceTime = now
-
+        if (composer.isComposing && composer.isPinyin) {
+            // 漢語拼音沒有一聲鍵：空白直接選第一個候選
+            commitTopCandidateOrRaw()
+            return
+        }
         if (composer.isComposing) {
-            if (isDouble && rawMode && lastSpaceAction == SpaceAction.TONE) {
-                // 撤掉第一下加的一聲，把打的注音原樣送出
-                composer.backspace()
-                commitRawZhuyin()
-                lastSpaceAction = null
+            if (spaceArmedFor == composer.rawInputText) {
+                spaceArmedFor = null
+                if (prefs.getString("double_space_action", "candidate") == "raw") commitRawZhuyin() else commitTopCandidateOrRaw()
                 return
             }
-            if (composer.getCurrentSyllablePart().isNotEmpty() && !(isDouble && lastSpaceAction == SpaceAction.TONE)) {
-                // 大千標準：空白鍵＝一聲（字典中一聲無符號），結束目前音節
-                onZhuyinKeyPressed(BopomofoComposer.FIRST_TONE)
-                lastSpaceAction = SpaceAction.TONE
-            } else {
-                lastSpaceRaw = rawZhuyinText()
-                lastSpaceCommitted = commitTopCandidateOrRaw()
-                lastSpaceAction = SpaceAction.COMMIT
-            }
+            if (composer.getCurrentSyllablePart().isNotEmpty()) onZhuyinKeyPressed(BopomofoComposer.FIRST_TONE)
+            spaceArmedFor = composer.rawInputText
             return
         }
-
-        if (isDouble && rawMode && lastSpaceAction == SpaceAction.COMMIT) {
-            // 第一下已送出候選：換回注音
-            val word = lastSpaceCommitted
-            val raw = lastSpaceRaw
-            if (!word.isNullOrEmpty() && !raw.isNullOrEmpty()) {
-                ic?.deleteSurroundingText(word.length, 0)
-                ic?.commitText(raw, 1)
-                predictionJob?.cancel()
-                candidateAdapter?.submitList(emptyList())
-                lastCommittedWord = null
-                updateBarVisibility()
-            }
-            lastSpaceAction = null
-            return
-        }
-        lastSpaceAction = null
+        spaceArmedFor = null
         ic?.commitText(" ", 1)
     }
 
@@ -2327,6 +2297,7 @@ class ScorpioImeService : InputMethodService() {
 
     private fun clearComposer(discardComposingText: Boolean = false) {
         composer.clear()
+        spaceArmedFor = null
         sessionComposingReadings.clear()
         sessionCommittedWords.clear()
         val ic = currentInputConnection
