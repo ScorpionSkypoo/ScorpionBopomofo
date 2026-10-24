@@ -581,6 +581,7 @@ class ScorpioImeService : InputMethodService() {
         val has = views.isNotEmpty()
         scrollInlineSuggestions?.visibility = if (has) View.VISIBLE else View.GONE
         scrollRecent?.visibility = if (has) View.GONE else View.VISIBLE
+        updateToolDivider()
     }
 
     /** 使用者自己移動游標（點到別處）：英文暫存的字就地確定，不跟著游標跑 */
@@ -2216,6 +2217,7 @@ class ScorpioImeService : InputMethodService() {
     private fun refreshRecentBar() {
         val box = keyboardRootView?.findViewById<LinearLayout>(R.id.layout_recent) ?: return
         box.removeAllViews()
+        updateToolDivider()
         if (!prefs.getBoolean(PREF_RECENT_BAR, false)) return
         val list = recentSymbols()
         if (list.isEmpty()) {
@@ -2274,6 +2276,15 @@ class ScorpioImeService : InputMethodService() {
                 }
             }, LinearLayout.LayoutParams(dpToPx(40), dpToPx(36)).apply { marginEnd = dpToPx(4) })
         }
+        updateToolDivider()
+    }
+
+    /** 工具與最近使用列（或自動填入建議）中間的分隔線：左邊有工具、右邊也有東西時才顯示 */
+    private fun updateToolDivider() {
+        val root = keyboardRootView ?: return
+        val tools = root.findViewById<LinearLayout>(R.id.layout_tools)?.childCount ?: 0
+        val right = prefs.getBoolean(PREF_RECENT_BAR, false) || scrollInlineSuggestions?.visibility == View.VISIBLE
+        root.findViewById<View>(R.id.tool_divider)?.visibility = if (tools > 0 && right) View.VISIBLE else View.GONE
     }
 
     /** 外掛面板：一個分頁一個頁籤 */

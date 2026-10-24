@@ -1285,6 +1285,8 @@ class SettingsActivity : AppCompatActivity() {
     private var searchRunnable: Runnable? = null
 
     /** 工具列的工具清單：開關＋拖拉排序（放開時存順序、鍵盤即時更新） */
+    private val TOOL_ROW_DP = 56
+
     private fun toolList(parent: LinearLayout) {
         val items = com.p3dro.scorpio.ime.engine.Toolbar.all(this).toMutableList()
         lateinit var touchHelper: androidx.recyclerview.widget.ItemTouchHelper
@@ -1299,9 +1301,8 @@ class SettingsActivity : AppCompatActivity() {
                 val row = LinearLayout(this@SettingsActivity).apply {
                     orientation = LinearLayout.HORIZONTAL
                     gravity = Gravity.CENTER_VERTICAL
-                    minimumHeight = dp(56)
-                    setPadding(dp(20), dp(4), dp(8), dp(4))
-                    layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+                    setPadding(dp(20), 0, dp(8), 0)
+                    layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(TOOL_ROW_DP))
                 }
                 val icon = ImageView(this@SettingsActivity).apply { setColorFilter(cOnSurfaceVariant) }
                 row.addView(icon, LinearLayout.LayoutParams(dp(24), dp(24)).apply { marginEnd = dp(20) })
@@ -1383,7 +1384,8 @@ class SettingsActivity : AppCompatActivity() {
             overScrollMode = View.OVER_SCROLL_NEVER
         }
         touchHelper.attachToRecyclerView(rv)
-        parent.addView(rv, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        // 固定高度（每列一樣高）：自動量高度時，鍵盤升起、畫面縮短的那一下只排出看得到的一兩列，之後就一直缺列、拖不動
+        parent.addView(rv, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(TOOL_ROW_DP) * items.size))
     }
 
     /** 關於頁的「檢查 App 更新」：有新版就顯示更新內容，按「下載並安裝」交給系統安裝 */

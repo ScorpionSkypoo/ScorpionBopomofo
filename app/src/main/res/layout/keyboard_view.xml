@@ -31,6 +31,17 @@
                 android:orientation="horizontal"
                 android:gravity="center_vertical" />
 
+            <!-- 工具與右邊的最近使用列（或自動填入建議）之間的分隔線：兩邊都有東西才顯示 -->
+            <View
+                android:id="@+id/tool_divider"
+                android:layout_width="1dp"
+                android:layout_height="20dp"
+                android:layout_gravity="center_vertical"
+                android:layout_marginEnd="4dp"
+                android:alpha="0.35"
+                android:background="@color/ime_text_secondary"
+                android:visibility="gone" />
+
             <!-- 自動填入服務給的建議（簡訊驗證碼、密碼、地址）：有建議時取代最近使用列，點了由系統填進輸入框 -->
             <HorizontalScrollView
                 android:id="@+id/scroll_inline_suggestions"
