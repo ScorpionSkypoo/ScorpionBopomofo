@@ -1491,6 +1491,24 @@ class ScorpioImeService : InputMethodService() {
         return (0 until row.childCount).map { row.getChildAt(it) }.filter { it.visibility != View.GONE }.map { intArrayOf(it.left, it.right) }
     }
 
+    /**
+     * 最下排鍵上的字：跟版面檔裡注音／英文最下排一模一樣（一般 TextView、保留字型上下空白、置中），
+     * 程式建立的面板（符號、數字、手寫）切換時字的大小與高低才不會跳。功能鍵 14sp、標點 18sp、空白鍵 13sp 次要色
+     */
+    private fun bottomRowLabel(text: String, sizeSp: Float, colorRes: Int = R.color.ime_text_primary) = TextView(ui).apply {
+        this.text = text
+        textSize = sizeSp
+        setTextColor(ui.getColor(colorRes))
+        layoutParams = FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER)
+    }
+
+    /** 最下排的圖示（地球、刪除、Enter）：20dp，刪除與地球著主要文字色、Enter 用原色，同版面檔 */
+    private fun bottomRowIcon(res: Int, tint: Boolean) = ImageView(ui).apply {
+        setImageDrawable(ui.getDrawable(res))
+        if (tint) imageTintList = android.content.res.ColorStateList.valueOf(ui.getColor(R.color.ime_text_primary))
+        layoutParams = FrameLayout.LayoutParams(dpToPx(20), dpToPx(20), Gravity.CENTER)
+    }
+
     /** 一排鍵改照指定的左右邊界排（取代權重） */
     private fun placeKeys(row: LinearLayout, bounds: List<IntArray>) {
         row.weightSum = 0f
@@ -1528,7 +1546,8 @@ class ScorpioImeService : InputMethodService() {
     }
 
     /**
-     * 數字鍵盤（比照 Gboard）：3×3 數字＋0，右邊一排功能鍵，按鍵比一般鍵盤高（同樣總高度分 4 排）
+     * 數字鍵盤（比照 Gboard）：3×3 數字＋0，右邊一排功能鍵；上面三排把多出來的高度分掉（按鍵比一般鍵盤高）。
+     * 最下排跟其他鍵盤的最下排一樣高、一樣位置：右欄在 Enter 的欄位（KeyRowLayout 第 7 欄）、數字三欄平分其餘的寬度
      *   數字：右邊 － 空白 ⌫ ↵，下排 ， 0 .（金額、數量、PIN 碼）
      *   電話：右邊 ＋ 空白 ⌫ ↵，下排 * 0 #
      *   日期時間：右邊 / : ⌫ ↵，下排 - 0 空白
@@ -1548,8 +1567,9 @@ class ScorpioImeService : InputMethodService() {
         val referenceHeight = sourcePanelHeight()
         val panelHeight = if (referenceHeight > 0) referenceHeight else (5 * keyRowHeightPx() + dpToPx(4 * 4 + 4 + 6))
         pad.layoutParams = pad.layoutParams.apply { height = panelHeight }
-        val gap = dpToPx(5)
-        val keyHeight = (panelHeight - pad.paddingTop - pad.paddingBottom - 3 * gap) / 4
+        val gap = dpToPx(4)
+        val bottomHeight = keyRowHeightPx()
+        val upper = panelHeight - pad.paddingTop - pad.paddingBottom - bottomHeight - 3 * gap
 
         val (side, bottom) = when (fieldKind) {
             FieldKind.PHONE -> listOf("+", " ") to listOf("*", "0", "#")
@@ -1576,15 +1596,28 @@ class ScorpioImeService : InputMethodService() {
                 pad.registerKey(this, s[0])
             }
         }
+        // 最下排的符號跟其他鍵盤最下排的標點一樣（一般鍵、18sp；空白 13sp 次要色），0 跟上面的數字一樣大
+        fun bottomKey(parent: LinearLayout, s: String) {
+            key(parent, R.attr.imeKeyDrawable).apply {
+                addView(when {
+                    s == " " -> bottomRowLabel("空白", 13f, R.color.ime_text_secondary)
+                    s[0].isDigit() -> label(s, 24f)
+                    else -> bottomRowLabel(s, 18f)
+                })
+                pad.registerKey(this, s[0])
+            }
+        }
         val rows = listOf(listOf("1", "2", "3"), listOf("4", "5", "6"), listOf("7", "8", "9"), bottom)
         for ((r, digits) in rows.withIndex()) {
-            val row = LinearLayout(ui).apply {
+            val h = when (r) { 3 -> bottomHeight; 2 -> upper - 2 * (upper / 3); else -> upper / 3 }
+            val row = com.p3dro.scorpio.ime.ui.KeyRowLayout(ui).apply {
                 orientation = LinearLayout.HORIZONTAL
-                layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, keyHeight).apply {
+                segments = com.p3dro.scorpio.ime.ui.KeyRowLayout.NUMPAD
+                layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, h).apply {
                     if (r > 0) topMargin = gap
                 }
             }
-            for (d in digits) charKey(row, d, function = !d[0].isDigit())
+            for (d in digits) if (r == 3) bottomKey(row, d) else charKey(row, d, function = !d[0].isDigit())
             when (r) {
                 0, 1 -> charKey(row, side[r], function = true)
                 2 -> key(row, R.attr.imeKeyFunctionDrawable).apply {
@@ -1600,10 +1633,7 @@ class ScorpioImeService : InputMethodService() {
                     })
                 }
                 3 -> key(row, R.attr.imeKeyActionDrawable).apply {
-                    addView(ImageView(ui).apply {
-                        setImageDrawable(ui.getDrawable(R.drawable.ic_ime_enter))
-                        layoutParams = FrameLayout.LayoutParams(dpToPx(22), dpToPx(22), Gravity.CENTER)
-                    })
+                    addView(bottomRowIcon(R.drawable.ic_ime_enter, tint = false))
                     pad.registerKey(this, null)
                     setOnClickListener {
                         triggerHaptic(it)
@@ -1693,18 +1723,20 @@ class ScorpioImeService : InputMethodService() {
             }
             upperBounds?.let { placeKeys(line, it) }
         }
+        // 最下排的字和圖示跟注音／英文鍵盤最下排一樣（bottomRowLabel／bottomRowIcon）；0 跟上面的數字一樣大
         val bottom = row(3, bottomHeight)
         key(bottom, 1f, R.attr.imeKeyFunctionDrawable, null).apply {
-            addView(text(if (chinese) "返回" else "ABC", 14f))
+            addView(bottomRowLabel(if (chinese) "返回" else "ABC", 14f))
             setOnClickListener {
                 triggerHaptic(it)
                 numpadFromUser = false
                 setKeyboardMode(previousMode)
             }
         }
-        charKey(bottom, ",", 0.7f, function = false)
+        fun punctKey(s: String, weight: Float) = key(bottom, weight, R.attr.imeKeyDrawable, s[0]).apply { addView(bottomRowLabel(s, 18f)) }
+        punctKey(",", 0.7f)
         key(bottom, 0.7f, R.attr.imeKeyFunctionDrawable, null).apply {
-            addView(text("!?#", 13f))
+            addView(bottomRowLabel("!?#", 14f))
             setOnClickListener {
                 triggerHaptic(it)
                 setKeyboardMode(KeyboardMode.SYMBOLS)
@@ -1712,9 +1744,10 @@ class ScorpioImeService : InputMethodService() {
             }
         }
         charKey(bottom, "0", 1.4f, function = false)
-        charKey(bottom, "/", 0.7f, function = false)
-        charKey(bottom, ".", 0.7f, function = false)
-        iconKey(bottom, 1f, R.attr.imeKeyActionDrawable, R.drawable.ic_ime_enter, tint = false).apply {
+        punctKey("/", 0.7f)
+        punctKey(".", 0.7f)
+        key(bottom, 1f, R.attr.imeKeyActionDrawable, null).apply {
+            addView(bottomRowIcon(R.drawable.ic_ime_enter, tint = false))
             setOnClickListener {
                 triggerHaptic(it)
                 handleEnterPress()
@@ -1846,13 +1879,13 @@ class ScorpioImeService : InputMethodService() {
         fun key(weight: Float, bgAttr: Int, label: String? = null, icon: Int? = null, onClick: (View) -> Unit) = FrameLayout(ui).apply {
             background = keyDrawable(bgAttr)
             isClickable = true
-            if (label != null) addView(TextView(ui).apply {
-                text = label
-                textSize = 15f
-                setTextColor(ui.getColor(R.color.ime_text_primary))
-            }, FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, android.view.Gravity.CENTER))
-            if (icon != null) addView(ImageView(ui).apply { setImageResource(icon) },
-                FrameLayout.LayoutParams(dpToPx(20), dpToPx(20), android.view.Gravity.CENTER))
+            // 字和圖示跟注音／英文鍵盤最下排一樣：功能鍵 14sp、標點 18sp、空白 13sp 次要色；刪除鍵圖示著色、Enter 原色
+            if (label != null) addView(when {
+                bgAttr == R.attr.imeKeyFunctionDrawable -> bottomRowLabel(label, 14f)
+                label == "空白" -> bottomRowLabel(label, 13f, R.color.ime_text_secondary)
+                else -> bottomRowLabel(label, 18f)
+            })
+            if (icon != null) addView(bottomRowIcon(icon, tint = bgAttr != R.attr.imeKeyActionDrawable))
             setOnClickListener { triggerHaptic(it); onClick(it) }
             row.addView(this, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, weight).apply {
                 setMargins(dpToPx(2.5f), 0, dpToPx(2.5f), 0)
@@ -3055,15 +3088,20 @@ class ScorpioImeService : InputMethodService() {
             segments = if (fromZhuyinPanel) com.p3dro.scorpio.ime.ui.KeyRowLayout.SYMBOLS_FROM_ZHUYIN else com.p3dro.scorpio.ime.ui.KeyRowLayout.QWERTY
         })
         bottomRow.addView(functionKey(1.4f, R.attr.imeKeyFunctionDrawable).apply {
-            addView(label(if (chinese) "返回" else "ABC", 14f))
+            addView(bottomRowLabel(if (chinese) "返回" else "ABC", 14f))
             setOnClickListener {
                 triggerHaptic(it)
                 setKeyboardMode(previousMode)
             }
         })
+        // 最下排的字跟注音／英文鍵盤最下排同一種寫法（bottomRowLabel），不照上面幾排的置中方式
+        fun bottomSymbolKey(sym: String, weight: Float) = keyFrame(weight, R.attr.imeKeyDrawable).apply {
+            addView(bottomRowLabel(sym, 18f))
+            symPanel.registerKey(this, sym[0])
+        }
         val left = if (symbolsPage == 1) "<" else if (chinese) "，" else ","
         val right = if (symbolsPage == 1) ">" else if (chinese) "。" else "."
-        bottomRow.addView(symbolKey(left, 0.9f, size = 18f))
+        bottomRow.addView(bottomSymbolKey(left, 0.9f))
         bottomRow.addView(functionKey(0.9f, R.attr.imeKeyFunctionDrawable).apply {
             // 兩行字用一般 TextView（KeyLabelView 只照第一行置中）
             addView(TextView(ui).apply {
@@ -3083,15 +3121,16 @@ class ScorpioImeService : InputMethodService() {
             }
         })
         bottomRow.addView(functionKey(if (fromZhuyinPanel) 4.2f else 4.7f, R.attr.imeKeyDrawable).apply {
-            addView(label(if (chinese) chineseMethod.spaceLabel else "空白", 13f, R.color.ime_text_secondary))
+            // 空白鍵的字跟切過來的鍵盤一樣（注音／English…）
+            addView(bottomRowLabel(if (chinese) chineseMethod.spaceLabel else "English", 13f, R.color.ime_text_secondary))
             setOnClickListener {
                 triggerHaptic(it)
                 currentInputConnection?.commitText(" ", 1)
             }
         })
-        bottomRow.addView(symbolKey(right, if (fromZhuyinPanel) 1.5f else 1.0f, size = 18f))
+        bottomRow.addView(bottomSymbolKey(right, if (fromZhuyinPanel) 1.5f else 1.0f))
         bottomRow.addView(functionKey(1.5f, R.attr.imeKeyActionDrawable).apply {
-            addView(icon(R.drawable.ic_ime_enter, tint = false))
+            addView(bottomRowIcon(R.drawable.ic_ime_enter, tint = false))
             setOnClickListener {
                 triggerHaptic(it)
                 handleEnterPress()

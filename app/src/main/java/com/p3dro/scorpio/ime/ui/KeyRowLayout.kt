@@ -60,6 +60,9 @@ class KeyRowLayout @JvmOverloads constructor(
         /** 從大千注音來的符號鍵盤：空白蓋住空白＋ㄦ，句號在刪除鍵的位置 */
         val SYMBOLS_FROM_ZHUYIN = listOf(Segment(0), Segment(1), Segment(2), Segment(3, 4), Segment(5), Segment(6))
 
+        /** 數字欄的數字鍵盤：數字三欄平分第 1～6 欄，右欄（－ 空白 ⌫ Enter）在 Enter 的欄位 */
+        val NUMPAD = listOf(Segment(0, 5, listOf(1f, 1f, 1f)), Segment(6))
+
         /** 手寫面板（返回、，、空白、。、刪除、Enter）：空白蓋住地球＋空白，。在 ㄦ 的位置 */
         val HANDWRITING = listOf(Segment(0), Segment(1), Segment(2, 3), Segment(4), Segment(5), Segment(6))
 
