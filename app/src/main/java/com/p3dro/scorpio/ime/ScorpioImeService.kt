@@ -2862,7 +2862,9 @@ class ScorpioImeService : InputMethodService() {
         // 第 1、2 排：各 10 鍵
         for ((index, row) in rows.withIndex()) {
             val rowLayout = newRow(index, row.size.toFloat())
-            for (sym in row) rowLayout.addView(symbolKey(sym))
+            // 第 1 頁第一排的數字跟來源鍵盤的數字列一樣大（英文 20sp、注音 19sp）
+            val digitRow = symbolsPage == 0 && index == 0
+            for (sym in row) rowLayout.addView(if (digitRow) symbolKey(sym, size = if (chinese) 19f else 20f) else symbolKey(sym))
             symPanel.addView(rowLayout)
         }
 
