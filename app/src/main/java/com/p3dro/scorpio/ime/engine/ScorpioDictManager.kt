@@ -45,6 +45,9 @@ class ScorpioDictManager private constructor(private val context: Context) {
         // 這種整句要比照打的整句高出 LITERAL_MARGIN 分才排第一（落點壓在兩鍵交界時鄰鍵懲罰 < 0.4，不受影響）
         private const val STRONG_CORRECTION = 0.4
         private const val LITERAL_MARGIN = 1.5
+        // 按歪了的鄰鍵候選：鄰鍵懲罰在這以下才列（按在鍵中央時鄰鍵約 0.65～1.3（上下的鄰鍵比較便宜，個人習慣也會讓某個方向便宜一點），偏向某鄰鍵三、四成鍵寬就會低於這個）、最多幾個詞
+        private const val NEIGHBOR_ALT_MAX = 0.6
+        private const val NEIGHBOR_ALT_WORDS = 4
         private const val PREF_USER_DICT_CANONICAL = "user_dict_canonical_v1"
         private const val PREF_SPATIAL_BIAS = "spatial_bias_v1"
         // v2：判對統計改成比「有／沒有移動偏差」（v1 比的是散佈，已拿掉）
@@ -1105,9 +1108,28 @@ class ScorpioDictManager private constructor(private val context: Context) {
             scored[lower] = Double.MAX_VALUE
         }
 
+        // 4. 打錯字（比照 Gboard）：打的不是一個字時，除了上面的鄰鍵替換，再找少打、多打一個字母、
+        //    相鄰兩個字母對調的整個字（懲罰 1.2，同鄰鍵替換的尺度；teh → the、recieve → receive）
+        if (!exact && index != null && lower.length >= 3 && lower.all { it in 'a'..'z' }) {
+            val variants = HashSet<String>()
+            for (i in lower.indices) variants.add(lower.removeRange(i, i + 1))
+            for (i in 0 until lower.length - 1) {
+                variants.add(lower.substring(0, i) + lower[i + 1] + lower[i] + lower.substring(i + 2))
+            }
+            for (i in 0..lower.length) for (c in 'a'..'z') variants.add(lower.substring(0, i) + c + lower.substring(i))
+            variants.remove(lower)
+            for (v in variants) {
+                val r = index.range(v)
+                if (!r.isEmpty() && index.word(r.first) == v) add(v, index.score(r.first) - 1200.0)
+            }
+        }
+
+        // 最像的不是「打的字再打下去」（是修正過的字，或根本沒有候選）：第一個候選留著打的原樣，點它就照打的送出
+        val sorted = scored.entries.sortedByDescending { it.value }
+        val typo = !exact && (sorted.isEmpty() || !sorted.first().key.startsWith(lower))
         val upperFirst = prefix[0].isUpperCase()
         val allUpper = prefix.length > 1 && prefix.all { !it.isLetter() || it.isUpperCase() }
-        return@withContext scored.entries.sortedByDescending { it.value }.take(12).map { (k, _) ->
+        val list = sorted.take(if (typo) 11 else 12).map { (k, _) ->
             val base = display[k] ?: k
             when {
                 allUpper -> base.uppercase()
@@ -1116,6 +1138,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
                 else -> base
             }
         }
+        return@withContext if (typo) listOf(prefix) + list.filter { it != prefix } else list
     }
 
     /**
@@ -1529,11 +1552,15 @@ class ScorpioDictManager private constructor(private val context: Context) {
             }
         }
 
-        // 6. 排列候選字
+        // 6. 排列候選字：前兩個照實際按的鍵；按歪了（落點靠近鄰鍵）時接著列鄰鍵的詞，再來 Emoji、顏文字與其他
         var textIndex = 0
         while (textIndex < textCandidates.size && textIndex < 2) {
             addCandidate(textCandidates[textIndex].word)
             textIndex++
+        }
+        if (touchPoints != null && precomputedLattice == null && textCandidates.isNotEmpty()) {
+            val alternatives = neighborAlternatives(touchPoints, primaryInput.size)
+            for (w in alternatives) addCandidate(w)
         }
 
         for (emo in emojiCandidates) {
@@ -1657,6 +1684,38 @@ class ScorpioDictManager private constructor(private val context: Context) {
         if (tl.length <= 1) return true
         val set = validSyllables()
         return set.isEmpty() || set.contains(tl)
+    }
+
+    /**
+     * 按歪了的鄰鍵候選（比照 Gboard）：某一鍵的落點靠近鄰鍵（鄰鍵懲罰 ≤ NEIGHBOR_ALT_MAX，按在鍵中央時不會）時，
+     * 把那一鍵換成鄰鍵，讀音仍然拼得起來、音節數不變，就列出那個讀音的常用詞（聲調要對得上）。
+     * 越靠近鄰鍵的排越前面，最多 NEIGHBOR_ALT_WORDS 個；第一候選還是照實際按的鍵
+     */
+    private fun neighborAlternatives(points: List<BopomofoComposer.TouchPoint>, syllableCount: Int): List<String> {
+        val variants = ArrayList<Pair<List<String>, Double>>()
+        for ((i, p) in points.withIndex()) {
+            if (p.char == BopomofoComposer.FIRST_TONE) continue
+            for ((nb, pen) in neighborKeys(p)) {
+                if (pen > NEIGHBOR_ALT_MAX) continue
+                val swapped = points.toMutableList().also { it[i] = p.copy(char = nb) }
+                val parsed = BopomofoComposer.parseSyllables(swapped)
+                if (parsed.size != syllableCount || parsed.any { !isValidSyllable(it.text) }) continue
+                variants.add(parsed.map { it.text } to pen)
+            }
+        }
+        val out = LinkedHashSet<String>()
+        for ((syls, _) in variants.sortedBy { it.second }) {
+            val tonelessKey = toToneless(syls.joinToString("-").replace("ˉ", ""))
+            // 每個讀音最多兩個，讓不同方向的鄰鍵都看得到
+            var taken = 0
+            for (h in words.byToneless(tonelessKey, 6)) {
+                if (taken >= 2) break
+                if (toneMismatchCount(syls, h.reading) > 0 || !isRenderable(h.word) || !out.add(h.word)) continue
+                taken++
+                if (out.size >= NEIGHBOR_ALT_WORDS) return out.toList()
+            }
+        }
+        return out.toList()
     }
 
     data class RepairedParse(
