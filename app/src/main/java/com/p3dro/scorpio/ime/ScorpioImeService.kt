@@ -1390,10 +1390,13 @@ class ScorpioImeService : InputMethodService() {
     private fun recordQwertyTouches(touches: List<BopomofoComposer.TouchPoint>, intended: CharSequence) {
         if (!personalizationAllowed() || touches.isEmpty() || intended.length < touches.size) return
         val pairs = ArrayList<Pair<Char, BopomofoComposer.TouchPoint>>(touches.size)
+        // 長度不同（補完、或少打／多打一個字母的修正）：有任何一個字母跟按的不一樣就不學——
+        // 少打／多打時後面的字母全部錯開一格，錯開的鍵剛好相鄰時會被當成按歪而學錯（gbard → gboard）
+        val completion = intended.length != touches.size
         for ((i, t) in touches.withIndex()) {
             val want = intended[i].lowercaseChar()
             val raw = t.rawChar.lowercaseChar()
-            if (want != raw && !dictManager.qwerty.adjacent(want, raw)) return
+            if (want != raw && (completion || !dictManager.qwerty.adjacent(want, raw))) return
             // 沒有落點的（不是從鍵盤觸控來的）不學
             if (t.offsetX == 0f && t.offsetY == 0f) continue
             pairs.add(want to t)
