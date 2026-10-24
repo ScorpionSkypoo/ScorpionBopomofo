@@ -2743,7 +2743,7 @@ class ScorpioImeService : InputMethodService() {
             symPanel.registerKey(this, null)
         }
         stacked.addView(stackedKey(top = true).apply {
-            addView(label(if (symbolsPage == 0) "=\\<" else "?123", 13f))
+            addView(label(if (symbolsPage == 0) "=\\<" else "?123", 14f))
             setOnClickListener {
                 triggerHaptic(it)
                 symbolsPage = 1 - symbolsPage
@@ -2751,9 +2751,11 @@ class ScorpioImeService : InputMethodService() {
             }
         })
         stacked.addView(stackedKey(top = false).apply {
-            addView(com.p3dro.scorpio.ime.ui.WidthToggleGlyph(ui, full, ui.getColor(R.color.ime_text_primary), ui.getColor(R.color.ime_text_secondary).let {
-                android.graphics.Color.argb(110, android.graphics.Color.red(it), android.graphics.Color.green(it), android.graphics.Color.blue(it))
-            }), FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+            // 「全/半」：目前用的那個字是主要文字色，另一個淡掉
+            val text = android.text.SpannableString("全/半")
+            val dim = android.text.style.ForegroundColorSpan(ui.getColor(R.color.ime_text_secondary))
+            if (full) text.setSpan(dim, 1, 3, 0) else text.setSpan(dim, 0, 2, 0)
+            addView(label("", 15f).apply { this.text = text })
             contentDescription = if (full) "全形，點一下換成半形" else "半形，點一下換成全形"
             setOnClickListener {
                 triggerHaptic(it)
@@ -2770,6 +2772,21 @@ class ScorpioImeService : InputMethodService() {
                 handleBackspace()
             })
         })
+        // 翻頁鍵與全／半鍵那一格往上長，用掉第 2、3 排之間大部分的空隙（只留 4dp），兩個鍵才不會太扁；
+        // 這排其他鍵維持原本高度、貼齊底部
+        val extra = (rowGap - dpToPx(4)).coerceAtLeast(0)
+        (thirdRow.layoutParams as LinearLayout.LayoutParams).apply {
+            height = keyHeight + extra
+            topMargin = rowGap - extra
+        }
+        for (i in 0 until thirdRow.childCount) {
+            val child = thirdRow.getChildAt(i)
+            if (child === stacked) continue
+            child.layoutParams = (child.layoutParams as LinearLayout.LayoutParams).apply {
+                height = keyHeight
+                gravity = Gravity.BOTTOM
+            }
+        }
         symPanel.addView(thirdRow)
 
         // 第 4 排：返回、逗號、語言切換、空白、句號、Enter（權重總和 10.4，與注音／英文底排對齊）
