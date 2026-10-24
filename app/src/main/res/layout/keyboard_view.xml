@@ -88,21 +88,6 @@
                     android:paddingEnd="4dp" />
             </HorizontalScrollView>
 
-            <!-- 3. 設定 / 返回 向量圖示 (返回鍵覆蓋在設定按鈕上，按一下切換/返回) -->
-            <FrameLayout
-                android:id="@+id/btn_idle_settings"
-                android:layout_width="40dp"
-                android:layout_height="36dp"
-                android:background="?attr/imeItemBackgroundBorderless"
-                android:clickable="true"
-                android:focusable="true">
-                <ImageView
-                    android:id="@+id/iv_idle_settings_icon"
-                    android:layout_width="22dp"
-                    android:layout_height="22dp"
-                    android:layout_gravity="center"
-                    android:src="@drawable/ic_ime_settings" />
-            </FrameLayout>
         </LinearLayout>
 
         <!-- 狀態 B: 活躍候選字列 (打字時顯示) -->

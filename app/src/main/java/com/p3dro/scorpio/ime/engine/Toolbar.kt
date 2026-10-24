@@ -4,8 +4,8 @@ import android.content.Context
 import com.p3dro.scorpio.ime.R
 
 /**
- * 工具列左邊的工具：內建的 Emoji、顏文字、手寫，加上安裝的擴充功能
- * 每個都可以在設定裡決定要不要顯示、調整順序（也可以全部不顯示）
+ * 工具列的工具：內建的 Emoji、顏文字、手寫，安裝的擴充功能，以及設定
+ * 每個都可以在設定裡決定要不要顯示、調整順序（也可以全部不顯示）；工具列最多顯示 MAX_SLOTS 格
  */
 object Toolbar {
 
@@ -14,6 +14,9 @@ object Toolbar {
     private const val PREFS = "scorpio_ime_prefs"
     private const val PREF_ORDER = "toolbar_order"
     private const val PREF_HIDDEN = "toolbar_hidden"
+
+    /** 工具列最多幾格（開著最近使用列、展開時含「收合」那一格） */
+    const val MAX_SLOTS = 9
 
     private val BUILT_IN = listOf(
         Triple("emoji", "Emoji", R.drawable.ic_ime_emoji),
@@ -24,10 +27,11 @@ object Toolbar {
     private fun prefs(context: Context) = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
     private fun list(context: Context, key: String) = prefs(context).getString(key, "")!!.split(',').filter { it.isNotEmpty() }
 
-    /** 全部的工具（含隱藏的），依設定的順序；新裝的擴充功能排在最後、預設顯示 */
+    /** 全部的工具（含隱藏的），依設定的順序；新裝的擴充功能排在最後、預設顯示；設定沒排過時放最後 */
     fun all(context: Context): List<Tool> {
         val available = BUILT_IN.map { (id, name, icon) -> Tool(id, name, icon, true) } +
-            Plugins.installed(context).map { Tool("plugin:${it.id}", it.name, Plugins.iconRes(it.icon), true) }
+            Plugins.installed(context).map { Tool("plugin:${it.id}", it.name, Plugins.iconRes(it.icon), true) } +
+            Tool("settings", "設定", R.drawable.ic_ime_settings, true)
         val order = list(context, PREF_ORDER)
         val hidden = list(context, PREF_HIDDEN).toSet()
         return available

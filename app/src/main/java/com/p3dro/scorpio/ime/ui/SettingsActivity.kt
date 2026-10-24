@@ -1330,9 +1330,15 @@ class SettingsActivity : AppCompatActivity() {
                 h.name.text = t.name
                 h.sw.setOnCheckedChangeListener(null)
                 h.sw.isChecked = t.visible
-                h.sw.setOnCheckedChangeListener { _, on ->
+                h.sw.setOnCheckedChangeListener { sw, on ->
                     val i = h.bindingAdapterPosition
                     if (i < 0) return@setOnCheckedChangeListener
+                    val max = com.p3dro.scorpio.ime.engine.Toolbar.MAX_SLOTS
+                    if (on && items.count { it.visible } >= max) {
+                        sw.isChecked = false
+                        android.widget.Toast.makeText(this@SettingsActivity, "工具列最多 $max 個，先關掉一個再開", android.widget.Toast.LENGTH_SHORT).show()
+                        return@setOnCheckedChangeListener
+                    }
                     items[i] = items[i].copy(visible = on)
                     com.p3dro.scorpio.ime.engine.Toolbar.setVisible(this@SettingsActivity, items[i].id, on)
                 }
@@ -1444,7 +1450,7 @@ class SettingsActivity : AppCompatActivity() {
         val tb = card()
         boolSwitch(tb, "最近使用的 Emoji 與顏文字", "工具列中間常駐最近用過的 Emoji 和顏文字，可以左右滑。",
             com.p3dro.scorpio.ime.ScorpioImeService.PREF_RECENT_BAR, false)
-        infoRow(tb, "左邊的工具", "用開關決定要不要顯示，按住右邊的把手拖拉調整順序；全部關掉也可以。")
+        infoRow(tb, "工具", "用開關決定要不要顯示（最多 ${com.p3dro.scorpio.ime.engine.Toolbar.MAX_SLOTS} 個），按住右邊的把手拖拉調整順序。開著最近使用列時只先放前兩個，其他的按「⋯」展開。關掉「設定」的話，從桌面的 App 圖示也能進來。")
         toolList(tb)
 
         sectionTitle("擴充功能")

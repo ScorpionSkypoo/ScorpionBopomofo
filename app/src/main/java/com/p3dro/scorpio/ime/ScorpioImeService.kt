@@ -97,7 +97,6 @@ class ScorpioImeService : InputMethodService() {
         NONE, CANDIDATES, EMOJI, KAOMOJI, PLUGINS
     }
     private var currentExpandedType = ExpandedType.NONE
-    private var ivIdleSettingsIcon: ImageView? = null
     private val zhuyinKeyViews = mutableMapOf<Char, View>()
     // 候選列是否穿插 emoji／顏文字；關閉時只在展開面板以分頁出現
     private var inlineSymbols = true
@@ -380,21 +379,6 @@ class ScorpioImeService : InputMethodService() {
 
         ivExpandChevron = root.findViewById(R.id.iv_expand_chevron)
         layoutExpandedHeader = root.findViewById(R.id.layout_expanded_header)
-
-        ivIdleSettingsIcon = root.findViewById(R.id.iv_idle_settings_icon)
-
-        // 閒置列捷徑：⚙️ 設定 / ‹ 返回（在展開/符號時覆蓋在設定鍵位置作為返回按鈕）
-        root.findViewById<View>(R.id.btn_idle_settings)?.setOnClickListener {
-            triggerHaptic(it)
-            if (currentMode == KeyboardMode.EXPANDED || currentMode == KeyboardMode.SYMBOLS || currentMode == KeyboardMode.HANDWRITING) {
-                collapseCandidates()
-            } else {
-                val intent = Intent(this, com.p3dro.scorpio.ime.ui.SettingsActivity::class.java).apply {
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                }
-                startActivity(intent)
-            }
-        }
 
         refreshToolbar(root)
 
@@ -714,12 +698,6 @@ class ScorpioImeService : InputMethodService() {
             hwLastCommit = null
         }
         panelExpanded?.visibility = if (mode == KeyboardMode.EXPANDED) View.VISIBLE else View.GONE
-
-        if (mode == KeyboardMode.EXPANDED || mode == KeyboardMode.SYMBOLS || mode == KeyboardMode.HANDWRITING) {
-            ivIdleSettingsIcon?.setImageResource(R.drawable.ic_ime_back)
-        } else {
-            ivIdleSettingsIcon?.setImageResource(R.drawable.ic_ime_settings)
-        }
 
         if (mode != KeyboardMode.ZHUYIN && mode != KeyboardMode.EXPANDED) {
             clearComposer()
@@ -2260,8 +2238,8 @@ class ScorpioImeService : InputMethodService() {
     private var toolsExpanded = false
 
     /**
-     * 閒置工具列的排法：
-     * - 有自動填入建議：整條只放建議（置中），工具、最近使用列、設定都先收起來
+     * 閒置工具列的排法（設定也是其中一個工具；開著的面板按它的工具再按一次收起）：
+     * - 有自動填入建議：整條只放建議（置中），工具與最近使用列都先收起來
      * - 開著最近使用列：前兩個工具＋「更多」｜最近使用列；展開後整條是工具（可左右滑）＋「收合」
      * - 沒開最近使用列：整條都是工具，可以左右滑
      */
@@ -2270,14 +2248,12 @@ class ScorpioImeService : InputMethodService() {
         val scrollTools = root.findViewById<View>(R.id.scroll_tools) ?: return
         val box = root.findViewById<LinearLayout>(R.id.layout_tools) ?: return
         val divider = root.findViewById<View>(R.id.tool_divider)
-        val settings = root.findViewById<View>(R.id.btn_idle_settings)
         if (inlineSuggestionViews.isNotEmpty()) {
-            for (v in listOf(scrollTools, divider, scrollRecent, settings)) v?.visibility = View.GONE
+            for (v in listOf(scrollTools, divider, scrollRecent)) v?.visibility = View.GONE
             scrollInlineSuggestions?.visibility = View.VISIBLE
             return
         }
         scrollInlineSuggestions?.visibility = View.GONE
-        settings?.visibility = View.VISIBLE
         scrollTools.visibility = View.VISIBLE
 
         val all = com.p3dro.scorpio.ime.engine.Toolbar.visible(this)
@@ -2285,7 +2261,13 @@ class ScorpioImeService : InputMethodService() {
         val canFold = recentOn && all.size > MAX_TOOLS_WITH_RECENT
         val compact = canFold && !toolsExpanded
         box.removeAllViews()
-        for (t in if (compact) all.take(MAX_TOOLS_WITH_RECENT) else all) box.addView(toolButton(root, t), toolButtonParams())
+        // 最多 MAX_SLOTS 格：展開時「收合」也算一格
+        val shown = when {
+            compact -> all.take(MAX_TOOLS_WITH_RECENT)
+            canFold -> all.take(com.p3dro.scorpio.ime.engine.Toolbar.MAX_SLOTS - 1)
+            else -> all.take(com.p3dro.scorpio.ime.engine.Toolbar.MAX_SLOTS)
+        }
+        for (t in shown) box.addView(toolButton(root, t), toolButtonParams())
         if (canFold) {
             box.addView(barButton(if (compact) R.drawable.ic_ime_more else R.drawable.ic_ime_chevron_left, if (compact) "更多工具" else "收合工具") {
                 toolsExpanded = !toolsExpanded
@@ -2318,6 +2300,7 @@ class ScorpioImeService : InputMethodService() {
             "emoji" -> if (currentMode == KeyboardMode.EXPANDED && currentExpandedType == ExpandedType.EMOJI) collapseCandidates() else openEmojiPanel(root)
             "kaomoji" -> if (currentMode == KeyboardMode.EXPANDED && currentExpandedType == ExpandedType.KAOMOJI) collapseCandidates() else openKaomojiPanel(root)
             "handwriting" -> if (currentMode == KeyboardMode.HANDWRITING) collapseCandidates() else setKeyboardMode(KeyboardMode.HANDWRITING)
+            "settings" -> startActivity(Intent(this, com.p3dro.scorpio.ime.ui.SettingsActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
             else -> {
                 val id = t.id.removePrefix("plugin:")
                 if (currentMode == KeyboardMode.EXPANDED && currentExpandedType == ExpandedType.PLUGINS && openPluginId == id) collapseCandidates()
