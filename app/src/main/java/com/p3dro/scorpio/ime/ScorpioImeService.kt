@@ -272,11 +272,17 @@ class ScorpioImeService : InputMethodService() {
     private fun scaleKeyRows(v: View, scale: Float) {
         val lp = v.layoutParams
         if (lp != null && lp.height > 0 && kotlin.math.abs(lp.height - 44f * resources.displayMetrics.density) <= 1f) {
-            lp.height = dpToPx(44f * scale)
+            lp.height = keyRowHeightPx()
             v.layoutParams = lp
         }
         if (v is ViewGroup) for (i in 0 until v.childCount) scaleKeyRows(v.getChildAt(i), scale)
     }
+
+    /**
+     * 一排按鍵的高度（像素）：44dp × 按鍵高度設定，跟版面檔一樣四捨五入。
+     * 程式建立的面板（符號、數字、手寫）都用這個，才會跟注音／英文鍵盤一樣高、排在一樣的位置
+     */
+    private fun keyRowHeightPx() = (44f * keyHeightScale() * resources.displayMetrics.density + 0.5f).toInt()
 
     override fun onCreateInputView(): View {
         lastNightMode = resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK
@@ -1487,7 +1493,7 @@ class ScorpioImeService : InputMethodService() {
         pad.onKeyTapListener = { char, _, _ -> currentInputConnection?.commitText(char.toString(), 1) }
 
         val referenceHeight = maxOf(panelZhuyin?.height ?: 0, panelEnglish?.height ?: 0)
-        val panelHeight = if (referenceHeight > 0) referenceHeight else dpToPx(5 * 44 * keyHeightScale() + 4 * 4 + 4 + 6)
+        val panelHeight = if (referenceHeight > 0) referenceHeight else (5 * keyRowHeightPx() + dpToPx(4 * 4 + 4 + 6))
         pad.layoutParams = pad.layoutParams.apply { height = panelHeight }
         val gap = dpToPx(5)
         val keyHeight = (panelHeight - pad.paddingTop - pad.paddingBottom - 3 * gap) / 4
@@ -1617,7 +1623,7 @@ class ScorpioImeService : InputMethodService() {
     private fun buildHandwritingPanel() {
         val panel = panelHandwriting ?: return
         val referenceHeight = maxOf(panelZhuyin?.height ?: 0, panelEnglish?.height ?: 0)
-        panel.layoutParams = panel.layoutParams.apply { height = if (referenceHeight > 0) referenceHeight else dpToPx(5 * 44 * keyHeightScale() + 4 * 4 + 4 + 6) }
+        panel.layoutParams = panel.layoutParams.apply { height = if (referenceHeight > 0) referenceHeight else (5 * keyRowHeightPx() + dpToPx(4 * 4 + 4 + 6)) }
         if (panel.childCount == 0) createHandwritingViews(panel)
         val board = handwritingView ?: return
         // 輸入法重新啟動後要再確認一次模型；已經下載過的直接顯示可以寫，真的要下載時才換成下載提示（不會每次閃一下）
@@ -1696,7 +1702,7 @@ class ScorpioImeService : InputMethodService() {
         del.setOnClickListener(null)
         del.setOnTouchListener(com.p3dro.scorpio.ime.ui.RepeatTouchListener { triggerHaptic(del); handleBackspace() })
         key(1.5f, R.attr.imeKeyActionDrawable, icon = R.drawable.ic_ime_enter) { commitHandwritingTop(); handleEnterPress() }
-        panel.addView(row, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dpToPx(44f * keyHeightScale())))
+        panel.addView(row, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, keyRowHeightPx()))
     }
 
     private suspend fun kotlinx.coroutines.sync.Mutex.withLockSafe(block: suspend () -> Unit) {
@@ -2791,16 +2797,18 @@ class ScorpioImeService : InputMethodService() {
         // 整個符號鍵盤與注音／英文鍵盤同高（實際量到的高度；尚未量到時用 5 排 44dp 的設計值），切換時畫面不跳動
         // 比照 Gboard：按鍵維持 44dp 不變，多出來的高度平均分給排與排之間的間距
         val referenceHeight = maxOf(panelZhuyin?.height ?: 0, panelEnglish?.height ?: 0)
-        val panelHeight = if (referenceHeight > 0) referenceHeight else dpToPx(5 * 44 * keyHeightScale() + 4 * 4 + 4 + 6)
+        val panelHeight = if (referenceHeight > 0) referenceHeight else (5 * keyRowHeightPx() + dpToPx(4 * 4 + 4 + 6))
         symPanel.layoutParams = symPanel.layoutParams.apply { height = panelHeight }
-        val keyHeight = dpToPx(44f * keyHeightScale())
-        val rowGap = ((panelHeight - symPanel.paddingTop - symPanel.paddingBottom - 4 * keyHeight) / 3)
-            .coerceAtLeast(dpToPx(4))
+        val keyHeight = keyRowHeightPx()
+        // 三個排距平分多出來的高度，除不盡的像素給最後一個：最下排才會跟注音／英文鍵盤的最下排對齊
+        val gapSpace = panelHeight - symPanel.paddingTop - symPanel.paddingBottom - 4 * keyHeight
+        val rowGap = (gapSpace / 3).coerceAtLeast(dpToPx(4))
+        val lastGap = (gapSpace - 2 * rowGap).coerceAtLeast(dpToPx(4))
 
         fun newRow(index: Int, weightSum: Float) = LinearLayout(ui).apply {
             orientation = LinearLayout.HORIZONTAL
             layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, keyHeight).apply {
-                setMargins(0, if (index == 0) 0 else rowGap, 0, 0)
+                setMargins(0, when (index) { 0 -> 0; 3 -> lastGap; else -> rowGap }, 0, 0)
             }
             this.weightSum = weightSum
         }
@@ -2831,8 +2839,9 @@ class ScorpioImeService : InputMethodService() {
             layoutParams = FrameLayout.LayoutParams(dpToPx(20), dpToPx(20), android.view.Gravity.CENTER)
         }
 
+        // 字的大小跟來源鍵盤一樣：注音鍵盤 18sp、英文字母 23sp
         fun symbolKey(sym: String, weight: Float = 1f) = keyFrame(weight, R.attr.imeKeyDrawable).apply {
-            addView(label(sym, 18f))
+            addView(label(sym, if (chinese) 18f else 23f))
             symPanel.registerKey(this, sym[0])
         }
 
@@ -2885,14 +2894,15 @@ class ScorpioImeService : InputMethodService() {
                 switchToNextLanguage()
             }
         })
-        bottomRow.addView(functionKey(4.8f, R.attr.imeKeyDrawable).apply {
+        // 英文來的：空白 4.7、句點 1.0，跟英文鍵盤底排一樣寬、一樣位置
+        bottomRow.addView(functionKey(if (chinese) 4.8f else 4.7f, R.attr.imeKeyDrawable).apply {
             addView(label("空白", 13f, R.color.ime_text_secondary))
             setOnClickListener {
                 triggerHaptic(it)
                 currentInputConnection?.commitText(" ", 1)
             }
         })
-        bottomRow.addView(symbolKey(if (chinese) "。" else ".", 0.9f))
+        bottomRow.addView(symbolKey(if (chinese) "。" else ".", if (chinese) 0.9f else 1.0f))
         bottomRow.addView(functionKey(1.5f, R.attr.imeKeyActionDrawable).apply {
             addView(icon(R.drawable.ic_ime_enter, tint = false))
             setOnClickListener {
