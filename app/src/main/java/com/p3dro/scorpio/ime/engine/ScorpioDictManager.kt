@@ -1710,7 +1710,8 @@ class ScorpioDictManager private constructor(private val context: Context) {
             var taken = 0
             for (h in words.byToneless(tonelessKey, 6)) {
                 if (taken >= 2) break
-                if (toneMismatchCount(syls, h.reading) > 0 || !isRenderable(h.word) || !out.add(h.word)) continue
+                // 只列漢字詞（單打一個聲母時字典裡也有符號本身，例如「ㄍ」）
+                if (toneMismatchCount(syls, h.reading) > 0 || !isHanWord(h.word) || !isRenderable(h.word) || !out.add(h.word)) continue
                 taken++
                 if (out.size >= NEIGHBOR_ALT_WORDS) return out.toList()
             }
