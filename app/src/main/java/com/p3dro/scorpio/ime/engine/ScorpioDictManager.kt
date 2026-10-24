@@ -47,6 +47,9 @@ class ScorpioDictManager private constructor(private val context: Context) {
         private const val LITERAL_MARGIN = 1.5
         // 按歪了的鄰鍵候選：鄰鍵懲罰在這以下才列（按在鍵中央時鄰鍵約 0.65～1.3（上下的鄰鍵比較便宜，個人習慣也會讓某個方向便宜一點），偏向某鄰鍵三、四成鍵寬就會低於這個）、最多幾個詞
         private const val NEIGHBOR_ALT_MAX = 0.6
+        // 注音組合依懲罰排不進前幾名、但拼得成詞的另外留幾個：懲罰上限（約兩個鄰鍵／慣性打錯）、最多幾個
+        private const val WORD_KEEP_MAX_PENALTY = 2.0
+        private const val WORD_KEEP_EXTRA = 8
         private const val NEIGHBOR_ALT_WORDS = 4
         private const val PREF_USER_DICT_CANONICAL = "user_dict_canonical_v1"
         private const val PREF_SPATIAL_BIAS = "spatial_bias_v1"
@@ -2166,8 +2169,12 @@ class ScorpioDictManager private constructor(private val context: Context) {
      */
     private val SPAN_BY_PENALTY = Comparator<SpanCombo> { a, b -> a.penalty.compareTo(b.penalty) }
 
-    private class SpanCombo(private val parent: SpanCombo?, private val text: String, val penalty: Double, val corr: Double) {
+    private class SpanCombo(val parent: SpanCombo?, private val text: String, val penalty: Double, val corr: Double) {
         private var keyCache: String? = null
+        /** 讀音是字典裡的詞或詞的開頭（null＝還沒查） */
+        var wordish: Boolean? = null
+        /** 依懲罰排不進前幾名、因為拼得成詞才另外留下來的 */
+        var extra = false
 
         fun key(): String {
             keyCache?.let { return it }
@@ -2198,6 +2205,17 @@ class ScorpioDictManager private constructor(private val context: Context) {
         maxLen: Int,
         n: Int
     ): Array<List<SpanCombo>> {
+        // 依懲罰只留前 width 個時，改兩個以上注音才拼得出的詞（ㄘㄣ-ㄋㄜ 要改成 ㄕㄣ-ㄇㄜ 才是「什麼」）會排在一堆不成詞的組合後面、
+        // 還沒查字典就被丟掉：被丟掉的裡面，懲罰不太大、而且還拼得成字典裡的詞（或詞的開頭）的另外留下來。
+        // 另外留的只拿來湊三個音節以上的詞（兩個音節改兩個鍵證據太弱：ㄖㄣㄇ 會冒出「什麼」、ㄔㄣㄐ 冒出「真假」）
+        fun isExtra(c: SpanCombo): Boolean = c.extra || (c.parent?.let { isExtra(it) } ?: false)
+        fun wordish(c: SpanCombo): Boolean {
+            c.wordish?.let { return it }
+            val p = c.parent
+            val v = (p == null || wordish(p)) && words.isWordOrPrefix(c.key())
+            c.wordish = v
+            return v
+        }
         fun extend(beam: List<SpanCombo>?, pos: Int, width: Int): List<SpanCombo> {
             val list = variants[pos]
             val corrMap = corrective[pos]
@@ -2209,7 +2227,21 @@ class ScorpioDictManager private constructor(private val context: Context) {
             }
             // 穩定排序、同 sortBy { it.penalty }，但比較時不把 Double 包成物件
             next.sortWith(SPAN_BY_PENALTY)
-            return if (next.size > width) next.subList(0, width) else next
+            if (next.size <= width) return next
+            val kept = ArrayList(next.subList(0, width))
+            if (beam != null) {
+                var extra = 0
+                for (k in width until next.size) {
+                    val c = next[k]
+                    if (c.penalty > WORD_KEEP_MAX_PENALTY) break
+                    if (wordish(c)) {
+                        c.extra = true
+                        kept.add(c)
+                        if (++extra >= WORD_KEEP_EXTRA) break
+                    }
+                }
+            }
+            return kept
         }
         val out = arrayOfNulls<List<SpanCombo>>(maxLen + 1)
         var beam: List<SpanCombo>? = null
@@ -2217,6 +2249,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
             beam = extend(beam, i + len - 1, 18)
             when {
                 len == 1 -> out[1] = if (beam.size > 10) beam.subList(0, 10) else beam
+                len == 2 -> out[2] = beam.filter { !isExtra(it) }
                 len != n -> out[len] = beam
             }
         }
@@ -2224,7 +2257,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
         if (maxLen == n && n >= 2) {
             var wide: List<SpanCombo>? = null
             for (len in 1..n) wide = extend(wide, i + len - 1, 32)
-            out[n] = wide
+            out[n] = if (n == 2) wide!!.filter { !isExtra(it) } else wide
         }
         @Suppress("UNCHECKED_CAST")
         return out as Array<List<SpanCombo>>

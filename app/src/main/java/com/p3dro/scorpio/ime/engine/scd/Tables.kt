@@ -220,6 +220,18 @@ class WordStore(val tables: List<WordTable>) {
         return false
     }
 
+    private val wordPrefixCache = object : LinkedHashMap<String, Boolean>(256, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Boolean>) = size > 4096
+    }
+
+    /** 字典裡有這個讀音（無聲調、以 - 串起來）的詞，或有以它開頭的更長的詞（ㄕㄣ-ㄇㄜ-ㄉㄨㄥ → 什麼東西） */
+    fun isWordOrPrefix(toneless: String): Boolean {
+        synchronized(wordPrefixCache) { wordPrefixCache[toneless]?.let { return it } }
+        val v = tables.any { it.tlIx.find(toneless) >= 0 || !it.tlIx.prefixKeys("$toneless-").isEmpty() }
+        synchronized(wordPrefixCache) { wordPrefixCache[toneless] = v }
+        return v
+    }
+
     /** SELECT 1 FROM dict WHERE word = ? */
     fun hasWord(word: String) = tables.any { it.wdIx.find(word) >= 0 }
 
