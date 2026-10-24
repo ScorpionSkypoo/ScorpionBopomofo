@@ -192,6 +192,8 @@ class ScorpioImeService : InputMethodService() {
         prefs = getSharedPreferences("scorpio_ime_prefs", Context.MODE_PRIVATE)
         // 詞庫線上更新：每天在 Wi-Fi 下檢查一次（WorkManager 會自己去重）
         com.p3dro.scorpio.ime.engine.PackUpdater.schedule(this)
+        // App 更新：每天在背景問一次 GitHub 有沒有新版（設定可關）
+        com.p3dro.scorpio.ime.engine.AppUpdater.schedule(this)
         isVibrationEnabled = prefs.getBoolean("vibrate_on_keypress", false)
         ui = buildThemedContext()
     }
@@ -473,6 +475,7 @@ class ScorpioImeService : InputMethodService() {
             }
         )
         toolsExpanded = false
+        resumePendingUpdate()
         keyboardRootView?.let { refreshToolbar(it) }
         refreshRecentBar()
         updateBarVisibility()
@@ -482,6 +485,9 @@ class ScorpioImeService : InputMethodService() {
         super.onFinishInputView(finishingInput)
         finishEnglishWord(learn = false)
         keyPreview?.hideAll()
+        // 工具列直接露出過有紅點的「更新」：鍵盤收起就算看過了
+        updateDotShownTag?.let { com.p3dro.scorpio.ime.engine.AppUpdater.markSeen(this, it) }
+        updateDotShownTag = null
         // 離開這個輸入框：上一個輸入框的自動填入建議不能留著（新的輸入框會再送一次）
         showInlineSuggestions(emptyList())
     }
@@ -2580,6 +2586,155 @@ class ScorpioImeService : InputMethodService() {
         }
     }
 
+    // ---------- App 更新 ----------
+
+    private enum class UpdateStage { OFFER, DOWNLOADING, MESSAGE }
+
+    /** 工具列上的更新列：null 是沒在更新（照常顯示工具） */
+    private var updateStage: UpdateStage? = null
+    private var updateMessage = ""
+    private var updateProgress = -1
+    private var updateJob: Job? = null
+    private var updateStripView: View? = null
+    private var updateStripText: TextView? = null
+    private var updateStripBar: android.widget.ProgressBar? = null
+    /** 這次鍵盤顯示期間亮過紅點的版本（鍵盤收起時記成看過；這段期間紅點留著） */
+    private var updateDotShownTag: String? = null
+
+    private fun closeUpdateStrip() {
+        updateStage = null
+        arrangeIdleBar()
+    }
+
+    private fun showUpdateMessage(text: String) {
+        updateStage = UpdateStage.MESSAGE
+        updateMessage = text
+        arrangeIdleBar()
+    }
+
+    /** 更新列：說明文字（下載中加一條進度）＋右邊的按鈕 */
+    private fun buildUpdateStrip(): View {
+        val strip = LinearLayout(ui).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dpToPx(8), 0, 0, 0)
+        }
+        val col = LinearLayout(ui).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val text = TextView(ui).apply {
+            textSize = 13f
+            setTextColor(ui.getColor(R.color.ime_text_primary))
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        }
+        col.addView(text)
+        strip.addView(col, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        fun action(label: String, onClick: () -> Unit) = strip.addView(TextView(ui).apply {
+            this.text = label
+            textSize = 14f
+            gravity = Gravity.CENTER
+            setTextColor(ui.getColor(R.color.ime_text_primary))
+            setPadding(dpToPx(14), 0, dpToPx(14), 0)
+            background = keyDrawable(R.attr.imeItemBackgroundBorderless)
+            setOnClickListener {
+                triggerHaptic(it)
+                onClick()
+            }
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        updateStripText = text
+        updateStripBar = null
+        when (updateStage) {
+            UpdateStage.OFFER -> {
+                val tag = com.p3dro.scorpio.ime.engine.AppUpdater.keyboardOffer(this) ?: ""
+                val size = com.p3dro.scorpio.ime.engine.AppUpdater.cachedSize(this)
+                text.text = "新版本 $tag" + if (size > 0) "（${"%.0f".format(size / 1048576.0)} MB）" else ""
+                action("稍後") { closeUpdateStrip() }
+                action("下載更新") { startAppUpdate() }
+            }
+            UpdateStage.DOWNLOADING -> {
+                text.text = if (updateProgress < 0) "準備下載…" else "下載中… $updateProgress%"
+                updateStripBar = android.widget.ProgressBar(ui, null, android.R.attr.progressBarStyleHorizontal).apply {
+                    max = 100
+                    isIndeterminate = updateProgress < 0
+                    progress = updateProgress.coerceAtLeast(0)
+                }
+                col.addView(updateStripBar, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dpToPx(4)).apply { topMargin = dpToPx(4) })
+                action("取消") {
+                    updateJob?.cancel()
+                    updateJob = null
+                    closeUpdateStrip()
+                }
+            }
+            else -> {
+                text.text = updateMessage
+                action("好") { closeUpdateStrip() }
+            }
+        }
+        return strip
+    }
+
+    /** 下載進度：只改文字和進度條，不重排整條 */
+    private fun showUpdateProgress(p: Int) {
+        updateProgress = p
+        if (updateStage != UpdateStage.DOWNLOADING) return
+        updateStripText?.text = "下載中… $p%"
+        updateStripBar?.let {
+            it.isIndeterminate = false
+            it.progress = p
+        }
+    }
+
+    /** 按「下載更新」：先問一次最新版（拿下載網址），下載完交給系統安裝；系統安裝畫面出來時鍵盤會收起 */
+    private fun startAppUpdate() {
+        val U = com.p3dro.scorpio.ime.engine.AppUpdater
+        updateStage = UpdateStage.DOWNLOADING
+        updateProgress = -1
+        arrangeIdleBar()
+        updateJob?.cancel()
+        updateJob = serviceScope.launch {
+            val c = U.check(this@ScorpioImeService)
+            val release = (c as? com.p3dro.scorpio.ime.engine.AppUpdater.Check.Available)?.release
+            if (release?.apkUrl == null) {
+                showUpdateMessage(if (c is com.p3dro.scorpio.ime.engine.AppUpdater.Check.Failed) c.reason else "已經是最新版")
+                return@launch
+            }
+            val apk = U.download(this@ScorpioImeService, release) { p ->
+                if (p >= 0) serviceScope.launch { showUpdateProgress(p) }
+            }
+            updateJob = null
+            if (apk == null) {
+                showUpdateMessage("下載失敗，請稍後再試")
+                return@launch
+            }
+            installAppUpdate(apk, release.tag)
+        }
+    }
+
+    private fun installAppUpdate(apk: java.io.File, tag: String?) {
+        val U = com.p3dro.scorpio.ime.engine.AppUpdater
+        when (U.install(this, apk)) {
+            com.p3dro.scorpio.ime.engine.AppUpdater.Install.STARTED -> closeUpdateStrip()
+            com.p3dro.scorpio.ime.engine.AppUpdater.Install.NEED_PERMISSION -> showUpdateMessage("允許安裝後回來，點輸入框就會接著安裝")
+            com.p3dro.scorpio.ime.engine.AppUpdater.Install.NOT_NEWER -> {
+                tag?.let { U.markNotNewer(this, it) }
+                showUpdateMessage("手機上的版本比較新，不用更新")
+            }
+            com.p3dro.scorpio.ime.engine.AppUpdater.Install.BROKEN -> showUpdateMessage("下載的檔案有問題，請再試一次")
+        }
+    }
+
+    /** 去開「安裝未知應用程式」回來：權限開了就接著裝剛剛下載好的版本 */
+    private fun resumePendingUpdate() {
+        if (updateStage != UpdateStage.DOWNLOADING) updateStage = null
+        val U = com.p3dro.scorpio.ime.engine.AppUpdater
+        val apk = U.pendingApk(this) ?: return
+        if (!U.canInstall(this)) return
+        U.clearPending(this)
+        installAppUpdate(apk, null)
+    }
+
     // ---------- 擴充功能（外掛） ----------
 
     private var openPluginId: String? = null
@@ -2603,6 +2758,18 @@ class ScorpioImeService : InputMethodService() {
         val scrollTools = root.findViewById<View>(R.id.scroll_tools) ?: return
         val box = root.findViewById<LinearLayout>(R.id.layout_tools) ?: return
         val divider = root.findViewById<View>(R.id.tool_divider)
+        // 按了「更新」：整條換成更新列（版本、下載進度、按鈕）
+        val idleBar = layoutIdleBar as? LinearLayout
+        updateStripView?.let { idleBar?.removeView(it) }
+        updateStripView = null
+        if (updateStage != null && idleBar != null) {
+            for (v in listOf(scrollTools, divider, scrollRecent)) v?.visibility = View.GONE
+            updateStripView = buildUpdateStrip().also {
+                idleBar.addView(it, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f))
+            }
+            scrollInlineSuggestions?.visibility = View.GONE
+            return
+        }
         if (inlineSuggestionViews.isNotEmpty()) {
             for (v in listOf(scrollTools, divider, scrollRecent)) v?.visibility = View.GONE
             scrollInlineSuggestions?.visibility = View.VISIBLE
@@ -2615,6 +2782,9 @@ class ScorpioImeService : InputMethodService() {
         val recentOn = prefs.getBoolean(PREF_RECENT_BAR, false)
         val canFold = recentOn && all.size > MAX_TOOLS_WITH_RECENT
         val compact = canFold && !toolsExpanded
+        // 有新版：「更新」放在工具最前面（收合時只在「⋯」上亮紅點，展開才看得到）；紅點每一版只亮到看過為止
+        val offer = com.p3dro.scorpio.ime.engine.AppUpdater.keyboardOffer(this)
+        val unseen = offer != null && !com.p3dro.scorpio.ime.engine.AppUpdater.seen(this, offer)
         box.removeAllViews()
         // 最多 MAX_SLOTS 格：展開時「收合」也算一格
         val shown = when {
@@ -2622,9 +2792,20 @@ class ScorpioImeService : InputMethodService() {
             canFold -> all.take(com.p3dro.scorpio.ime.engine.Toolbar.MAX_SLOTS - 1)
             else -> all.take(com.p3dro.scorpio.ime.engine.Toolbar.MAX_SLOTS)
         }
+        if (offer != null && !compact) {
+            val dot = unseen || updateDotShownTag == offer
+            if (dot) updateDotShownTag = offer
+            box.addView(barButton(R.drawable.ic_ime_update, "更新到 $offer", dot) {
+                com.p3dro.scorpio.ime.engine.AppUpdater.markSeen(this, offer)
+                updateDotShownTag = null
+                updateStage = UpdateStage.OFFER
+                arrangeIdleBar()
+            }, toolButtonParams())
+        }
         for (t in shown) box.addView(toolButton(root, t), toolButtonParams())
         if (canFold) {
-            box.addView(barButton(if (compact) R.drawable.ic_ime_more else R.drawable.ic_ime_chevron_left, if (compact) "更多工具" else "收合工具") {
+            box.addView(barButton(if (compact) R.drawable.ic_ime_more else R.drawable.ic_ime_chevron_left, if (compact) "更多工具" else "收合工具",
+                compact && unseen && updateDotShownTag != offer) {
                 toolsExpanded = !toolsExpanded
                 arrangeIdleBar()
             }, toolButtonParams())
@@ -2640,10 +2821,20 @@ class ScorpioImeService : InputMethodService() {
 
     private fun toolButtonParams() = LinearLayout.LayoutParams(dpToPx(40), dpToPx(36)).apply { marginEnd = dpToPx(4) }
 
-    private fun barButton(icon: Int, description: String, onClick: (View) -> Unit) = FrameLayout(ui).apply {
+    private fun barButton(icon: Int, description: String, dot: Boolean = false, onClick: (View) -> Unit) = FrameLayout(ui).apply {
         contentDescription = description
         background = keyDrawable(R.attr.imeItemBackgroundBorderless)
         addView(ImageView(ui).apply { setImageResource(icon) }, FrameLayout.LayoutParams(dpToPx(22), dpToPx(22), Gravity.CENTER))
+        // 紅點：有新版還沒看過
+        if (dot) addView(View(ui).apply {
+            background = android.graphics.drawable.GradientDrawable().apply {
+                shape = android.graphics.drawable.GradientDrawable.OVAL
+                setColor(0xFFE53935.toInt())
+            }
+        }, FrameLayout.LayoutParams(dpToPx(7), dpToPx(7), Gravity.TOP or Gravity.END).apply {
+            topMargin = dpToPx(5)
+            marginEnd = dpToPx(6)
+        })
         setOnClickListener {
             triggerHaptic(it)
             onClick(it)

@@ -692,7 +692,8 @@ class SettingsActivity : AppCompatActivity() {
             val u = card()
             navRow(u, R.drawable.ic_set_info, "有新版本 $tag", "點這裡下載更新") { open(Page.ABOUT) }
         }
-        if (System.currentTimeMillis() - com.p3dro.scorpio.ime.engine.AppUpdater.lastCheck(this) > 24 * 3600_000L) {
+        if (com.p3dro.scorpio.ime.engine.AppUpdater.autoCheck(this) &&
+            System.currentTimeMillis() - com.p3dro.scorpio.ime.engine.AppUpdater.lastCheck(this) > 24 * 3600_000L) {
             lifecycleScope.launch {
                 if (com.p3dro.scorpio.ime.engine.AppUpdater.check(this@SettingsActivity) is com.p3dro.scorpio.ime.engine.AppUpdater.Check.Available &&
                     stack.lastOrNull() == Page.HOME) render()
@@ -1660,6 +1661,11 @@ class SettingsActivity : AppCompatActivity() {
             }
         }
         appUpdateRow(a)
+        switchRow(a, "自動檢查更新", "每天檢查一次，有新版時鍵盤工具列的「⋯」會出現紅點（看過就消失），展開工具列按「更新」就能下載安裝",
+            com.p3dro.scorpio.ime.engine.AppUpdater.autoCheck(this)) {
+            prefs.edit().putBoolean(com.p3dro.scorpio.ime.engine.AppUpdater.PREF_AUTO, it).apply()
+            com.p3dro.scorpio.ime.engine.AppUpdater.schedule(this)
+        }
         link("原始碼", "https://github.com/ScorpionSkypoo/ScorpionBopomofo")
         link("詞庫與擴充功能", "https://github.com/ScorpionSkypoo/scorpio-ime-data")
         sectionTitle("資料來源")

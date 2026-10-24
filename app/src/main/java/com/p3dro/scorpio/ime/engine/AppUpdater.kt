@@ -6,13 +6,22 @@ import android.net.Uri
 import android.os.Build
 import android.provider.Settings
 import androidx.core.content.FileProvider
+import androidx.work.Constraints
+import androidx.work.CoroutineWorker
+import androidx.work.ExistingPeriodicWorkPolicy
+import androidx.work.NetworkType
+import androidx.work.PeriodicWorkRequestBuilder
+import androidx.work.WorkManager
+import androidx.work.WorkerParameters
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.concurrent.TimeUnit
 
 /**
  * 檢查 App 更新：讀 GitHub Releases 最新一版（tag v1.2.0、附 APK），比手機上的新就下載、交給系統安裝
@@ -23,6 +32,9 @@ object AppUpdater {
     private const val API = "https://api.github.com/repos/ScorpionSkypoo/ScorpionBopomofo/releases/latest"
     const val RELEASES_PAGE = "https://github.com/ScorpionSkypoo/ScorpionBopomofo/releases"
     private const val PREFS = "scorpio_app_update"
+    private const val WORK_NAME = "app_update_check"
+    /** 設定裡的「自動檢查更新」，存在輸入法的設定檔 */
+    const val PREF_AUTO = "app_update_auto"
 
     data class Release(val tag: String, val notes: String, val apkUrl: String?, val apkSize: Long, val page: String)
 
@@ -67,6 +79,47 @@ object AppUpdater {
     fun markNotNewer(context: Context, tag: String) =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString("skip", tag).remove("newer").apply()
 
+    fun autoCheck(context: Context) =
+        context.getSharedPreferences("scorpio_ime_prefs", Context.MODE_PRIVATE).getBoolean(PREF_AUTO, true)
+
+    /**
+     * 鍵盤工具列要不要放「更新」按鈕：開著自動檢查、背景查到新版才放。
+     * 只有正式版會提示：版本名稱帶 -N-gxxxx 的是自己建置的版本，版本號（versionCode）常比正式版大，裝不上去
+     */
+    fun keyboardOffer(context: Context): String? {
+        if (!autoCheck(context) || installedVersion(context).contains('-')) return null
+        return cachedNewer(context)
+    }
+
+    /** 查到的新版本 APK 大小（位元組），不知道是 -1 */
+    fun cachedSize(context: Context) = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getLong("newer_size", -1)
+
+    /** 這一版的紅點看過了沒（展開過工具列、按過「稍後」都算看過，下一版才會再亮） */
+    fun seen(context: Context, tag: String) = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString("seen", null) == tag
+
+    fun markSeen(context: Context, tag: String) =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString("seen", tag).apply()
+
+    /** 背景每天檢查一次（有網路就好，只問 GitHub 最新一版，不下載）；設定關掉就取消 */
+    fun schedule(context: Context) {
+        val wm = WorkManager.getInstance(context.applicationContext)
+        if (!autoCheck(context)) {
+            wm.cancelUniqueWork(WORK_NAME)
+            return
+        }
+        val req = PeriodicWorkRequestBuilder<Worker>(1, TimeUnit.DAYS)
+            .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
+            .build()
+        wm.enqueueUniquePeriodicWork(WORK_NAME, ExistingPeriodicWorkPolicy.KEEP, req)
+    }
+
+    class Worker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
+        override suspend fun doWork(): androidx.work.ListenableWorker.Result {
+            if (autoCheck(applicationContext)) check(applicationContext)
+            return androidx.work.ListenableWorker.Result.success()
+        }
+    }
+
     fun lastCheck(context: Context) = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getLong("last", 0)
 
     suspend fun check(context: Context): Check = withContext(Dispatchers.IO) {
@@ -93,7 +146,7 @@ object AppUpdater {
                 apk?.optLong("size", -1) ?: -1, o.optString("html_url", RELEASES_PAGE)
             )
             if (isNewer(r.tag, installedVersion(context)) && r.tag != prefs.getString("skip", null)) {
-                prefs.edit().putString("newer", r.tag).apply()
+                prefs.edit().putString("newer", r.tag).putLong("newer_size", r.apkSize).apply()
                 Check.Available(r)
             } else {
                 prefs.edit().remove("newer").apply()
@@ -133,6 +186,7 @@ object AppUpdater {
                     while (true) {
                         val n = input.read(buf)
                         if (n < 0) break
+                        ensureActive()
                         output.write(buf, 0, n)
                         done += n
                         val p = if (total > 0) (done * 100 / total).toInt().coerceAtMost(100) else -1
@@ -147,6 +201,7 @@ object AppUpdater {
             } else out
         } catch (e: Exception) {
             part.delete()
+            if (e is kotlinx.coroutines.CancellationException) throw e
             null
         }
     }
