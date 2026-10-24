@@ -81,6 +81,8 @@ class ScorpioImeService : InputMethodService() {
     private var panelHandwriting: LinearLayout? = null
     private var panelNumpad: View? = null
     private var fieldKind = FieldKind.TEXT
+    // 數字鍵盤是使用者從符號頁的「1234」打開的（不是輸入框要的）：多一排運算符號，可以返回、切到符號頁
+    private var numpadFromUser = false
     private var handwritingView: com.p3dro.scorpio.ime.ui.HandwritingView? = null
     private val handwriting by lazy { com.p3dro.scorpio.ime.engine.HandwritingRecognizer() }
     private var handwritingJob: Job? = null
@@ -480,6 +482,7 @@ class ScorpioImeService : InputMethodService() {
         finishEnglishWord(learn = false)
         // 依輸入框類型開對的鍵盤：數字、電話、日期時間開數字鍵盤；密碼、Email、網址開英文鍵盤；其他照常開中文
         fieldKind = fieldKindOf(info)
+        numpadFromUser = false
         setKeyboardMode(
             when (fieldKind) {
                 FieldKind.NUMBER, FieldKind.PHONE, FieldKind.DATETIME -> KeyboardMode.NUMPAD
@@ -690,7 +693,10 @@ class ScorpioImeService : InputMethodService() {
     }
 
     private fun setKeyboardMode(mode: KeyboardMode) {
-        if (currentMode != KeyboardMode.SYMBOLS && currentMode != KeyboardMode.EXPANDED && currentMode != KeyboardMode.HANDWRITING) {
+        // 從符號頁打開的數字鍵盤也不算「原本的鍵盤」：返回時回到注音／英文
+        if (currentMode != KeyboardMode.SYMBOLS && currentMode != KeyboardMode.EXPANDED && currentMode != KeyboardMode.HANDWRITING &&
+            !(currentMode == KeyboardMode.NUMPAD && numpadFromUser)
+        ) {
             previousMode = currentMode
         }
         currentMode = mode
@@ -1495,6 +1501,10 @@ class ScorpioImeService : InputMethodService() {
      *   日期時間：右邊 / : ⌫ ↵，下排 - 0 空白
      */
     private fun buildNumpad() {
+        if (numpadFromUser) {
+            buildUserNumpad()
+            return
+        }
         val pad = panelNumpad as? com.p3dro.scorpio.ime.ui.SpatialKeyLayout ?: return
         pad.removeAllViews()
         pad.clearKeys()
@@ -1569,6 +1579,102 @@ class ScorpioImeService : InputMethodService() {
                 }
             }
             pad.addView(row)
+        }
+    }
+
+    /**
+     * 從符號頁「1234」打開的數字鍵盤（比照 Gboard）：左邊一排 + - *，中間 3×3 數字，右邊 % 空白 ⌫；
+     * 最下排 返回、逗號、!?#（回符號頁）、0、/、句點、Enter。欄寬 1 : 1.4 : 1.4 : 1.4 : 1，0 對齊 5
+     */
+    private fun buildUserNumpad() {
+        val pad = panelNumpad as? com.p3dro.scorpio.ime.ui.SpatialKeyLayout ?: return
+        pad.removeAllViews()
+        pad.clearKeys()
+        pad.onKeyHapticListener = { triggerHaptic(it) }
+        pad.keyPreview = keyPreview
+        pad.onKeyTapListener = { char, _, _ -> currentInputConnection?.commitText(char.toString(), 1) }
+        val referenceHeight = sourcePanelHeight()
+        val panelHeight = if (referenceHeight > 0) referenceHeight else (5 * keyRowHeightPx() + dpToPx(4 * 4 + 4 + 6))
+        pad.layoutParams = pad.layoutParams.apply { height = panelHeight }
+        val gap = dpToPx(4)
+        val bottomHeight = keyRowHeightPx()
+        val upper = panelHeight - pad.paddingTop - pad.paddingBottom - bottomHeight - 3 * gap
+        val chinese = previousMode != KeyboardMode.ENGLISH
+
+        fun row(index: Int, h: Int) = LinearLayout(ui).apply {
+            orientation = LinearLayout.HORIZONTAL
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, h).apply { if (index > 0) topMargin = gap }
+            pad.addView(this)
+        }
+        fun key(parent: LinearLayout, weight: Float, bgAttr: Int, ch: Char?) = FrameLayout(ui).apply {
+            background = keyDrawable(bgAttr)
+            isClickable = true
+            isFocusable = true
+            parent.addView(this, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, weight).apply {
+                setMargins(dpToPx(2.5f), 0, dpToPx(2.5f), 0)
+            })
+            pad.registerKey(this, ch)
+        }
+        fun text(t: String, size: Float, color: Int = R.color.ime_text_primary) = com.p3dro.scorpio.ime.ui.KeyLabelView(ui).apply {
+            this.text = t
+            textSize = size
+            setTextColor(ui.getColor(color))
+            layoutParams = FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER)
+        }
+        fun charKey(parent: LinearLayout, s: String, weight: Float, function: Boolean) =
+            key(parent, weight, if (function) R.attr.imeKeyFunctionDrawable else R.attr.imeKeyDrawable, s[0]).apply {
+                if (s == " ") addView(text("空白", 13f, R.color.ime_text_secondary)) else addView(text(s, if (s[0].isDigit()) 26f else 20f))
+            }
+        fun iconKey(parent: LinearLayout, weight: Float, bgAttr: Int, icon: Int, tint: Boolean) = key(parent, weight, bgAttr, null).apply {
+            addView(ImageView(ui).apply {
+                setImageDrawable(ui.getDrawable(icon))
+                if (tint) setColorFilter(ui.getColor(R.color.ime_text_primary))
+                layoutParams = FrameLayout.LayoutParams(dpToPx(22), dpToPx(22), Gravity.CENTER)
+            })
+        }
+
+        val ops = listOf("+", "-", "*")
+        val digits = listOf(listOf("1", "2", "3"), listOf("4", "5", "6"), listOf("7", "8", "9"))
+        val rightCol = listOf("%", " ")
+        for (r in 0 until 3) {
+            val h = if (r < 2) upper / 3 else upper - 2 * (upper / 3)
+            val line = row(r, h)
+            charKey(line, ops[r], 1f, function = true)
+            for (d in digits[r]) charKey(line, d, 1.4f, function = false)
+            if (r < 2) charKey(line, rightCol[r], 1f, function = true)
+            else iconKey(line, 1f, R.attr.imeKeyFunctionDrawable, R.drawable.ic_ime_backspace, tint = true).apply {
+                setOnTouchListener(com.p3dro.scorpio.ime.ui.RepeatTouchListener {
+                    triggerHaptic(pad)
+                    handleBackspace()
+                })
+            }
+        }
+        val bottom = row(3, bottomHeight)
+        key(bottom, 1f, R.attr.imeKeyFunctionDrawable, null).apply {
+            addView(text(if (chinese) "返回" else "ABC", 14f))
+            setOnClickListener {
+                triggerHaptic(it)
+                numpadFromUser = false
+                setKeyboardMode(previousMode)
+            }
+        }
+        charKey(bottom, ",", 0.7f, function = false)
+        key(bottom, 0.7f, R.attr.imeKeyFunctionDrawable, null).apply {
+            addView(text("!?#", 13f))
+            setOnClickListener {
+                triggerHaptic(it)
+                setKeyboardMode(KeyboardMode.SYMBOLS)
+                numpadFromUser = false
+            }
+        }
+        charKey(bottom, "0", 1.4f, function = false)
+        charKey(bottom, "/", 0.7f, function = false)
+        charKey(bottom, ".", 0.7f, function = false)
+        iconKey(bottom, 1f, R.attr.imeKeyActionDrawable, R.drawable.ic_ime_enter, tint = false).apply {
+            setOnClickListener {
+                triggerHaptic(it)
+                handleEnterPress()
+            }
         }
     }
 
@@ -2783,24 +2889,23 @@ class ScorpioImeService : InputMethodService() {
         val rows: List<List<String>>
         val row3: List<String>
         if (symbolsPage == 0) {
-            rows = if (chinese) listOf(
-                listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "0"),
-                listOf("@", "#", "$", "_", "&", "-", "+", "（", "）", "/")
-            ) else listOf(
+            // 比照 Gboard：第 1 頁數字、常用符號、標點（中文是全形標點）
+            rows = listOf(
                 listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "0"),
                 listOf("@", "#", "$", "_", "&", "-", "+", "(", ")", "/")
             )
-            row3 = if (chinese) listOf("＊", "「", "」", "：", "；", "！", "？")
+            row3 = if (chinese) listOf("、", "“", "”", "：", "；", "！", "？")
             else listOf("*", "\"", "'", ":", ";", "!", "?")
         } else {
+            // 第 2 頁：數學、貨幣、括號（中文多了「」與 §）
             rows = if (chinese) listOf(
-                listOf("、", "『", "』", "《", "》", "…", "—", "～", "·", "※"),
-                listOf("~", "`", "|", "•", "÷", "×", "=", "{", "}", "\\")
+                listOf("~", "`", "|", "•", "√", "π", "÷", "×", "*", "§"),
+                listOf("£", "¢", "€", "¥", "^", "°", "=", "「", "」", "\\")
             ) else listOf(
                 listOf("~", "`", "|", "•", "√", "π", "÷", "×", "¶", "∆"),
                 listOf("£", "¢", "€", "¥", "^", "°", "=", "{", "}", "\\")
             )
-            row3 = if (chinese) listOf("%", "<", ">", "^", "°", "[", "]")
+            row3 = if (chinese) listOf("%", "‘", "’", "™", "✓", "[", "]")
             else listOf("%", "©", "®", "™", "✓", "[", "]")
         }
 
@@ -2883,7 +2988,7 @@ class ScorpioImeService : InputMethodService() {
             symPanel.addView(rowLayout)
         }
 
-        // 第 3 排：翻頁鍵 + 7 個符號 + 刪除鍵（同 Gboard）；從大千注音來的刪除鍵在最下排（跟注音鍵盤一樣），這格換成「、」
+        // 第 3 排：翻頁鍵 + 7 個符號 + 刪除鍵（同 Gboard）
         val thirdRow = newRow(2, 10f)
         thirdRow.addView(functionKey(1.5f, R.attr.imeKeyFunctionDrawable).apply {
             addView(label(if (symbolsPage == 0) "=\\<" else "?123", 14f))
@@ -2894,39 +2999,48 @@ class ScorpioImeService : InputMethodService() {
             }
         })
         for (sym in row3) thirdRow.addView(symbolKey(sym))
-        if (fromZhuyinPanel) thirdRow.addView(symbolKey("、", 1.5f)) else thirdRow.addView(backspaceKey(1.5f))
+        thirdRow.addView(backspaceKey(1.5f))
         symPanel.addView(thirdRow)
 
-        // 第 4 排：跟來源鍵盤的最下排同樣的鍵寬與位置（權重總和 10.4）
-        //   英文／QWERTY：返回 1.4、逗號 0.9、語言 0.9、空白 4.7、句號 1.0、Enter 1.5
-        //   大千注音：返回 1.4、逗號 0.9、語言 0.9、空白 3.3、句號 0.9（ㄦ 的位置）、刪除 1.5、Enter 1.5
+        // 第 4 排（比照 Gboard，鍵寬同英文鍵盤底排，權重總和 10.4）：
+        //   返回 1.4、逗號（第 2 頁是 <）0.9、數字鍵盤 1234 0.9、空白 4.7、句號（第 2 頁是 >）1.0、Enter 1.5
         val bottomRow = newRow(3, 10.4f)
         bottomRow.addView(functionKey(1.4f, R.attr.imeKeyFunctionDrawable).apply {
-            addView(label(if (chinese) "注音" else "ABC", 14f))
+            addView(label(if (chinese) "返回" else "ABC", 14f))
             setOnClickListener {
                 triggerHaptic(it)
                 setKeyboardMode(previousMode)
             }
         })
-        val comma = if (chinese) "，" else ","
-        bottomRow.addView(symbolKey(comma, 0.9f, size = 18f))
+        val left = if (symbolsPage == 1) "<" else if (chinese) "，" else ","
+        val right = if (symbolsPage == 1) ">" else if (chinese) "。" else "."
+        bottomRow.addView(symbolKey(left, 0.9f, size = 18f))
         bottomRow.addView(functionKey(0.9f, R.attr.imeKeyFunctionDrawable).apply {
-            addView(icon(R.drawable.ic_ime_globe))
+            // 兩行字用一般 TextView（KeyLabelView 只照第一行置中）
+            addView(TextView(ui).apply {
+                text = "12\n34"
+                textSize = 11f
+                gravity = Gravity.CENTER
+                includeFontPadding = false
+                setLineSpacing(0f, 0.9f)
+                setTextColor(ui.getColor(R.color.ime_text_primary))
+                layoutParams = FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER)
+            })
+            contentDescription = "數字鍵盤"
             setOnClickListener {
                 triggerHaptic(it)
-                currentMode = previousMode
-                switchToNextLanguage()
+                numpadFromUser = true
+                setKeyboardMode(KeyboardMode.NUMPAD)
             }
         })
-        bottomRow.addView(functionKey(if (fromZhuyinPanel) 3.3f else 4.7f, R.attr.imeKeyDrawable).apply {
-            addView(label("空白", 13f, R.color.ime_text_secondary))
+        bottomRow.addView(functionKey(4.7f, R.attr.imeKeyDrawable).apply {
+            addView(label(if (chinese) chineseMethod.spaceLabel else "空白", 13f, R.color.ime_text_secondary))
             setOnClickListener {
                 triggerHaptic(it)
                 currentInputConnection?.commitText(" ", 1)
             }
         })
-        bottomRow.addView(symbolKey(if (chinese) "。" else ".", if (fromZhuyinPanel) 0.9f else 1.0f, size = 18f))
-        if (fromZhuyinPanel) bottomRow.addView(backspaceKey(1.5f))
+        bottomRow.addView(symbolKey(right, 1.0f, size = 18f))
         bottomRow.addView(functionKey(1.5f, R.attr.imeKeyActionDrawable).apply {
             addView(icon(R.drawable.ic_ime_enter, tint = false))
             setOnClickListener {
