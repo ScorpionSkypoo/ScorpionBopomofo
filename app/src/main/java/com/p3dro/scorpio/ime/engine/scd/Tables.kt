@@ -106,18 +106,24 @@ class WordStore(val tables: List<WordTable>) {
     fun byFinals(key: String, limit: Int) = cached("f$limit\u0000$key") { exact({ it.fnIx }, key, limit, false) }
     fun byWord(word: String, limit: Int) = cached("w$limit\u0000$word") { exact({ it.wdIx }, word, limit, false) }
 
-    /** 前 limit 名（分數高到低、同分依位置）：一段資料列裡挑 */
-    private fun topOf(t: Int, w: WordTable, rows: Iterator<Int>, limit: Int, ordOf: (Int) -> Int, into: MutableList<Ref>) {
+    /**
+     * 一個詞表裡分數前 limit 名（分數高到低、同分依位置，同 refOrder）。
+     * 一筆一筆餵進來；排不進前 limit 名的不建物件（前綴、模糊音查詢一次會掃過幾千列）
+     */
+    private class TopK(private val t: Int, private val limit: Int) {
         val best = ArrayList<Ref>(limit + 1)
-        for (row in rows) {
-            val r = Ref(t, row, w.score(row), ordOf(row))
-            if (best.size == limit && refOrder.compare(r, best[limit - 1]) >= 0) continue
+
+        /** 同一個詞表裡 (score, ord) 是否排在 r 前面（refOrder 的同表版本） */
+        private fun before(score: Double, ord: Int, r: Ref) = score > r.score || (score == r.score && ord < r.ord)
+
+        fun offer(row: Int, score: Double, ord: Int) {
+            if (limit <= 0) return
+            if (best.size == limit && !before(score, ord, best[limit - 1])) return
             var i = best.size
-            while (i > 0 && refOrder.compare(r, best[i - 1]) < 0) i--
-            best.add(i, r)
+            while (i > 0 && before(score, ord, best[i - 1])) i--
+            best.add(i, Ref(t, row, score, ord))
             if (best.size > limit) best.removeAt(limit)
         }
-        into.addAll(best)
     }
 
     /** SELECT … WHERE toneless >= ? AND toneless < ? || U+FFFF ORDER BY score DESC LIMIT n */
@@ -131,7 +137,14 @@ class WordStore(val tables: List<WordTable>) {
             }
             val keys = w.tlIx.prefixKeys(prefix)
             if (keys.isEmpty()) continue
-            topOf(t, w, (w.tlIx.start(keys.first) until w.tlIx.end(keys.last)).iterator(), limit, { it }, refs)
+            val top = TopK(t, limit)
+            var row = w.tlIx.start(keys.first)
+            val end = w.tlIx.end(keys.last)
+            while (row < end) {
+                top.offer(row, w.score(row), row)
+                row++
+            }
+            refs.addAll(top.best)
         }
         decode(refs, limit)
     }
@@ -145,12 +158,18 @@ class WordStore(val tables: List<WordTable>) {
     private fun tonelessIn(distinct: Set<String>, limit: Int): List<WordHit> {
         val refs = ArrayList<Ref>()
         for ((t, w) in tables.withIndex()) {
-            val rows = ArrayList<Int>()
+            val top = TopK(t, limit)
             for (key in distinct) {
                 val k = w.tlIx.find(key)
-                if (k >= 0) for (pos in w.tlIx.start(k) until w.tlIx.end(k)) rows.add(pos)
+                if (k < 0) continue
+                var pos = w.tlIx.start(k)
+                val end = w.tlIx.end(k)
+                while (pos < end) {
+                    top.offer(pos, w.score(pos), pos)
+                    pos++
+                }
             }
-            topOf(t, w, rows.iterator(), limit, { it }, refs)
+            refs.addAll(top.best)
         }
         return decode(refs, limit)
     }
@@ -158,7 +177,9 @@ class WordStore(val tables: List<WordTable>) {
     /** SELECT … WHERE (initials = ? OR initials = ? OR …) AND toneless LIKE ? ORDER BY score DESC LIMIT n */
     fun byInitialsLike(initials: Collection<String>, pattern: String, limit: Int): List<WordHit> {
         val keys = initials.toSortedSet()
-        return cached("n$limit\u0000$pattern\u0000" + keys.joinToString("\u0001")) { initialsLike(keys, pattern, limit) }
+        return cached("n$limit\u0000$pattern\u0000" + keys.joinToString("\u0001")) {
+            com.p3dro.scorpio.ime.engine.AllocProbe.measure("n.miss") { initialsLike(keys, pattern, limit) }
+        }
     }
 
     private fun initialsLike(keys: Set<String>, pattern: String, limit: Int): List<WordHit> {
@@ -166,8 +187,8 @@ class WordStore(val tables: List<WordTable>) {
         val like = Like(pattern)
         for ((t, w) in tables.withIndex()) {
             val best = ArrayList<Ref>()
-            // 同一個無聲調讀音在這次查詢只比對一次（直接比對檔案裡的字元，不產生字串）
-            val memo = HashMap<Int, Boolean>()
+            // 同一個無聲調讀音在這次查詢只比對一次（直接比對檔案裡的字元，不產生字串；記錄表同一條執行緒重複使用）
+            val memo = IntBoolMemo.local()
             for (key in keys) {
                 val k = w.inIx.find(key)
                 if (k < 0) continue
@@ -175,7 +196,9 @@ class WordStore(val tables: List<WordTable>) {
                 for (pos in w.inIx.start(k) until w.inIx.end(k)) {
                     val row = w.inIx.row(pos)
                     val sid = w.tonelessSid(row)
-                    if (!memo.getOrPut(sid) { like.matches(w.f.chars(sid)) }) continue
+                    val seen = memo.get(sid)
+                    val ok = if (seen != IntBoolMemo.UNKNOWN) seen == IntBoolMemo.YES else like.matches(w.f, sid).also { memo.put(sid, it) }
+                    if (!ok) continue
                     best.add(Ref(t, row, w.score(row), pos))
                     if (++taken >= limit) break
                 }
@@ -232,6 +255,80 @@ class WordStore(val tables: List<WordTable>) {
 }
 
 /**
+ * int → 是／否 的小型雜湊表（開放定址），取代 HashMap<Int, Boolean>：查詢時不把整數包成物件。
+ * local() 取這條執行緒重複使用的那一個並清空（只換代號，不必把陣列清零）
+ */
+internal class IntBoolMemo {
+    companion object {
+        const val UNKNOWN = 0
+        const val YES = 1
+        const val NO = 2
+
+        // 比這大的表用完就丟，不讓少數幾次特別大的查詢一直佔著記憶體
+        private const val KEEP_CAPACITY = 1 shl 14
+        private val perThread = ThreadLocal<IntBoolMemo>()
+
+        fun local(): IntBoolMemo {
+            val m = perThread.get()?.takeIf { it.keys.size <= KEEP_CAPACITY } ?: IntBoolMemo().also { perThread.set(it) }
+            m.clear()
+            return m
+        }
+    }
+
+    private var keys = IntArray(64)
+    private var vals = ByteArray(64)
+    private var gens = IntArray(64)
+    private var gen = 1
+    private var size = 0
+
+    fun clear() {
+        size = 0
+        if (++gen == 0) {
+            // 代號繞回一圈：真的清一次
+            gens.fill(0)
+            gen = 1
+        }
+    }
+
+    private fun slot(key: Int, cap: Int): Int {
+        var i = (key * -0x61c88647) ushr (32 - Integer.numberOfTrailingZeros(cap))
+        while (gens[i] == gen && keys[i] != key) i = (i + 1) and (cap - 1)
+        return i
+    }
+
+    fun get(key: Int): Int {
+        val i = slot(key, keys.size)
+        return if (gens[i] == gen) vals[i].toInt() else UNKNOWN
+    }
+
+    fun put(key: Int, value: Boolean) {
+        if ((size + 1) * 2 > keys.size) grow()
+        val i = slot(key, keys.size)
+        if (gens[i] != gen) size++
+        keys[i] = key
+        vals[i] = (if (value) YES else NO).toByte()
+        gens[i] = gen
+    }
+
+    private fun grow() {
+        val oldK = keys
+        val oldV = vals
+        val oldG = gens
+        val live = gen
+        keys = IntArray(oldK.size * 2)
+        vals = ByteArray(oldV.size * 2)
+        gens = IntArray(oldG.size * 2)
+        for (j in oldK.indices) {
+            if (oldG[j] != live) continue
+            val i = slot(oldK[j], keys.size)
+            keys[i] = oldK[j]
+            vals[i] = oldV[j]
+            gens[i] = live
+        }
+    }
+}
+
+/**
  * SQLite LIKE：% 任意長度、_ 一個字（code point），ASCII 字母不分大小寫，沒有跳脫字元
  */
 class Like(pattern: String) {
@@ -242,13 +339,22 @@ class Like(pattern: String) {
 
     fun matches(s: CharSequence): Boolean {
         val q = fast ?: return matchesCodePoints(s.toString())
+        return matchFast(q, s.length) { s[it] }
+    }
+
+    /** 直接比對 SCD 檔裡的字串（不產生 String 或包裝物件） */
+    fun matches(f: ScdFile, sid: Int): Boolean {
+        val q = fast ?: return matchesCodePoints(f.str(sid))
+        return matchFast(q, f.strLength(sid)) { f.charAt(sid, it) }
+    }
+
+    private inline fun matchFast(q: CharArray, n: Int, at: (Int) -> Char): Boolean {
         var i = 0
         var j = 0
         var star = -1
         var mark = 0
-        val n = s.length
         while (i < n) {
-            if (j < q.size && q[j] != '%' && eq(q[j].code, s[i].code)) {
+            if (j < q.size && q[j] != '%' && eq(q[j].code, at(i).code)) {
                 i++
                 j++
             } else if (j < q.size && q[j] == '%') {

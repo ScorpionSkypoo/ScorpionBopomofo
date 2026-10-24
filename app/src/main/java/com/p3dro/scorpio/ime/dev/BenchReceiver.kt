@@ -15,7 +15,7 @@ import java.io.File
  * 改了詞庫或選字程式後，同一支手機上「改之前跑 baseline、改之後跑 compare」，比對每一題的候選有沒有變、耗時差多少。
  *
  * 只有 shell（adb／Shizuku）能觸發：receiver 要求 DUMP 權限，一般 App 拿不到
- *   am broadcast -n com.p3dro.scorpio.ime/.dev.BenchReceiver --es mode baseline|compare [--ez nouser true]
+ *   am broadcast -n com.p3dro.scorpio.ime/.dev.BenchReceiver --es mode baseline|compare [--ez nouser true] [--ez probe true]
  *   am broadcast -n com.p3dro.scorpio.ime/.dev.BenchReceiver --es mode explain --es keys ㄋㄚㄒㄧㄝ（說明某組按鍵的排序）
  * 輸入是 tools/perf/make_bench_inputs.py 從詞庫隨機挑詞產生的，不含任何人打過的字；log 只記數量與耗時
  */
@@ -25,14 +25,16 @@ class BenchReceiver : BroadcastReceiver() {
         val mode = intent.getStringExtra("mode") ?: "compare"
         // nouser：不看個人學習（跟沒有學習紀錄的舊版比詞庫查詢）
         val noUser = intent.getBooleanExtra("nouser", false)
+        // probe：用精確配置計數量各段配置了多少記憶體（會讓配置變慢，這時的耗時不準）
+        val probe = intent.getBooleanExtra("probe", false)
         val pending = goAsync()
         val app = context.applicationContext
         Thread {
             try {
                 when {
                     mode == "explain" -> explain(app, intent.getStringExtra("keys").orEmpty(), intent.getStringExtra("prev"))
-                    noUser -> ScorpioDictManager.getInstance(app).withoutUserData { run(app, mode) }
-                    else -> run(app, mode)
+                    noUser -> ScorpioDictManager.getInstance(app).withoutUserData { run(app, mode, probe) }
+                    else -> run(app, mode, probe)
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "基準測試失敗", e)
@@ -65,7 +67,7 @@ class BenchReceiver : BroadcastReceiver() {
         File(outDir(context), "explain.txt").writeText(trace.joinToString("\n") + "\n")
     }
 
-    private fun run(context: Context, mode: String) {
+    private fun run(context: Context, mode: String, probe: Boolean) {
         val dict = ScorpioDictManager.getInstance(context)
         val dir = outDir(context)
         File(dir, "summary.txt").delete()
@@ -74,6 +76,13 @@ class BenchReceiver : BroadcastReceiver() {
         dict.trimMemory(ComponentCallbacks2.TRIM_MEMORY_COMPLETE)
         val results = ArrayList<String>(inputs.size * 4)
         val zTimes = ArrayList<Long>()
+        // 選字配置了多少記憶體（GC 的壓力）：ART 的累計配置量，整個行程的（測試時鍵盤沒在打字）
+        fun allocated() = android.os.Debug.getRuntimeStat("art.gc.bytes-allocated")?.toLongOrNull() ?: 0L
+        fun gcStat(name: String) = android.os.Debug.getRuntimeStat(name)?.toLongOrNull() ?: 0L
+        var zBytes = 0L
+        if (probe) com.p3dro.scorpio.ime.engine.AllocProbe.start()
+        val gc0 = gcStat("art.gc.gc-count")
+        val gcTime0 = gcStat("art.gc.gc-time")
         val t0 = System.nanoTime()
         runBlocking {
             for (line in inputs) {
@@ -87,9 +96,13 @@ class BenchReceiver : BroadcastReceiver() {
                         for ((i, c) in keys.withIndex()) {
                             val o = offs?.getOrNull(i)
                             composer.append(c, o?.first ?: 0f, o?.second ?: 0f)
+                            val a = allocated()
                             val s = System.nanoTime()
-                            val g = dict.getCandidateGroups(composer.getAllSegmentations(), composer.hasExplicitTone(), prev, composer.getTouchPoints())
+                            val g = com.p3dro.scorpio.ime.engine.AllocProbe.measure("z.total") {
+                                dict.getCandidateGroups(composer.getAllSegmentations(), composer.hasExplicitTone(), prev, composer.getTouchPoints())
+                            }
                             zTimes.add(System.nanoTime() - s)
+                            zBytes += allocated() - a
                             results.add(g.inline.joinToString(" ") + " | " + g.emoji.joinToString(" ") + " | " + g.kaomoji.joinToString(" "))
                         }
                     }
@@ -118,6 +131,7 @@ class BenchReceiver : BroadcastReceiver() {
                 }
             }
         }
+        if (probe) com.p3dro.scorpio.ime.engine.AllocProbe.stop()
         val totalMs = (System.nanoTime() - t0) / 1_000_000
         val sorted = zTimes.sorted()
         fun pct(p: Double) = if (sorted.isEmpty()) 0.0 else sorted[((sorted.size - 1) * p).toInt()] / 1e6
@@ -126,7 +140,13 @@ class BenchReceiver : BroadcastReceiver() {
 
         val out = File(dir, if (mode == "baseline") "baseline.txt" else "current.txt")
         out.writeText(results.joinToString("\n") + "\n")
-        val summary = StringBuilder("$mode：${results.size} 筆結果\n$timing\n")
+        val gcCount = gcStat("art.gc.gc-count") - gc0
+        val gcMs = gcStat("art.gc.gc-time") - gcTime0
+        val alloc = "選字配置記憶體：每次平均 %.1f KB（共 %.1f MB）；整個測試 GC $gcCount 次、$gcMs ms"
+            .format(if (sorted.isEmpty()) 0.0 else zBytes / 1024.0 / sorted.size, zBytes / 1048576.0)
+        val probes = com.p3dro.scorpio.ime.engine.AllocProbe.totals.entries.sortedBy { it.key }
+            .joinToString("、") { "${it.key} %.1f MB".format(it.value / 1048576.0) }
+        val summary = StringBuilder("$mode：${results.size} 筆結果\n$timing\n$alloc\n各段配置：$probes\n")
         // 命中率：每個測項最後一鍵的第一候選（前三）是不是本來要打的詞（assets/bench/expected.txt：結果行號<Tab>詞）
         try {
             val expected = context.assets.open("bench/expected.txt").bufferedReader().readLines().mapNotNull { l ->
