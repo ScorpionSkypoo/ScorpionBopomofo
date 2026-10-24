@@ -182,6 +182,7 @@ class SettingsActivity : AppCompatActivity() {
         super.onResume()
         // 從系統設定回來：更新啟用／切換狀態
         if (stack.lastOrNull() == Page.ONBOARDING || stack.lastOrNull() == Page.HOME) render()
+        resumePendingInstall()
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
@@ -1466,17 +1467,40 @@ class SettingsActivity : AppCompatActivity() {
                                     startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(c.release.page)))
                                     return@setPositiveButton
                                 }
+                                if (busy) return@setPositiveButton
+                                busy = true
                                 sub.text = "下載中…"
+                                // 這列底下的進度條：知道檔案大小就顯示百分比
+                                val bar = com.google.android.material.progressindicator.LinearProgressIndicator(this@SettingsActivity).apply {
+                                    max = 100
+                                    trackCornerRadius = dp(4)
+                                    isIndeterminate = true
+                                }
+                                parent.addView(bar, parent.indexOfChild(r) + 1, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                                    setMargins(dp(20), 0, dp(20), dp(12))
+                                })
                                 lifecycleScope.launch {
-                                    val apk = U.download(this@SettingsActivity, c.release)
-                                    if (apk == null) {
-                                        sub.text = "下載失敗，請稍後再試"
-                                    } else {
-                                        sub.text = "下載完成"
-                                        if (!U.install(this@SettingsActivity, apk)) {
-                                            android.widget.Toast.makeText(this@SettingsActivity, "請允許安裝更新，回來後再按一次", android.widget.Toast.LENGTH_LONG).show()
+                                    val apk = U.download(this@SettingsActivity, c.release) { p ->
+                                        runOnUiThread {
+                                            if (p < 0) return@runOnUiThread
+                                            if (bar.isIndeterminate) {
+                                                // 不確定進度轉成百分比要先藏起來，不然會閃一下
+                                                bar.visibility = View.INVISIBLE
+                                                bar.isIndeterminate = false
+                                                bar.visibility = View.VISIBLE
+                                            }
+                                            bar.setProgressCompat(p, true)
+                                            sub.text = "下載中… $p%"
                                         }
                                     }
+                                    parent.removeView(bar)
+                                    busy = false
+                                    if (apk == null) {
+                                        sub.text = "下載失敗，請稍後再試"
+                                        return@launch
+                                    }
+                                    sub.text = "下載完成"
+                                    installUpdate(apk, c.release.tag, sub)
                                 }
                             }
                             .setNegativeButton("稍後", null)
@@ -1489,6 +1513,35 @@ class SettingsActivity : AppCompatActivity() {
                 busy = false
             }
         }
+    }
+
+    private fun installUpdate(apk: java.io.File, tag: String?, sub: TextView?) {
+        val U = com.p3dro.scorpio.ime.engine.AppUpdater
+        when (U.install(this, apk)) {
+            com.p3dro.scorpio.ime.engine.AppUpdater.Install.STARTED -> {}
+            com.p3dro.scorpio.ime.engine.AppUpdater.Install.NEED_PERMISSION ->
+                android.widget.Toast.makeText(this, "請允許安裝更新，回來後會自動接著安裝", android.widget.Toast.LENGTH_LONG).show()
+            com.p3dro.scorpio.ime.engine.AppUpdater.Install.NOT_NEWER -> {
+                tag?.let { U.markNotNewer(this, it) }
+                sub?.text = "手機上的版本比較新"
+                com.google.android.material.dialog.MaterialAlertDialogBuilder(this)
+                    .setTitle("無法更新")
+                    .setMessage("手機上裝的版本（${versionName()}）版本號比 ${tag ?: "下載的版本"} 還大，通常是自己建置的開發版。" +
+                        "Android 不允許裝回版本號較小的 App；要改用正式版，請先解除安裝再從 GitHub Releases 安裝（會清掉學過的詞和設定）。")
+                    .setPositiveButton("知道了", null)
+                    .show()
+            }
+            com.p3dro.scorpio.ime.engine.AppUpdater.Install.BROKEN -> sub?.text = "下載的檔案有問題，請再試一次"
+        }
+    }
+
+    /** 去開「安裝未知應用程式」回來：權限開了就接著裝剛剛下載好的版本，不用重新下載 */
+    private fun resumePendingInstall() {
+        val U = com.p3dro.scorpio.ime.engine.AppUpdater
+        val apk = U.pendingApk(this) ?: return
+        if (!U.canInstall(this)) return
+        U.clearPending(this)
+        installUpdate(apk, null, null)
     }
 
     // ---------- 擴充功能 ----------
