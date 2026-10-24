@@ -66,6 +66,21 @@ object PackUpdater {
         val minAppVersion: Int
     )
 
+    /** 線上的鍵盤版面（layouts/）：requires 是安裝時要一起下載的資料包 */
+    data class ManifestLayout(
+        val id: String,
+        val name: String,
+        val description: String,
+        val version: String,
+        val size: Long,
+        val sha256: String,
+        val url: String,
+        val minAppVersion: Int,
+        val requires: List<String> = emptyList(),
+        /** 版面要用到的資料包下載大小合計（設定頁顯示用） */
+        val requiresSize: Long = 0
+    )
+
     data class Result(val updated: List<Pair<String, String>>, val failed: List<String>, val error: String? = null)
 
     fun parseManifest(json: String): List<ManifestPack> {
@@ -96,6 +111,22 @@ object PackUpdater {
                 o.getString("id"), o.optString("name", o.getString("id")), o.optString("icon", ""),
                 o.optString("description", ""), o.getString("version"), o.optLong("size", -1),
                 o.getString("sha256"), o.getString("url"), o.optInt("minAppVersion", 0)
+            )
+        }
+    }
+
+    fun parseLayouts(json: String): List<ManifestLayout> {
+        val root = JSONObject(json)
+        if (root.optInt("schema", 0) > SUPPORTED_SCHEMA) return emptyList()
+        val sizes = parseManifest(json).associate { it.id to it.size }
+        val arr = root.optJSONArray("layouts") ?: return emptyList()
+        return (0 until arr.length()).map { i ->
+            val o = arr.getJSONObject(i)
+            val requires = o.optJSONArray("requires")?.let { a -> (0 until a.length()).map { a.getString(it) } } ?: emptyList()
+            ManifestLayout(
+                o.getString("id"), o.optString("name", o.getString("id")), o.optString("description", ""),
+                o.getString("version"), o.optLong("size", -1), o.getString("sha256"), o.getString("url"),
+                o.optInt("minAppVersion", 0), requires, requires.sumOf { sizes[it]?.coerceAtLeast(0) ?: 0 }
             )
         }
     }
@@ -163,6 +194,45 @@ object PackUpdater {
             Plugins.install(context, part.readText()) != null
         } catch (e: Exception) {
             Log.w(TAG, "安裝外掛 ${p.id} 失敗", e)
+            false
+        } finally {
+            part.delete()
+        }
+    }
+
+    /** 設定頁列出可以安裝的鍵盤版面；連不上回傳 null */
+    suspend fun availableLayouts(context: Context): List<ManifestLayout>? = withContext(Dispatchers.IO) {
+        try {
+            val v = appVersion(context)
+            parseLayouts(fetchManifest(context)).filter { it.minAppVersion <= v }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /**
+     * 安裝或更新一個鍵盤版面：先下載它要用的資料包（倉頡碼表等），都好了才放上版面，
+     * 不會出現「版面裝好了、碼表還沒到」打不出字的情況
+     */
+    suspend fun installLayout(context: Context, l: ManifestLayout, onProgress: ((Float) -> Unit)? = null): Boolean = withContext(Dispatchers.IO) {
+        val dict = ScorpioDictManager.getInstance(context.applicationContext)
+        val part = File(context.cacheDir, "layout-${l.id}.part")
+        try {
+            download(l.url, l.size, l.sha256, part)
+            val json = part.readText()
+            val method = ChineseMethod.parse(json) ?: return@withContext false
+            if (method.requires.isNotEmpty()) {
+                val packs = parseManifest(fetchManifest(context)).associateBy { it.id }
+                for (id in method.requires) {
+                    val p = packs[id] ?: return@withContext false
+                    if (PackVersion.compare(p.version, dict.installedPackVersion(p.id, p.group)) > 0 &&
+                        !installPack(context, dict, p, onProgress)
+                    ) return@withContext false
+                }
+            }
+            ChineseMethod.install(context, ChineseMethod.prefs(context), json) != null
+        } catch (e: Exception) {
+            Log.w(TAG, "安裝版面 ${l.id} 失敗", e)
             false
         } finally {
             part.delete()
@@ -261,6 +331,16 @@ object PackUpdater {
         for (p in pending(enabled, appVersion) { dict.installedPackVersion(it.id, it.group) }) {
             if (installPack(context, dict, p)) updated.add(p.name to p.version) else failed.add(p.name)
         }
+        // 裝著的鍵盤版面有新版就更新；舊版 App 內建、升級後不在手機上的啟用版面重新安裝
+        val prefs = ChineseMethod.prefs(context)
+        val missing = ChineseMethod.missingEnabled(context, prefs).toSet()
+        for (l in parseLayouts(json)) {
+            if (l.minAppVersion > appVersion) continue
+            val have = ChineseMethod.installedVersion(context, l.id)
+            if ((have != null && PackVersion.compare(l.version, have) > 0) || (have == null && l.id in missing)) {
+                if (installLayout(context, l)) updated.add(l.name to l.version) else failed.add(l.name)
+            }
+        }
         // 已安裝的外掛有新版就更新
         for (p in parsePlugins(json)) {
             val have = Plugins.installedVersion(context, p.id) ?: continue
@@ -285,6 +365,15 @@ object PackUpdater {
             wm.enqueue(
                 androidx.work.OneTimeWorkRequestBuilder<Worker>()
                     .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.UNMETERED).build())
+                    .build()
+            )
+        }
+        // 啟用了卻不在手機上的版面（從內建版面的舊版升級）：有網路就馬上裝回來（版面很小，不必等 Wi-Fi）
+        if (ChineseMethod.missingEnabled(context, ChineseMethod.prefs(context)).isNotEmpty()) {
+            wm.enqueueUniqueWork(
+                "${WORK_NAME}_layouts", androidx.work.ExistingWorkPolicy.KEEP,
+                androidx.work.OneTimeWorkRequestBuilder<Worker>()
+                    .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
                     .build()
             )
         }

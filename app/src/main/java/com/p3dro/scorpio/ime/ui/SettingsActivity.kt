@@ -696,7 +696,7 @@ class SettingsActivity : AppCompatActivity() {
 
         sectionTitle("鍵盤")
         val nav = card()
-        val methods = ChineseMethod.enabled(prefs).joinToString("、") { it.label }
+        val methods = ChineseMethod.enabled(this, prefs).joinToString("、") { it.label }
         navRow(nav, R.drawable.ic_set_keyboard, "輸入法", "$methods、英文") { open(Page.METHODS) }
         navRow(nav, R.drawable.ic_set_palette, "介面外觀", "主題、照片背景、按鍵樣式、數字列") { open(Page.APPEARANCE) }
         navRow(nav, R.drawable.ic_set_engine, "輸入與按鍵", "震動、空白鍵、長按功能") { open(Page.INPUT) }
@@ -714,28 +714,74 @@ class SettingsActivity : AppCompatActivity() {
     private fun buildMethods() {
         sectionTitle("中文輸入法")
         val c = card()
-        val enabled = ChineseMethod.enabled(prefs).toMutableSet()
-        val descriptions = mapOf(
-            ChineseMethod.DACHEN to "標準大千 41 鍵注音鍵盤，支援免聲調、簡拼與打錯修正。",
-            ChineseMethod.HSU to "許氏 26 鍵：一個鍵代表一到兩個注音，自動判斷。",
-            ChineseMethod.ETEN26 to "倚天 26 鍵：一個鍵代表一到兩個注音，自動判斷。",
-            ChineseMethod.DACHEN26 to "大千 26 鍵：大千的位置壓縮到 26 個字母鍵。",
-            ChineseMethod.PINYIN to "用英文字母打漢語拼音（zhong → 中），可只打聲母（kbd → 看不到）。",
-            ChineseMethod.CANGJIE to "倉頡碼（Unicode 倉頡第三代），最多 5 碼，打一半就會列出常用字。",
-            ChineseMethod.QUICK to "速成：只打倉頡碼的第一碼和最後一碼，依常用程度排序。"
-        )
-        for (m in ChineseMethod.entries) {
-            switchRow(c, m.label, descriptions[m].orEmpty(), m in enabled) { on ->
-                if (on) enabled.add(m) else enabled.remove(m)
-                if (enabled.isEmpty()) {
-                    // 至少保留一個
-                    enabled.add(ChineseMethod.DACHEN)
-                    render()
-                }
-                prefs.edit().putString(ChineseMethod.PREF_ENABLED, ChineseMethod.entries.filter { it in enabled }.joinToString(",") { it.id }).apply()
+        val installed = ChineseMethod.installed(this)
+        val enabled = ChineseMethod.enabled(this, prefs).map { it.id }.toSet()
+        for (m in installed) {
+            switchRow(c, m.label, m.description, m.id in enabled) { on ->
+                ChineseMethod.setEnabled(this, prefs, m.id, on)
+                // 全部關掉時會自動留下大千：畫面跟著更新
+                if (ChineseMethod.enabled(this, prefs).map { it.id }.toSet() != (if (on) enabled + m.id else enabled - m.id)) render()
             }
         }
         infoRow(card(), "切換方式", "按鍵盤上的地球鍵，依上面的順序切換啟用的輸入法，最後是英文。拼音與 26 鍵注音共用同一套詞庫、整句選字與學習紀錄；倉頡、速成選字後一樣會出現接續詞。")
+
+        sectionTitle("線上安裝的版面")
+        val extra = installed.filter { it != ChineseMethod.DACHEN }
+        if (extra.isNotEmpty()) {
+            val inst = card()
+            for (m in extra) {
+                val r = row(inst, null, clickable = false)
+                texts(textColumn(r), m.label, "版本 ${m.version}")
+                r.addView(TextView(this).apply {
+                    text = "移除"
+                    textSize = 14f
+                    setTextColor(cError)
+                    setPadding(dp(16), dp(8), dp(8), dp(8))
+                    setOnClickListener {
+                        ChineseMethod.uninstall(this@SettingsActivity, prefs, m.id)
+                        // 沒有別的版面用到的資料包（倉頡碼表）一起刪掉
+                        val still = ChineseMethod.requiredPacks(this@SettingsActivity)
+                        val unused = m.requires.filter { it !in still }
+                        lifecycleScope.launch {
+                            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { unused.forEach { dict.uninstallPack(it) } }
+                            if (stack.lastOrNull() == Page.METHODS) render()
+                        }
+                    }
+                })
+            }
+        }
+        val avail = card()
+        val loading = loadingText(avail)
+        lifecycleScope.launch {
+            val list = com.p3dro.scorpio.ime.engine.PackUpdater.availableLayouts(this@SettingsActivity)
+            if (stack.lastOrNull() != Page.METHODS) return@launch
+            avail.removeView(loading)
+            val ids = installed.map { it.id }.toSet()
+            val todo = list?.filter { it.id !in ids }
+            when {
+                list == null -> infoRow(avail, "連不上版面清單", "確認網路後再試一次。")
+                todo.isNullOrEmpty() -> infoRow(avail, "全部都裝好了", null)
+                else -> for (l in todo) {
+                    val r = row(avail, null, clickable = false)
+                    val size = if (l.requiresSize > 0) "\n含碼表，約 ${"%.1f".format(l.requiresSize / 1048576.0)} MB" else ""
+                    texts(textColumn(r), l.name, l.description + size)
+                    val b = MaterialButton(this@SettingsActivity, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+                        text = "安裝"
+                        isAllCaps = false
+                    }
+                    b.setOnClickListener {
+                        b.isEnabled = false
+                        b.text = "安裝中…"
+                        lifecycleScope.launch {
+                            val ok = com.p3dro.scorpio.ime.engine.PackUpdater.installLayout(this@SettingsActivity, l)
+                            android.widget.Toast.makeText(this@SettingsActivity, if (ok) "已安裝「${l.name}」" else "安裝失敗", android.widget.Toast.LENGTH_SHORT).show()
+                            if (stack.lastOrNull() == Page.METHODS) render()
+                        }
+                    }
+                    r.addView(b, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = dp(12) })
+                }
+            }
+        }
     }
 
     // ---------- 介面外觀 ----------

@@ -116,7 +116,8 @@ class ScorpioImeService : InputMethodService() {
 
     // 目前的中文輸入法（大千用注音鍵盤，其餘用 QWERTY 鍵盤＋字母解碼）
     private var chineseMethod = com.p3dro.scorpio.ime.engine.ChineseMethod.DACHEN
-    private val letterDecoders = HashMap<com.p3dro.scorpio.ime.engine.LetterDecoder.Kind, com.p3dro.scorpio.ime.engine.LetterDecoder>()
+    // 依版面（id＋鍵位表）各留一個解碼器，切換時不必重建音節表
+    private val letterDecoders = HashMap<String, com.p3dro.scorpio.ime.engine.LetterDecoder>()
     private val isChineseQwerty: Boolean get() = currentMode == KeyboardMode.ZHUYIN && chineseMethod.usesQwerty
     // 倉頡／速成打到一半的碼
     private val codeBuffer = StringBuilder()
@@ -471,9 +472,9 @@ class ScorpioImeService : InputMethodService() {
         screenContextWord = null
         lastEnglishWord = null
         clearComposer()
-        val methods = com.p3dro.scorpio.ime.engine.ChineseMethod.enabled(prefs)
-        val saved = com.p3dro.scorpio.ime.engine.ChineseMethod.byId(prefs.getString(com.p3dro.scorpio.ime.engine.ChineseMethod.PREF_CURRENT, null))
-        val method = saved?.takeIf { it in methods } ?: methods.first()
+        val methods = com.p3dro.scorpio.ime.engine.ChineseMethod.enabled(this, prefs)
+        val savedId = prefs.getString(com.p3dro.scorpio.ime.engine.ChineseMethod.PREF_CURRENT, null)
+        val method = methods.firstOrNull { it.id == savedId } ?: methods.first()
         if (method != chineseMethod || composer.decoder?.kind != method.decoderKind) applyChineseMethod(method)
         finishEnglishWord(learn = false)
         setKeyboardMode(KeyboardMode.ZHUYIN)
@@ -1065,7 +1066,7 @@ class ScorpioImeService : InputMethodService() {
             triggerHaptic(it)
             if (isChineseQwerty) {
                 // 拼音：這個鍵是分隔號（xi'an）；其他中文輸入法不用 Shift
-                if (chineseMethod == com.p3dro.scorpio.ime.engine.ChineseMethod.PINYIN && composer.isComposing) {
+                if (chineseMethod.isPinyin && composer.isComposing) {
                     composer.append('\'')
                     updateComposingAndCandidates()
                 }
@@ -1414,7 +1415,7 @@ class ScorpioImeService : InputMethodService() {
         chineseMethod = method
         prefs.edit().putString(com.p3dro.scorpio.ime.engine.ChineseMethod.PREF_CURRENT, method.id).apply()
         composer.decoder = method.decoderKind?.let { kind ->
-            letterDecoders.getOrPut(kind) { com.p3dro.scorpio.ime.engine.LetterDecoder(kind) }.also { d ->
+            letterDecoders.getOrPut("${method.id}:${method.keymap}") { com.p3dro.scorpio.ime.engine.LetterDecoder(kind, method.keymap) }.also { d ->
                 if (!d.isReady) serviceScope.launch { d.setSyllableFrequencies(dictManager.syllableFrequencyMap()) }
             }
         }
@@ -1423,13 +1424,13 @@ class ScorpioImeService : InputMethodService() {
 
     /** 地球鍵：依序切換啟用的中文輸入法，最後是英文，再回到第一個 */
     private fun switchToNextLanguage() {
-        val methods = com.p3dro.scorpio.ime.engine.ChineseMethod.enabled(prefs)
+        val methods = com.p3dro.scorpio.ime.engine.ChineseMethod.enabled(this, prefs)
         if (currentMode == KeyboardMode.ENGLISH) {
             applyChineseMethod(methods.first())
             setKeyboardMode(KeyboardMode.ZHUYIN)
             return
         }
-        val idx = methods.indexOf(chineseMethod)
+        val idx = methods.indexOfFirst { it.id == chineseMethod.id }
         if (idx >= 0 && idx < methods.size - 1) {
             applyChineseMethod(methods[idx + 1])
             setKeyboardMode(KeyboardMode.ZHUYIN)
@@ -1442,16 +1443,15 @@ class ScorpioImeService : InputMethodService() {
     /** QWERTY 鍵盤在中文輸入法時鍵上顯示的符號（拼音為字母、26 鍵注音為該鍵的注音） */
     private fun qwertyLabel(c: Char): String {
         if (chineseMethod.isCodeTable) return com.p3dro.scorpio.ime.engine.ChineseMethod.CANGJIE_RADICALS[c]?.toString() ?: c.toString()
-        val kind = chineseMethod.decoderKind ?: return c.toString()
-        if (kind == com.p3dro.scorpio.ime.engine.LetterDecoder.Kind.PINYIN) return c.toString()
-        val syms = com.p3dro.scorpio.ime.engine.LetterDecoder.keyMap(kind)[c] ?: return c.toString()
+        val keymap = chineseMethod.keymap ?: return c.toString()
+        val syms = com.p3dro.scorpio.ime.engine.LetterDecoder.keyMap(keymap)[c] ?: return c.toString()
         return syms.joinToString("")
     }
 
     /** 依目前模式更新 QWERTY 鍵盤的鍵面、空白鍵與 Shift 鍵 */
     private fun applyQwertyLabels() {
         val chinese = isChineseQwerty
-        val zhuyinLabels = chinese && chineseMethod != com.p3dro.scorpio.ime.engine.ChineseMethod.PINYIN
+        val zhuyinLabels = chinese && !chineseMethod.isPinyin
         for (tv in englishKeyViews) {
             val c = (tv.tag as? Char) ?: continue
             tv.text = when {
@@ -1465,7 +1465,7 @@ class ScorpioImeService : InputMethodService() {
         keyboardRootView?.findViewById<TextView>(R.id.tv_en_space_label)?.text = if (chinese) chineseMethod.spaceLabel else "English"
         keyboardRootView?.findViewById<TextView>(R.id.tv_space_label)?.text = chineseMethod.spaceLabel
         // Shift：英文是大小寫；拼音是分隔號；其他中文輸入法不用
-        val pinyin = chinese && chineseMethod == com.p3dro.scorpio.ime.engine.ChineseMethod.PINYIN
+        val pinyin = chinese && chineseMethod.isPinyin
         ivEnShift?.visibility = if (chinese) View.GONE else View.VISIBLE
         keyboardRootView?.findViewById<TextView>(R.id.tv_en_shift_label)?.apply {
             visibility = if (pinyin) View.VISIBLE else View.GONE
@@ -1620,7 +1620,7 @@ class ScorpioImeService : InputMethodService() {
     /** 倉頡／速成按鍵：按下當下依碼表先驗判定（動態感應區），碼滿了就不再接受 */
     private fun onCodeKey(raw: Char, offsetX: Float, offsetY: Float) {
         if (codeBuffer.length >= chineseMethod.maxCodeLength) return
-        val quick = chineseMethod == com.p3dro.scorpio.ime.engine.ChineseMethod.QUICK
+        val quick = chineseMethod.isQuick
         val prefix = codeBuffer.toString()
         val resolved = dictManager.resolveQwertyTap(raw, offsetX, offsetY) { c -> dictManager.codePrefixLogMass(prefix + c, quick) }
         learnQwertyRetype(resolved)
@@ -1642,7 +1642,7 @@ class ScorpioImeService : InputMethodService() {
         }
         ic?.setComposingText(codeBuffer.map { com.p3dro.scorpio.ime.engine.ChineseMethod.CANGJIE_RADICALS[it] ?: it }.joinToString(""), 1)
         val code = codeBuffer.toString()
-        val quick = chineseMethod == com.p3dro.scorpio.ime.engine.ChineseMethod.QUICK
+        val quick = chineseMethod.isQuick
         codeCandidateJob = serviceScope.launch {
             val list = dictManager.codeCandidates(code, quick)
             if (codeBuffer.toString() != code) return@launch

@@ -1,38 +1,139 @@
 package com.p3dro.scorpio.ime.engine
 
+import android.content.Context
+import android.content.SharedPreferences
+import org.json.JSONObject
+import java.io.File
+
 /**
- * 中文輸入法：大千注音用 10×4 注音鍵盤，其餘用 QWERTY 鍵盤（按鍵標上該輸入法的符號）
+ * 中文輸入法（鍵盤版面）：大千注音內建（10×4 注音鍵盤），其餘從資料 repo（scorpio-ime-data）的 layouts/ 線上安裝，
+ * 用 QWERTY 鍵盤、鍵上標該版面的符號。版面是宣告式 JSON，只能選 App 內建的打字方式（engine），不含程式碼：
+ *   zhuyin26  26 鍵注音（keymap：41 個字母依序對應 ㄅ…ㄙ、ㄧㄨㄩ、ㄚ…ㄦ、˙ˊˇˋ）
+ *   pinyin    漢語拼音
+ *   cangjie   倉頡；quick 速成（requires 碼表資料包 cangjie）
  * 設定存 id；啟用的輸入法以地球鍵依序切換（最後是英文）
  */
-enum class ChineseMethod(val id: String, val label: String, val spaceLabel: String, val decoderKind: LetterDecoder.Kind?) {
-    DACHEN("dachen", "注音（大千）", "注音", null),
-    HSU("hsu", "注音（許氏）", "注音·許氏", LetterDecoder.Kind.HSU),
-    ETEN26("eten26", "注音（倚天 26 鍵）", "注音·倚天", LetterDecoder.Kind.ETEN26),
-    DACHEN26("dachen26", "注音（大千 26 鍵）", "注音·大千26", LetterDecoder.Kind.DACHEN26),
-    PINYIN("pinyin", "漢語拼音", "拼音", LetterDecoder.Kind.PINYIN),
-    CANGJIE("cangjie", "倉頡", "倉頡", null),
-    QUICK("quick", "速成", "速成", null);
+data class ChineseMethod(
+    val id: String,
+    val label: String,
+    val spaceLabel: String,
+    val description: String,
+    val engine: Engine,
+    /** 26 鍵注音的鍵位表 */
+    val keymap: String? = null,
+    val version: String = "",
+    /** 這個版面要用到的資料包（例如倉頡碼表），安裝版面時一起下載 */
+    val requires: List<String> = emptyList(),
+    /** 設定頁與地球鍵切換的順序（小的在前） */
+    val sort: Int = 99
+) {
 
-    val usesQwerty: Boolean get() = this != DACHEN
+    enum class Engine(val id: String) { DACHEN("dachen"), ZHUYIN26("zhuyin26"), PINYIN("pinyin"), CANGJIE("cangjie"), QUICK("quick") }
+
+    val usesQwerty: Boolean get() = engine != Engine.DACHEN
+    val isPinyin: Boolean get() = engine == Engine.PINYIN
 
     /** 倉頡、速成：查碼表，不經注音 */
-    val isCodeTable: Boolean get() = this == CANGJIE || this == QUICK
-    val maxCodeLength: Int get() = if (this == QUICK) 2 else 5
+    val isCodeTable: Boolean get() = engine == Engine.CANGJIE || engine == Engine.QUICK
+    val isQuick: Boolean get() = engine == Engine.QUICK
+    val maxCodeLength: Int get() = if (isQuick) 2 else 5
+
+    /** 經過注音整句選字的 QWERTY 版面（拼音、26 鍵注音）用的解碼方式 */
+    val decoderKind: LetterDecoder.Kind? get() = when (engine) {
+        Engine.PINYIN -> LetterDecoder.Kind.PINYIN
+        Engine.ZHUYIN26 -> LetterDecoder.Kind.ZHUYIN26
+        else -> null
+    }
 
     companion object {
         const val PREF_ENABLED = "chinese_methods"
         const val PREF_CURRENT = "chinese_method"
+        const val SCHEMA = 1
+
+        val DACHEN = ChineseMethod("dachen", "注音（大千）", "注音", "標準大千 41 鍵注音鍵盤，支援免聲調、簡拼與打錯修正。", Engine.DACHEN)
 
         /** 倉頡字根（a = 日 … z = 重） */
         val CANGJIE_RADICALS: Map<Char, Char> = "日月金木水火土竹戈十大中一弓人心手口尸廿山女田難卜重"
             .mapIndexed { i, r -> ('a' + i) to r }.toMap()
 
-        fun byId(id: String?): ChineseMethod? = entries.firstOrNull { it.id == id }
+        private val ID = Regex("[a-z0-9_]{1,32}")
 
-        /** 已啟用的輸入法（依清單順序；至少一個） */
-        fun enabled(prefs: android.content.SharedPreferences): List<ChineseMethod> {
-            val ids = prefs.getString(PREF_ENABLED, DACHEN.id).orEmpty().split(',')
-            return entries.filter { it.id in ids }.ifEmpty { listOf(DACHEN) }
+        /** 解析版面 JSON；格式不對、或是這版 App 不認得的打字方式回傳 null（新版面在舊 App 上不會出錯） */
+        fun parse(json: String): ChineseMethod? = try {
+            val o = JSONObject(json)
+            val engine = Engine.entries.firstOrNull { it.id == o.optString("engine") && it != Engine.DACHEN }
+            val id = o.getString("id")
+            val keymap = o.optString("keymap").ifEmpty { null }
+            when {
+                o.optInt("schema", 1) > SCHEMA || engine == null || !ID.matches(id) || id == DACHEN.id -> null
+                engine == Engine.ZHUYIN26 && (keymap == null || !LetterDecoder.isValidKeymap(keymap)) -> null
+                else -> ChineseMethod(
+                    id, o.getString("name"), o.optString("spaceLabel").ifEmpty { o.getString("name") }, o.optString("description", ""),
+                    engine, keymap, o.optString("version", ""),
+                    o.optJSONArray("requires")?.let { a -> (0 until a.length()).map { a.getString(it) } } ?: emptyList(),
+                    o.optInt("sort", 99)
+                )
+            }
+        } catch (e: Exception) {
+            null
         }
+
+        // ---------- 安裝在手機上的版面 ----------
+
+        private fun dir(context: Context) = File(context.filesDir, "layouts").apply { mkdirs() }
+
+        /** 手機上有的版面：大千在最前面，其餘依版面的 sort、id */
+        fun installed(context: Context): List<ChineseMethod> =
+            listOf(DACHEN) + (dir(context).listFiles { f -> f.name.endsWith(".json") } ?: emptyArray())
+                .mapNotNull { parse(it.readText()) }
+                .sortedWith(compareBy({ it.sort }, { it.id }))
+
+        fun installedVersion(context: Context, id: String): String? =
+            File(dir(context), "$id.json").takeIf { it.exists() }?.let { parse(it.readText())?.version }
+
+        /** 安裝或更新：json 驗證過才寫入；新裝的版面直接啟用 */
+        fun install(context: Context, prefs: SharedPreferences, json: String): ChineseMethod? {
+            val m = parse(json) ?: return null
+            val isNew = installedVersion(context, m.id) == null
+            File(dir(context), "${m.id}.json").writeText(json)
+            val ids = enabledIds(prefs)
+            if (isNew && m.id !in ids) prefs.edit().putString(PREF_ENABLED, (ids + m.id).joinToString(",")).apply()
+            return m
+        }
+
+        fun uninstall(context: Context, prefs: SharedPreferences, id: String) {
+            if (id == DACHEN.id) return
+            File(dir(context), "$id.json").delete()
+            prefs.edit().putString(PREF_ENABLED, enabledIds(prefs).filter { it != id }.joinToString(",")).apply()
+        }
+
+        private fun enabledIds(prefs: SharedPreferences): List<String> =
+            prefs.getString(PREF_ENABLED, DACHEN.id).orEmpty().split(',').filter { it.isNotEmpty() }
+
+        /** 已啟用的輸入法（依版面順序；至少一個） */
+        fun enabled(context: Context, prefs: SharedPreferences): List<ChineseMethod> {
+            val ids = enabledIds(prefs)
+            return installed(context).filter { it.id in ids }.ifEmpty { listOf(DACHEN) }
+        }
+
+        fun setEnabled(context: Context, prefs: SharedPreferences, id: String, on: Boolean) {
+            val ids = enabledIds(prefs).toMutableList()
+            if (on && id !in ids) ids.add(id)
+            if (!on) ids.remove(id)
+            // 至少保留一個
+            if (ids.none { e -> installed(context).any { it.id == e } }) ids.add(DACHEN.id)
+            prefs.edit().putString(PREF_ENABLED, ids.joinToString(",")).apply()
+        }
+
+        /** 啟用了卻不在手機上的版面（舊版 App 內建、升級後要線上重新安裝的） */
+        fun missingEnabled(context: Context, prefs: SharedPreferences): List<String> {
+            val have = installed(context).map { it.id }.toSet()
+            return enabledIds(prefs).filter { it !in have }
+        }
+
+        /** 裝著的版面要用到的資料包 */
+        fun requiredPacks(context: Context): Set<String> = installed(context).flatMap { it.requires }.toSet()
+
+        fun prefs(context: Context): SharedPreferences = context.getSharedPreferences("scorpio_ime_prefs", Context.MODE_PRIVATE)
     }
 }

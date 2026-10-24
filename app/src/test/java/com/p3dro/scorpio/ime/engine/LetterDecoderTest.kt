@@ -6,6 +6,9 @@ import org.junit.Test
 
 class LetterDecoderTest {
 
+    // 許氏鍵位表（資料 repo 的 layouts/hsu.json）
+    private val HSU = "bpmfdtnlgkhjvcjvcrzasexuyhgeiawomnkllsdfj"
+
     private val freq = mapOf(
         "ㄋㄧ" to 50.0, "ㄏㄠ" to 60.0, "ㄓㄨㄥ" to 40.0, "ㄍㄨㄛ" to 30.0, "ㄒㄧㄢ" to 20.0, "ㄒㄧ" to 25.0,
         "ㄢ" to 5.0, "ㄎㄢ" to 15.0, "ㄅㄨ" to 45.0, "ㄉㄠ" to 30.0, "ㄐㄩ" to 10.0, "ㄌㄩ" to 8.0, "ㄓ" to 12.0,
@@ -54,8 +57,8 @@ class LetterDecoderTest {
     @Test
     fun hsuAmbiguousKeys() {
         // 許氏：d = ㄉ／ˊ（聲調），k = ㄎ／ㄤ；e = ㄧ／ㄝ；w = ㄠ
-        val d = LetterDecoder(LetterDecoder.Kind.HSU).apply { setSyllableFrequencies(freq) }
-        val map = LetterDecoder.keyMap(LetterDecoder.Kind.HSU)
+        val d = LetterDecoder(LetterDecoder.Kind.ZHUYIN26, HSU).apply { setSyllableFrequencies(freq) }
+        val map = LetterDecoder.keyMap(HSU)
         assertTrue(map['d']!!.contains('ㄉ') && map['d']!!.contains('ˊ'))
         // dw = ㄉㄠ
         assertEquals(listOf("ㄉㄠ"), best(d, "dw"))
@@ -65,7 +68,7 @@ class LetterDecoderTest {
 
     @Test
     fun firstToneMarkerJoinsSyllable() {
-        val d = LetterDecoder(LetterDecoder.Kind.HSU).apply { setSyllableFrequencies(freq) }
+        val d = LetterDecoder(LetterDecoder.Kind.ZHUYIN26, HSU).apply { setSyllableFrequencies(freq) }
         assertEquals(listOf("ㄉㄠˉ"), best(d, "dwˉ"))
     }
 }

@@ -2308,7 +2308,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
         }
         val local = packs().map { it.id }.toSet()
         for (m in available) {
-            if (m.id in local || m.group == "kaomoji") continue
+            if (m.id in local || m.group == "kaomoji" || m.group == "layout") continue
             out.add(
                 DictionaryInfo(
                     m.id, m.name, m.description.ifEmpty { "線上詞庫" }, m.rows, enabled = false,
@@ -2349,6 +2349,8 @@ class ScorpioDictManager private constructor(private val context: Context) {
     /** 詞庫有沒有開（開關就是安裝：只有開著的會自動更新） */
     fun isPackEnabled(id: String, group: String): Boolean = when (group) {
         "kaomoji" -> kaomojiEnabled
+        // 版面用的資料（倉頡碼表）：有裝用到它的版面才算開著
+        "layout" -> id in ChineseMethod.requiredPacks(context)
         else -> addonEnabled(id)
     }
 
@@ -2691,8 +2693,8 @@ class ScorpioDictManager private constructor(private val context: Context) {
         Thread {
             if (spatial.syllablePrefixes == null) spatial.setSyllableFrequencies(syllableFrequencies())
             // 倉頡碼表只有開了倉頡或速成才預先把速成對照表建好（沒開就等第一次用到）
-            val methods = ChineseMethod.enabled(context.getSharedPreferences("scorpio_ime_prefs", Context.MODE_PRIVATE))
-            if (ChineseMethod.CANGJIE in methods || ChineseMethod.QUICK in methods) data.cangjie?.quick?.size
+            val methods = ChineseMethod.enabled(context, ChineseMethod.prefs(context))
+            if (methods.any { it.isCodeTable }) data.cangjie?.quick?.size
             warmFirstKeys()
         }.start()
     }

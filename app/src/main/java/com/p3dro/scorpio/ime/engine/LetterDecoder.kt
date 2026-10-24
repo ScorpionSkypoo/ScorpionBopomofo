@@ -10,11 +10,12 @@ import kotlin.math.log10
  * - 漢語拼音：zhong → ㄓㄨㄥ；可只打聲母縮寫（kbd → ㄎ ㄅ ㄉ）；最後一段打到一半時補成最常見的音節
  * - 26 鍵注音：一個鍵可能代表兩三個注音或聲調（許氏 d = ㄉ／ˊ），依合法音節與音節字頻挑最可能的切分
  *
- * 鍵位表與 libchewing（key2pho.c）相同：41 個符號依序為 ㄅ…ㄙ、ㄧㄨㄩ、ㄚ…ㄦ、˙ˊˇˋ
+ * 26 鍵注音的鍵位表（keymap）來自線上安裝的版面（資料 repo 的 layouts/），格式與 libchewing（key2pho.c）相同：
+ * 41 個字母依序對應 ㄅ…ㄙ、ㄧㄨㄩ、ㄚ…ㄦ、˙ˊˇˋ
  */
-class LetterDecoder(val kind: Kind) {
+class LetterDecoder(val kind: Kind, keymap: String? = null) {
 
-    enum class Kind { PINYIN, HSU, ETEN26, DACHEN26 }
+    enum class Kind { PINYIN, ZHUYIN26 }
 
     /** 解出的一個音節：注音（可能含聲調）、消耗的按鍵數、是否只是聲母縮寫 */
     data class Unit(val zhuyin: String, val keyCount: Int, val letters: String)
@@ -23,15 +24,12 @@ class LetterDecoder(val kind: Kind) {
 
     companion object {
         private const val SYMBOLS = "ㄅㄆㄇㄈㄉㄊㄋㄌㄍㄎㄏㄐㄑㄒㄓㄔㄕㄖㄗㄘㄙㄧㄨㄩㄚㄛㄜㄝㄞㄟㄠㄡㄢㄣㄤㄥㄦ˙ˊˇˋ"
-        private val LAYOUTS = mapOf(
-            Kind.HSU to "bpmfdtnlgkhjvcjvcrzasexuyhgeiawomnkllsdfj",
-            Kind.ETEN26 to "bpmfdtnlvkhgvcgycjqwsexuaorwiqzpmntlhdfjk",
-            Kind.DACHEN26 to "qqazwwsxedcrfvttgbyhnujmuikbiolmoplnpyerd"
-        )
+        /** 鍵位表的格式對不對：41 個小寫字母，每個對應 SYMBOLS 同位置的注音符號 */
+        fun isValidKeymap(keys: String) = keys.length == SYMBOLS.length && keys.all { it in 'a'..'z' }
 
-        /** 各佈局：字母 → 可能代表的注音符號 */
-        fun keyMap(kind: Kind): Map<Char, List<Char>> {
-            val keys = LAYOUTS[kind] ?: return emptyMap()
+        /** 鍵位表：字母 → 可能代表的注音符號 */
+        fun keyMap(keys: String): Map<Char, List<Char>> {
+            if (!isValidKeymap(keys)) return emptyMap()
             val map = LinkedHashMap<Char, MutableList<Char>>()
             for (i in SYMBOLS.indices) map.getOrPut(keys[i]) { ArrayList() }.add(SYMBOLS[i])
             return map
@@ -96,7 +94,7 @@ class LetterDecoder(val kind: Kind) {
     // 漢語拼音：拼法 → 注音
     private var pinyinTable: Map<String, String> = emptyMap()
     private var pinyinPrefixBest: Map<String, String> = emptyMap()
-    private val keys: Map<Char, List<Char>> = keyMap(kind)
+    private val keys: Map<Char, List<Char>> = keymap?.let { keyMap(it) } ?: emptyMap()
 
     fun setSyllableFrequencies(all: Map<String, Double>) {
         // 詞庫裡只有聲調、沒有注音的項目會變成空音節，略過
