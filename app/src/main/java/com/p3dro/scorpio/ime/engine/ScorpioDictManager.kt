@@ -720,20 +720,31 @@ class ScorpioDictManager private constructor(private val context: Context) {
         val parsed = BopomofoComposer.parseSyllables(points).takeIf { it.size == chars.size }
             ?: BopomofoComposer.parseSyllables(points, keepIncompatible = true)
         if (parsed.isEmpty() || parsed.size != chars.size) return@withContext
-        var added = 0
+        // 每個音節想打的讀音：打對、打了開頭（簡拼），或同長度只差一個注音（按歪）。
+        // 有任何一個音節對不上（多打、少打、差兩個以上）就整個詞都不學：音節可能錯開，落點會學到別的鍵上
+        val intendedOf = ArrayList<String>(parsed.size)
         for (k in parsed.indices) {
             val typed = toToneless(parsed[k].text)
             val readings = words.tonelessOfWord(chars[k])
-            val intended = when {
-                // 打對或打了正確讀音的開頭（簡拼）
+            intendedOf.add(when {
                 readings.any { it.startsWith(typed) } -> typed
                 else -> readings.filter { r -> r.length == typed.length && r.indices.count { r[it] != typed[it] } == 1 }
-                    .singleOrNull() ?: continue
-            }
+                    .singleOrNull() ?: return@withContext
+            })
+        }
+        var added = 0
+        for (k in parsed.indices) {
+            val typed = toToneless(parsed[k].text)
+            val intended = intendedOf[k]
             if (intended != typed) recordTypo(typed, intended)
             for (j in typed.indices) {
                 val touch = parsed[k].touches[typed[j]] ?: continue
                 if (SpatialModel.isTone(touch.rawChar)) continue
+                // 換掉的那一鍵：落點要真的靠近想打的鍵（同鄰鍵候選的門檻）才算按歪；按在別的鍵中央多半是讀音記錯（ㄓ／ㄗ），
+                // 只記慣性打錯，不把落點學到想打的鍵上
+                if (intended[j] != typed[j] &&
+                    (spatial.neighborPenalties(touch).firstOrNull { it.first == intended[j] }?.second ?: Double.MAX_VALUE) > NEIGHBOR_ALT_MAX
+                ) continue
                 // 學之前先拿這一下來比：有／沒有移動偏差，按下當下各會判成哪個鍵（只算連續打字的那幾下，只記次數）
                 val idx = points.indexOfFirst { it === touch }
                 if (idx >= 0 && touch.from != null) {
