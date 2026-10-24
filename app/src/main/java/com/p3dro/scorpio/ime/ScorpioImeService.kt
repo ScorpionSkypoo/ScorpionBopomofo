@@ -1682,6 +1682,11 @@ class ScorpioImeService : InputMethodService() {
 
             candidateJob = serviceScope.launch {
                 val candidates = dictManager.getCandidates(segmentations, hasTone, contextWord, touchPoints, inlineSymbols)
+                // 診斷：打了好幾個音節卻只剩一兩個候選（使用者回報過「只出現『的』」）；只記數量，不記打了什麼
+                val syllableCount = segmentations.firstOrNull()?.size ?: 0
+                if (syllableCount >= 2 && candidates.size <= 2) {
+                    android.util.Log.w("ScorpioIME", "候選很少：${candidates.size} 個（$syllableCount 個音節、${segmentations.size} 種切分、有上文 ${contextWord != null}、有聲調 $hasTone）")
+                }
                 candidateAdapter?.submitList(candidates)
                 candidateAdapter?.markUserWords(candidates, dictManager.userOnlyWords(candidates.take(40)))
                 rvCandidates?.scrollToPosition(0)
