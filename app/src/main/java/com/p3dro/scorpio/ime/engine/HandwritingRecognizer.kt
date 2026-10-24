@@ -43,8 +43,8 @@ class HandwritingRecognizer {
         return null
     }
 
-    /** 確認模型已下載（必要時下載）；回傳是否可用 */
-    suspend fun ensureModel(): Boolean {
+    /** 確認模型已下載（必要時下載，開始下載前呼叫 onDownloading）；回傳是否可用 */
+    suspend fun ensureModel(onDownloading: () -> Unit = {}): Boolean {
         recognizer?.let { return true }
         val id = identifier() ?: return false
         val m = DigitalInkRecognitionModel.builder(id).build()
@@ -55,6 +55,7 @@ class HandwritingRecognizer {
                 .addOnFailureListener { cont.resume(false) }
         }
         if (!downloaded) {
+            onDownloading()
             val ok = suspendCancellableCoroutine { cont ->
                 manager.download(m, DownloadConditions.Builder().build())
                     .addOnSuccessListener { cont.resume(true) }

@@ -1481,11 +1481,11 @@ class ScorpioImeService : InputMethodService() {
         panel.layoutParams = panel.layoutParams.apply { height = if (referenceHeight > 0) referenceHeight else dpToPx(5 * 44 + 4 * 4 + 4 + 6) }
         if (panel.childCount == 0) createHandwritingViews(panel)
         val board = handwritingView ?: return
-        // 第一次使用（或上次下載失敗）：下載繁中手寫模型
+        // 輸入法重新啟動後要再確認一次模型；已經下載過的直接顯示可以寫，真的要下載時才換成下載提示（不會每次閃一下）
         if (!handwritingReady) {
-            board.hint = "正在準備手寫辨識（第一次使用需下載約 20MB）…"
+            board.hint = "在這裡手寫"
             serviceScope.launch {
-                handwritingReady = handwriting.ensureModel()
+                handwritingReady = handwriting.ensureModel(onDownloading = { board.hint = "正在準備手寫辨識（第一次使用需下載約 20MB）…" })
                 board.hint = if (handwritingReady) "在這裡手寫" else "手寫模型下載失敗，請確認網路後再開一次"
             }
         }
