@@ -1439,8 +1439,14 @@ class ScorpioImeService : InputMethodService() {
      * 密碼欄、要求不要個人化學習的輸入框（瀏覽器無痕分頁等）：不讀畫面上的字，也不學任何東西
      * （選字、接續詞、英文字、按鍵落點、慣性打錯、最近用過的 Emoji 都不記）
      */
-    /** 終端機這類輸入框（inputType＝TYPE_NULL）：只吃按鍵事件，暫存中的字 App 看不到 */
-    private fun isRawKeyEditor(): Boolean = currentInputEditorInfo?.inputType == EditorInfo.TYPE_NULL
+    /**
+     * 英文不暫存、照按的鍵直接送出的輸入框（比照 Gboard）：
+     * 終端機（TYPE_NULL；Termius 這類用「可見密碼」欄位，暫存中的字它看不到）與密碼欄（不該猜字也不該列字典裡的字）
+     */
+    private fun isRawKeyEditor(): Boolean {
+        val info = currentInputEditorInfo ?: return false
+        return info.inputType == EditorInfo.TYPE_NULL || fieldKindOf(info) == FieldKind.PASSWORD
+    }
 
     private fun personalizationAllowed(): Boolean {
         val info = currentInputEditorInfo ?: return false
