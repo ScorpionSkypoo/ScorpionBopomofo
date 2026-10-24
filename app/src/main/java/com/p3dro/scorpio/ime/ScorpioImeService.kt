@@ -2604,23 +2604,6 @@ class ScorpioImeService : InputMethodService() {
 
     private var symbolsPage = 0
 
-    /** 符號鍵盤的全形／半形（依語言各記一份：中文預設全形、英文預設半形） */
-    private fun symbolsFullWidthKey(chinese: Boolean) = if (chinese) "symbols_full_zh" else "symbols_full_en"
-
-    /**
-     * 符號換成全形或半形：數字一律半形（跟原本一樣）；全形時句點用「。」、半形時「，。」換成「,.」；
-     * 「」『』《》、…這些沒有半形的照舊
-     */
-    private fun symbolWidth(s: String, full: Boolean): String = when {
-        s.all { it in '0'..'9' } -> s
-        full -> if (s == ".") "。" else com.p3dro.scorpio.ime.engine.Plugins.transform("fullwidth", s)
-        else -> when (s) {
-            "，" -> ","
-            "。" -> "."
-            else -> com.p3dro.scorpio.ime.engine.Plugins.transform("halfwidth", s)
-        }
-    }
-
     private fun setupSymbolsKeyboard(root: View) {
         symbolsPage = 0
         buildSymbolsPanel()
@@ -2639,10 +2622,9 @@ class ScorpioImeService : InputMethodService() {
         symPanel.keyPreview = keyPreview
         symPanel.onKeyTapListener = { char, _, _ -> currentInputConnection?.commitText(char.toString(), 1) }
         val chinese = previousMode != KeyboardMode.ENGLISH
-        val full = prefs.getBoolean(symbolsFullWidthKey(chinese), chinese)
 
-        var rows: List<List<String>>
-        var row3: List<String>
+        val rows: List<List<String>>
+        val row3: List<String>
         if (symbolsPage == 0) {
             rows = if (chinese) listOf(
                 listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "0"),
@@ -2664,8 +2646,6 @@ class ScorpioImeService : InputMethodService() {
             row3 = if (chinese) listOf("%", "<", ">", "^", "°", "[", "]")
             else listOf("%", "©", "®", "™", "✓", "[", "]")
         }
-        rows = rows.map { r -> r.map { symbolWidth(it, full) } }
-        row3 = row3.map { symbolWidth(it, full) }
 
         // 整個符號鍵盤與注音／英文鍵盤同高（實際量到的高度；尚未量到時用 5 排 44dp 的設計值），切換時畫面不跳動
         // 比照 Gboard：按鍵維持 44dp 不變，多出來的高度平均分給排與排之間的間距
@@ -2725,24 +2705,9 @@ class ScorpioImeService : InputMethodService() {
             symPanel.addView(rowLayout)
         }
 
-        // 第 3 排：翻頁鍵與全形／半形鍵（同一格上下兩個）+ 7 個符號 + 刪除鍵
+        // 第 3 排：翻頁鍵 + 7 個符號 + 刪除鍵（同 Gboard）
         val thirdRow = newRow(2, 10f)
-        val stacked = LinearLayout(ui).apply {
-            orientation = LinearLayout.VERTICAL
-            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1.5f).apply {
-                setMargins(dpToPx(2.5f), 0, dpToPx(2.5f), 0)
-            }
-        }
-        fun stackedKey(top: Boolean) = FrameLayout(ui).apply {
-            background = keyDrawable(R.attr.imeKeyFunctionDrawable)
-            isClickable = true
-            isFocusable = true
-            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f).apply {
-                if (top) bottomMargin = dpToPx(1.5f) else topMargin = dpToPx(1.5f)
-            }
-            symPanel.registerKey(this, null)
-        }
-        stacked.addView(stackedKey(top = true).apply {
+        thirdRow.addView(functionKey(1.5f, R.attr.imeKeyFunctionDrawable).apply {
             addView(label(if (symbolsPage == 0) "=\\<" else "?123", 14f))
             setOnClickListener {
                 triggerHaptic(it)
@@ -2750,20 +2715,6 @@ class ScorpioImeService : InputMethodService() {
                 buildSymbolsPanel()
             }
         })
-        stacked.addView(stackedKey(top = false).apply {
-            // 「全/半」：目前用的那個字是主要文字色，另一個淡掉
-            val text = android.text.SpannableString("全/半")
-            val dim = android.text.style.ForegroundColorSpan(ui.getColor(R.color.ime_text_secondary))
-            if (full) text.setSpan(dim, 1, 3, 0) else text.setSpan(dim, 0, 2, 0)
-            addView(label("", 15f).apply { this.text = text })
-            contentDescription = if (full) "全形，點一下換成半形" else "半形，點一下換成全形"
-            setOnClickListener {
-                triggerHaptic(it)
-                prefs.edit().putBoolean(symbolsFullWidthKey(chinese), !full).apply()
-                buildSymbolsPanel()
-            }
-        })
-        thirdRow.addView(stacked)
         for (sym in row3) thirdRow.addView(symbolKey(sym))
         thirdRow.addView(functionKey(1.5f, R.attr.imeKeyFunctionDrawable).apply {
             addView(icon(R.drawable.ic_ime_backspace))
@@ -2772,27 +2723,10 @@ class ScorpioImeService : InputMethodService() {
                 handleBackspace()
             })
         })
-        // 翻頁鍵與全／半鍵那一格往上、往下長，用掉上下兩個排距（各至少留 4dp），兩個鍵才不會太扁；
-        // 最多長到兩個鍵都跟一般按鍵一樣高（中間留 3dp）。這排其他鍵維持原本的位置與高度
-        val extra = minOf(rowGap - dpToPx(4), (keyHeight + dpToPx(3)) / 2).coerceAtLeast(0)
-        (thirdRow.layoutParams as LinearLayout.LayoutParams).apply {
-            height = keyHeight + 2 * extra
-            topMargin = rowGap - extra
-        }
-        for (i in 0 until thirdRow.childCount) {
-            val child = thirdRow.getChildAt(i)
-            if (child === stacked) continue
-            child.layoutParams = (child.layoutParams as LinearLayout.LayoutParams).apply {
-                height = keyHeight
-                topMargin = extra
-                gravity = Gravity.TOP
-            }
-        }
         symPanel.addView(thirdRow)
 
         // 第 4 排：返回、逗號、語言切換、空白、句號、Enter（權重總和 10.4，與注音／英文底排對齊）
         val bottomRow = newRow(3, 10.4f)
-        (bottomRow.layoutParams as LinearLayout.LayoutParams).topMargin = rowGap - extra
         bottomRow.addView(functionKey(1.4f, R.attr.imeKeyFunctionDrawable).apply {
             addView(label(if (chinese) "注音" else "ABC", 14f))
             setOnClickListener {
@@ -2800,7 +2734,8 @@ class ScorpioImeService : InputMethodService() {
                 setKeyboardMode(previousMode)
             }
         })
-        bottomRow.addView(symbolKey(symbolWidth(if (chinese) "，" else ",", full), 0.9f))
+        val comma = if (chinese) "，" else ","
+        bottomRow.addView(symbolKey(comma, 0.9f))
         bottomRow.addView(functionKey(0.9f, R.attr.imeKeyFunctionDrawable).apply {
             addView(icon(R.drawable.ic_ime_globe))
             setOnClickListener {
@@ -2816,7 +2751,7 @@ class ScorpioImeService : InputMethodService() {
                 currentInputConnection?.commitText(" ", 1)
             }
         })
-        bottomRow.addView(symbolKey(symbolWidth(if (chinese) "。" else ".", full), 0.9f))
+        bottomRow.addView(symbolKey(if (chinese) "。" else ".", 0.9f))
         bottomRow.addView(functionKey(1.5f, R.attr.imeKeyActionDrawable).apply {
             addView(icon(R.drawable.ic_ime_enter, tint = false))
             setOnClickListener {

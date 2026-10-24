@@ -12,7 +12,7 @@ import kotlin.math.abs
 /**
  * 英文鍵盤空間座標觸控定位（比照 ZhuyinGridLayout）
  *
- * 1. 點擊位置映射到最近的按鍵（先找最近的排，再找排內最近的鍵），按鍵間隙不再吞鍵
+ * 1. 點在某個鍵上就是那個鍵；點在間隙才找最近的按鍵（先找最近的排，再找排內最近的鍵），按鍵間隙不再吞鍵
  * 2. 回報相對按鍵中心的偏移量（半個按鍵為 1），供英文補全的鄰鍵容錯加權
  * 3. 支援多點觸控（雙手拇指輪流敲擊）
  * 4. 最近的鍵若是功能鍵（Shift、刪除、空白…）則不攔截，交還給該按鈕自己的點擊／長按處理
@@ -60,6 +60,12 @@ class SpatialKeyLayout @JvmOverloads constructor(
             if (!v.isShown || v.width == 0) continue
             v.getDrawingRect(tmpRect)
             offsetDescendantRectToMyCoords(v, tmpRect)
+            // 點在鍵上：直接就是它（高矮不同的鍵排在一起時，「最近的排」可能是隔壁比較高的鍵）
+            if (tmpRect.contains(x.toInt(), y.toInt())) {
+                best = k
+                bestRect = Rect(tmpRect)
+                break
+            }
             val rowDiff = abs(y - tmpRect.exactCenterY())
             val colDiff = abs(x - tmpRect.exactCenterX())
             // 先比排（容許 1px 誤差視為同排），同排再比水平距離
