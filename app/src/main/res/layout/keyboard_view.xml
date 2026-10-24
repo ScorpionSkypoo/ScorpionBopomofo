@@ -417,16 +417,15 @@
         android:paddingStart="3dp"
         android:paddingEnd="3dp">
 
-        <!-- 第 0 排：數字列 (高度 44dp 與其它排完全一致，無落差) -->
-        <LinearLayout
+        <!-- 數字列與字鍵排：鍵由版面宣告（KeyboardLayout）決定，預設 QWERTY；按鍵高度 44dp 與其它排一致 -->
+        <com.p3dro.scorpio.ime.ui.KeyRowLayout
             android:id="@+id/en_row_0"
             android:layout_width="match_parent"
             android:layout_height="44dp"
             android:orientation="horizontal"
             android:weightSum="10" />
 
-        <!-- 第 1 排：QWERTYUIOP -->
-        <LinearLayout
+        <com.p3dro.scorpio.ime.ui.KeyRowLayout
             android:id="@+id/en_row_1"
             android:layout_width="match_parent"
             android:layout_height="44dp"
@@ -434,8 +433,7 @@
             android:orientation="horizontal"
             android:weightSum="10" />
 
-        <!-- 第 2 排：ASDFGHJKL -->
-        <LinearLayout
+        <com.p3dro.scorpio.ime.ui.KeyRowLayout
             android:id="@+id/en_row_2"
             android:layout_width="match_parent"
             android:layout_height="44dp"
@@ -443,8 +441,8 @@
             android:orientation="horizontal"
             android:weightSum="10" />
 
-        <!-- 第 3 排：Shift + ZXCVBNM + Backspace (加寬刪除鍵至 16) -->
-        <LinearLayout
+        <!-- Shift、刪除鍵放在宣告的位置（預設第 3 排頭尾） -->
+        <com.p3dro.scorpio.ime.ui.KeyRowLayout
             android:id="@+id/en_row_3"
             android:layout_width="match_parent"
             android:layout_height="44dp"
@@ -480,14 +478,6 @@
                     android:visibility="gone" />
             </FrameLayout>
 
-            <LinearLayout
-                android:id="@+id/en_row_3_keys"
-                android:layout_width="0dp"
-                android:layout_height="match_parent"
-                android:layout_weight="70"
-                android:orientation="horizontal"
-                android:weightSum="7" />
-
             <FrameLayout
                 android:id="@+id/btn_en_backspace"
                 android:layout_width="0dp"
@@ -505,7 +495,16 @@
                     android:src="@drawable/ic_ime_backspace"
                     android:tint="@color/ime_text_primary" />
             </FrameLayout>
-        </LinearLayout>
+        </com.p3dro.scorpio.ime.ui.KeyRowLayout>
+
+        <!-- 第 4 排（字鍵最多 4 排，宣告了第 4 排字鍵的版面才顯示） -->
+        <com.p3dro.scorpio.ime.ui.KeyRowLayout
+            android:id="@+id/en_row_extra"
+            android:layout_width="match_parent"
+            android:layout_height="44dp"
+            android:layout_marginTop="4dp"
+            android:orientation="horizontal"
+            android:visibility="gone" />
 
         <!-- 第 4 排：底排 (?123, 逗號, 🌐, Space, 句號, Enter)
              權重總和 10.4，送出鍵位於 8.9~10.4 與注音排完全重合，絕不位移 -->

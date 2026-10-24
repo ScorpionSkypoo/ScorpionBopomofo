@@ -9,7 +9,8 @@ import android.widget.LinearLayout
  * 像素完全重合。一般 LinearLayout 用權重分寬度時是「總寬扣掉所有鍵的間距再分」，鍵數不同（大千注音多一個 ㄦ）邊界就會差幾個像素。
  *
  * 欄位寬度比例是大千注音的最下排 [SLOTS]；每一段 [Segment] 蓋住幾個欄位，可以再依權重切成幾個鍵（鍵與鍵之間同樣留一個間距）。
- * 沒設定 segments 或鍵數對不上時跟一般 LinearLayout 一樣
+ * 上面的字鍵排用 setColumnSpans：照版面宣告（KeyboardLayout）的欄位精確排。
+ * 兩種都沒設定、或鍵數對不上時跟一般 LinearLayout 一樣
  */
 class KeyRowLayout @JvmOverloads constructor(
     context: Context,
@@ -24,15 +25,39 @@ class KeyRowLayout @JvmOverloads constructor(
             requestLayout()
         }
 
+    /**
+     * 字鍵排（上面幾排）：每個鍵的起點與寬度（欄，KeyboardLayout.Key），一欄＝排寬 ÷ columns。
+     * 每個鍵照欄位精確排，不同排同一欄的鍵上下對齊，落點模型的座標跟畫面一致
+     */
+    private var columnSpans: List<Pair<Double, Double>>? = null
+    private var columns = 10
+
+    fun setColumnSpans(columns: Int, spans: List<Pair<Double, Double>>) {
+        this.columns = columns
+        columnSpans = spans
+        requestLayout()
+    }
+
     /** 按鍵左右各 2.5dp，跟版面檔一樣四捨五入 */
     private val keyMargin = (2.5f * resources.displayMetrics.density + 0.5f).toInt()
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
         val segs = segments
         val width = MeasureSpec.getSize(widthMeasureSpec) - paddingLeft - paddingRight
-        if (segs != null && width > 0 && segs.sumOf { it.weights.size } == childCount) {
-            val slots = slotBounds(width, keyMargin)
-            val bounds = segs.flatMap { s -> split(slots[s.from][0], slots[s.to][1], s.weights, 2 * keyMargin) }
+        val spans = columnSpans
+        val bounds = when {
+            width <= 0 -> null
+            spans != null && spans.size == childCount -> {
+                val unit = width.toDouble() / columns
+                spans.map { (start, w) -> intArrayOf(Math.round(start * unit).toInt() + keyMargin, Math.round((start + w) * unit).toInt() - keyMargin) }
+            }
+            segs != null && segs.sumOf { it.weights.size } == childCount -> {
+                val slots = slotBounds(width, keyMargin)
+                segs.flatMap { s -> split(slots[s.from][0], slots[s.to][1], s.weights, 2 * keyMargin) }
+            }
+            else -> null
+        }
+        if (bounds != null) {
             var x = 0
             for (i in 0 until childCount) {
                 val lp = getChildAt(i).layoutParams as LayoutParams

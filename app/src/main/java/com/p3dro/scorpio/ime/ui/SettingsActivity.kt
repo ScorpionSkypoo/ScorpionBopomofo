@@ -1001,7 +1001,9 @@ class SettingsActivity : AppCompatActivity() {
                 h, "QWERTY 鍵盤（英文、26 鍵注音、拼音、倉頡、速成）",
                 if (acc[0] > 0) "只看落點的判對率 ${pct(acc[1], acc[0])}（共 ${acc[0]} 次）；沒有個人化是 ${pct(acc[2], acc[0])}。" else null
             )
-            heatmap(com.p3dro.scorpio.ime.engine.QwertyModel.POS, 10, 3, qwerty)
+            // 目前 QWERTY 面板上的版面（內建 QWERTY，或有宣告字鍵的輸入法）那一組
+            val layout = dict.qwerty.layout
+            heatmap(dict.qwerty.pos, layout.columns, layout.rows.size, qwerty)
         }
         infoRow(h, "怎麼看", "圓點是你瞄準這個鍵時平均按到的位置，細線從鍵中心指向它；暈開的範圍是落點的散佈，顏色越深代表這個鍵的樣本越多。")
     }

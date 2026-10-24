@@ -150,30 +150,6 @@ class ScorpioImeService : InputMethodService() {
     private val sessionComposingReadings = mutableListOf<String>()
     private val sessionCommittedWords = mutableListOf<String>()
 
-    // 大千注音 4 排鍵盤定義
-    private val row1Keys = listOf(
-        'ㄅ' to "1", 'ㄉ' to "2", 'ˇ' to "3", 'ˋ' to "4", 'ㄓ' to "5",
-        'ˊ' to "6", '˙' to "7", 'ㄚ' to "8", 'ㄞ' to "9", 'ㄢ' to "0"
-    )
-    private val row2Keys = listOf(
-        'ㄆ' to "q", 'ㄊ' to "w", 'ㄍ' to "e", 'ㄐ' to "r", 'ㄔ' to "t",
-        'ㄗ' to "y", 'ㄧ' to "u", 'ㄛ' to "i", 'ㄟ' to "o", 'ㄣ' to "p"
-    )
-    private val row3Keys = listOf(
-        'ㄇ' to "a", 'ㄋ' to "s", 'ㄎ' to "d", 'ㄑ' to "f", 'ㄕ' to "g",
-        'ㄘ' to "h", 'ㄨ' to "j", 'ㄜ' to "k", 'ㄠ' to "l", 'ㄤ' to ";"
-    )
-    private val row4Keys = listOf(
-        'ㄈ' to "z", 'ㄌ' to "x", 'ㄏ' to "c", 'ㄒ' to "v", 'ㄖ' to "b",
-        'ㄙ' to "n", 'ㄩ' to "m", 'ㄝ' to ",", 'ㄡ' to ".", 'ㄥ' to "/"
-    )
-
-    // 英文 QWERTY 佈局定義（含頂部獨立數字列）
-    private val enRow0 = listOf('1', '2', '3', '4', '5', '6', '7', '8', '9', '0')
-    private val enRow1 = listOf('q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p')
-    private val enRow2 = listOf('a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l')
-    private val enRow3 = listOf('z', 'x', 'c', 'v', 'b', 'n', 'm')
-
     companion object {
         // 外觀選項（設定「介面外觀」）
         const val PREF_KEY_BORDER = "key_border"
@@ -409,11 +385,11 @@ class ScorpioImeService : InputMethodService() {
             }
         }
 
-        // 建置注音鍵盤
-        setupRow(root.findViewById(R.id.row_1), row1Keys)
-        setupRow(root.findViewById(R.id.row_2), row2Keys)
-        setupRow(root.findViewById(R.id.row_3), row3Keys)
-        setupRow(root.findViewById(R.id.row_4), row4Keys)
+        // 建置注音鍵盤：照版面宣告（KeyboardLayout.DACHEN）的四排
+        val zhuyinRows = listOf(R.id.row_1, R.id.row_2, R.id.row_3, R.id.row_4)
+        for ((i, row) in com.p3dro.scorpio.ime.engine.KeyboardLayout.DACHEN.rows.withIndex()) {
+            setupRow(root.findViewById(zhuyinRows[i]), row.mapNotNull { it.char })
+        }
 
         val gridZhuyin = root.findViewById<com.p3dro.scorpio.ime.ui.ZhuyinGridLayout>(R.id.grid_zhuyin)
         gridZhuyin.rebuildKeyGrid()
@@ -727,6 +703,7 @@ class ScorpioImeService : InputMethodService() {
         val qwertyChinese = mode == KeyboardMode.ZHUYIN && chineseMethod.usesQwerty
         panelZhuyin?.visibility = if (mode == KeyboardMode.ZHUYIN && !qwertyChinese) View.VISIBLE else View.GONE
         panelEnglish?.visibility = if (mode == KeyboardMode.ENGLISH || qwertyChinese) View.VISIBLE else View.GONE
+        if (mode == KeyboardMode.ENGLISH || qwertyChinese) applyQwertyLayout(currentQwertyLayout())
         if (mode == KeyboardMode.ENGLISH || mode == KeyboardMode.ZHUYIN) applyQwertyLabels()
         panelSymbols?.visibility = if (mode == KeyboardMode.SYMBOLS) View.VISIBLE else View.GONE
         if (mode == KeyboardMode.NUMPAD) buildNumpad()
@@ -752,9 +729,9 @@ class ScorpioImeService : InputMethodService() {
         updateBarVisibility()
     }
 
-    private fun setupRow(rowLayout: LinearLayout, keys: List<Pair<Char, String>>) {
+    private fun setupRow(rowLayout: LinearLayout, keys: List<Char>) {
         rowLayout.removeAllViews()
-        for ((zhuyin, sub) in keys) {
+        for (zhuyin in keys) {
             val keyView = ZhuyinKeyView(ui).apply {
                 // 不顯示實體鍵盤對應的英文字母與數字（這個鍵盤打不出來，只會干擾）
                 setKey(zhuyin, "")
@@ -1043,48 +1020,14 @@ class ScorpioImeService : InputMethodService() {
             }
         }
 
-        val row0 = root.findViewById<LinearLayout>(R.id.en_row_0)
-        row0.removeAllViews()
-        for (c in enRow0) {
-            row0.addView(createEnglishNumberKey(c, 1f).also { spatial.registerKey(it, c) })
-        }
+        // 數字列與字鍵排照版面宣告排（setKeyboardMode 時依目前的輸入法換）
+        renderedQwertyLayout = null
+        enShiftKey = root.findViewById(R.id.btn_en_shift)
+        enBackspaceKey = root.findViewById(R.id.btn_en_backspace)
+        applyQwertyLayout(currentQwertyLayout())
 
-        val row1 = root.findViewById<LinearLayout>(R.id.en_row_1)
-        row1.removeAllViews()
-        for (c in enRow1) {
-            row1.addView(createEnglishKey(c, 1f).also { spatial.registerKey(it, c) })
-        }
-
-        val row2 = root.findViewById<LinearLayout>(R.id.en_row_2)
-        row2.removeAllViews()
-
-        // a 左側、l 右側的半鍵空白：觸控由空間定位歸給最近的 a / l
-        row2.addView(View(ui).apply {
-            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 0.5f)
-        })
-        for (c in enRow2) {
-            row2.addView(createEnglishKey(c, 1f).also { spatial.registerKey(it, c) })
-        }
-        row2.addView(View(ui).apply {
-            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 0.5f)
-        })
-
-        val row3KeysLayout = root.findViewById<LinearLayout>(R.id.en_row_3_keys)
-        row3KeysLayout.removeAllViews()
-        for (c in enRow3) {
-            row3KeysLayout.addView(createEnglishKey(c, 1f).also { spatial.registerKey(it, c) })
-        }
-
-        // 功能鍵只參與範圍劃分，觸控交還按鈕本身（Shift 連按、刪除長按連刪等）
-        for (id in listOf(
-            R.id.btn_en_shift, R.id.btn_en_backspace, R.id.btn_en_symbols, R.id.btn_en_comma,
-            R.id.btn_en_globe, R.id.btn_en_space, R.id.btn_en_period, R.id.btn_en_enter
-        )) {
-            spatial.registerKey(root.findViewById(id), null)
-        }
-
-        ivEnShift = root.findViewById(R.id.iv_en_shift)
-        root.findViewById<View>(R.id.btn_en_shift).setOnClickListener {
+        ivEnShift = enShiftKey?.findViewById(R.id.iv_en_shift)
+        enShiftKey?.setOnClickListener {
             triggerHaptic(it)
             if (isChineseQwerty) {
                 // 拼音：這個鍵是分隔號（xi'an）；其他中文輸入法不用 Shift
@@ -1104,7 +1047,7 @@ class ScorpioImeService : InputMethodService() {
             updateShiftVisuals()
         }
 
-        root.findViewById<View>(R.id.btn_en_backspace).setOnTouchListener(RepeatTouchListener {
+        enBackspaceKey?.setOnTouchListener(RepeatTouchListener {
             triggerHaptic(root)
             handleBackspace()
         })
@@ -1161,6 +1104,74 @@ class ScorpioImeService : InputMethodService() {
             handleEnterPress()
         }
 
+        updateShiftVisuals()
+    }
+
+    /** QWERTY 面板目前畫的版面（null 是還沒畫） */
+    private var renderedQwertyLayout: com.p3dro.scorpio.ime.engine.KeyboardLayout? = null
+    // Shift、刪除鍵（版面檔裡的那兩個 View）：依版面搬到宣告的位置，沒宣告 Shift 時不在畫面上，要自己記著
+    private var enShiftKey: View? = null
+    private var enBackspaceKey: View? = null
+
+    /** QWERTY 面板該畫的版面：中文 QWERTY 輸入法有宣告字鍵就用它的，英文與其他用內建 QWERTY */
+    private fun currentQwertyLayout(): com.p3dro.scorpio.ime.engine.KeyboardLayout =
+        (if (currentMode == KeyboardMode.ENGLISH) null else chineseMethod.keys) ?: com.p3dro.scorpio.ime.engine.KeyboardLayout.QWERTY
+
+    /**
+     * 依版面宣告畫 QWERTY 面板的數字列與字鍵排（最下排固定不動）：每個鍵照欄位精確排（KeyRowLayout），
+     * Shift、刪除鍵放到宣告的位置；落點模型（dictManager.qwerty）同時換成這個版面的鍵位與那一組的習慣
+     */
+    private fun applyQwertyLayout(layout: com.p3dro.scorpio.ime.engine.KeyboardLayout) {
+        // 落點模型每次都對一下（同樣鍵位的輸入法也要記下它用哪一組，之後改版才搬得了習慣）
+        dictManager.useQwertyLayout(layout, chineseMethod.id.takeIf { currentMode != KeyboardMode.ENGLISH })
+        if (renderedQwertyLayout == layout) return
+        val root = keyboardRootView ?: return
+        val spatial = root.findViewById<com.p3dro.scorpio.ime.ui.SpatialKeyLayout>(R.id.panel_english) ?: return
+        renderedQwertyLayout = layout
+        englishKeyViews.clear()
+        spatial.clearKeys()
+
+        val shift = enShiftKey ?: return
+        val backspace = enBackspaceKey ?: return
+        (shift.parent as? ViewGroup)?.removeView(shift)
+        (backspace.parent as? ViewGroup)?.removeView(backspace)
+
+        val row0 = root.findViewById<com.p3dro.scorpio.ime.ui.KeyRowLayout>(R.id.en_row_0)
+        row0.removeAllViews()
+        val numbers = layout.numberRow
+        row0.visibility = if (numbers == null) View.GONE else View.VISIBLE
+        if (numbers != null) {
+            val start = (layout.columns - numbers.size) / 2.0
+            for (c in numbers) row0.addView(createEnglishNumberKey(c, 1f).also { spatial.registerKey(it, c) })
+            row0.setColumnSpans(layout.columns, numbers.indices.map { (start + it) to 1.0 })
+        }
+
+        val rowIds = listOf(R.id.en_row_1, R.id.en_row_2, R.id.en_row_3, R.id.en_row_extra)
+        for ((r, id) in rowIds.withIndex()) {
+            val row = root.findViewById<com.p3dro.scorpio.ime.ui.KeyRowLayout>(id)
+            row.removeAllViews()
+            val keys = layout.rows.getOrNull(r)
+            row.visibility = if (keys == null) View.GONE else View.VISIBLE
+            // 沒有數字列時第一排貼齊上緣（跟注音鍵盤一樣），有數字列時跟其他排一樣隔 4dp
+            if (r == 0) (row.layoutParams as ViewGroup.MarginLayoutParams).topMargin = if (numbers == null) 0 else dpToPx(4)
+            if (keys == null) continue
+            for (k in keys) row.addView(
+                when (k.type) {
+                    com.p3dro.scorpio.ime.engine.KeyboardLayout.Type.CHAR -> createEnglishKey(k.char!!, 1f).also { spatial.registerKey(it, k.char) }
+                    com.p3dro.scorpio.ime.engine.KeyboardLayout.Type.SHIFT -> shift
+                    com.p3dro.scorpio.ime.engine.KeyboardLayout.Type.BACKSPACE -> backspace
+                }
+            )
+            row.setColumnSpans(layout.columns, keys.map { it.start to it.width })
+        }
+
+        // 功能鍵只參與範圍劃分，觸控交還按鈕本身（Shift 連按、刪除長按連刪等）；沒宣告 Shift 的版面不放 Shift
+        if (shift.parent != null) spatial.registerKey(shift, null)
+        spatial.registerKey(backspace, null)
+        for (id in listOf(R.id.btn_en_symbols, R.id.btn_en_comma, R.id.btn_en_globe, R.id.btn_en_space, R.id.btn_en_period, R.id.btn_en_enter)) {
+            spatial.registerKey(root.findViewById(id), null)
+        }
+        applyQwertyLabels()
         updateShiftVisuals()
     }
 
@@ -1351,7 +1362,7 @@ class ScorpioImeService : InputMethodService() {
         val wrong = retypeCandidate
         val key = intended.lowercaseChar()
         if (wrong != null && lastActionWasBackspace && wrong.char.lowercaseChar() != key &&
-            com.p3dro.scorpio.ime.engine.QwertyModel.adjacent(key, wrong.rawChar.lowercaseChar()) &&
+            dictManager.qwerty.adjacent(key, wrong.rawChar.lowercaseChar()) &&
             System.currentTimeMillis() - retypeAt < RETYPE_WINDOW_MS && personalizationAllowed()
         ) {
             dictManager.learnQwertyRetype(key, wrong)
@@ -1370,7 +1381,7 @@ class ScorpioImeService : InputMethodService() {
         for ((i, t) in touches.withIndex()) {
             val want = intended[i].lowercaseChar()
             val raw = t.rawChar.lowercaseChar()
-            if (want != raw && !com.p3dro.scorpio.ime.engine.QwertyModel.adjacent(want, raw)) return
+            if (want != raw && !dictManager.qwerty.adjacent(want, raw)) return
             // 沒有落點的（不是從鍵盤觸控來的）不學
             if (t.offsetX == 0f && t.offsetY == 0f) continue
             pairs.add(want to t)
@@ -1785,7 +1796,7 @@ class ScorpioImeService : InputMethodService() {
         // Shift：英文是大小寫；拼音是分隔號；其他中文輸入法不用
         val pinyin = chinese && chineseMethod.isPinyin
         ivEnShift?.visibility = if (chinese) View.GONE else View.VISIBLE
-        keyboardRootView?.findViewById<TextView>(R.id.tv_en_shift_label)?.apply {
+        enShiftKey?.findViewById<TextView>(R.id.tv_en_shift_label)?.apply {
             visibility = if (pinyin) View.VISIBLE else View.GONE
         }
     }

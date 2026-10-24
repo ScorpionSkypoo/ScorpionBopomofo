@@ -17,13 +17,8 @@ import kotlin.math.abs
 class SpatialModel {
 
     companion object {
-        // 大千注音 10x4 按鍵位置（與 ZhuyinGridLayout 排列一致）
-        val GRID: List<List<Char>> = listOf(
-            listOf('ㄅ', 'ㄉ', 'ˇ', 'ˋ', 'ㄓ', 'ˊ', '˙', 'ㄚ', 'ㄞ', 'ㄢ'),
-            listOf('ㄆ', 'ㄊ', 'ㄍ', 'ㄐ', 'ㄔ', 'ㄗ', 'ㄧ', 'ㄛ', 'ㄟ', 'ㄣ'),
-            listOf('ㄇ', 'ㄋ', 'ㄎ', 'ㄑ', 'ㄕ', 'ㄘ', 'ㄨ', 'ㄜ', 'ㄠ', 'ㄤ'),
-            listOf('ㄈ', 'ㄌ', 'ㄏ', 'ㄒ', 'ㄖ', 'ㄙ', 'ㄩ', 'ㄝ', 'ㄡ', 'ㄥ')
-        )
+        // 大千注音 10x4 按鍵位置：來自版面宣告（KeyboardLayout.DACHEN），鍵盤畫面也照它排
+        val GRID: List<List<Char>> = KeyboardLayout.DACHEN.rows.map { row -> row.mapNotNull { it.char } }
 
         // 半鍵單位 → 鍵距單位（鍵寬含左右 2.5dp 間距，約 2.3 個半鍵；鍵高含排距約 2.2 個半鍵）
         const val HALF_KEYS_PER_PITCH_X = 2.3

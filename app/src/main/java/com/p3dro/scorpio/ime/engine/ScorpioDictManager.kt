@@ -52,6 +52,10 @@ class ScorpioDictManager private constructor(private val context: Context) {
         private const val PREF_MOTION = "motion_bias_v1"
         private const val PREF_QWERTY_BIAS = "qwerty_bias_v1"
         private const val PREF_QWERTY_STATS = "qwerty_tap_stats_v1"
+        // 其他鍵位的 QWERTY 面板版面：「qwerty_bias_v1:<geometryId>」存習慣、「qwerty_centers_v1:<geometryId>」存鍵位（版面改版時搬習慣用），
+        // 「layout_geometry_v1:<輸入法 id>」記這個輸入法上次用的是哪一組
+        private const val PREF_QWERTY_CENTERS = "qwerty_centers_v1"
+        private const val PREF_LAYOUT_GEOMETRY = "layout_geometry_v1"
 
         // 英文學習詞（key 為小寫，word 保留最近一次的大小寫，例如 iPhone）
         // 個人慣性打錯：打了 typed 音節、實際選的是 intended 讀音的字（例如 ㄉㄨㄠ → ㄉㄧㄠ）
@@ -221,8 +225,6 @@ class ScorpioDictManager private constructor(private val context: Context) {
         private const val EN_PRIOR_WEIGHT = 0.12
         private const val EN_PRIOR_CAP = 0.35
 
-        val QWERTY_POS: Map<Char, Pair<Double, Double>> = QwertyModel.POS
-
         // 大千注音鍵盤實體相鄰按鍵對應表（針對手機觸控打錯字容錯）
         val NEAR_KEYS = mapOf(
             'ㄅ' to listOf('ㄉ', 'ㄆ'),
@@ -323,8 +325,14 @@ class ScorpioDictManager private constructor(private val context: Context) {
     private val spatialPrefs = context.getSharedPreferences("scorpio_spatial", Context.MODE_PRIVATE)
     private var spatialDirty = 0
 
-    /** QWERTY 鍵盤空間模型（英文、26 鍵注音、拼音、倉頡、速成共用的個人化落點） */
-    val qwerty = QwertyModel()
+    /**
+     * QWERTY 面板的空間模型（英文、26 鍵注音、拼音、倉頡、速成）：依版面的鍵位分組（KeyboardLayout.geometryId），
+     * 每組一份習慣；鍵位跟內建 QWERTY 一樣的都用原本那一份（qwerty_bias_v1）。目前畫在面板上的版面用哪一組，這裡就是哪一組
+     */
+    @Volatile
+    var qwerty = QwertyModel()
+        private set
+    private val qwertyGroups = HashMap<String, QwertyModel>()
     private var qwertyDirty = 0
 
     // 以下在 init 之前宣告：init 開的背景執行緒會用到
@@ -774,9 +782,10 @@ class ScorpioDictManager private constructor(private val context: Context) {
      */
     fun recordQwertySamples(samples: List<Pair<Char, BopomofoComposer.TouchPoint>>) {
         var added = 0
+        val qwerty = qwerty
         for ((intended, touch) in samples) {
             val key = intended.lowercaseChar()
-            if (key !in QWERTY_POS) continue
+            if (key !in qwerty.pos) continue
             val withHabits = qwerty.nearest(touch, useHabits = true)
             val without = qwerty.nearest(touch, useHabits = false)
             if (!qwerty.learn(key, touch)) continue
@@ -797,9 +806,70 @@ class ScorpioDictManager private constructor(private val context: Context) {
     private fun saveQwerty(added: Int) {
         qwertyDirty += added
         if (qwertyDirty < 8) return
-        spatialPrefs.edit().putString(PREF_QWERTY_BIAS, qwerty.serialize())
+        flushQwerty()
+    }
+
+    @Synchronized
+    private fun flushQwerty() {
+        if (qwertyDirty == 0) return
+        spatialPrefs.edit().putString(qwertyPrefKey(qwerty.layout.geometryId), qwerty.serialize())
             .putString(PREF_QWERTY_STATS, qwertyStats.joinToString(",")).apply()
         qwertyDirty = 0
+    }
+
+    private fun qwertyPrefKey(group: String) =
+        if (group == KeyboardLayout.QWERTY_GEOMETRY) PREF_QWERTY_BIAS else "$PREF_QWERTY_BIAS:$group"
+
+    /**
+     * QWERTY 面板換了版面（切到有宣告字鍵的輸入法、或回到英文）：落點模型換成那個版面的鍵位與那一組的習慣。
+     * 某個輸入法的版面改版、鍵位變了（新的一組還沒有資料），從它上一組的習慣依位置搬過來（KeyHabits.migrateFrom）
+     */
+    @Synchronized
+    fun useQwertyLayout(layout: KeyboardLayout, methodId: String?) {
+        val group = layout.geometryId
+        val lastKey = methodId?.let { "$PREF_LAYOUT_GEOMETRY:$it" }
+        val lastGroup = lastKey?.let { spatialPrefs.getString(it, null) }
+        if (qwerty.layout.geometryId != group) {
+            flushQwerty()
+            qwertyGroups[qwerty.layout.geometryId] = qwerty
+            qwerty = qwertyGroups.getOrPut(group) { loadQwertyGroup(layout, lastGroup) }
+            candidatesCache.evictAll()
+        }
+        val saveGroup = lastKey != null && lastGroup != group
+        val saveCenters = group != KeyboardLayout.QWERTY_GEOMETRY && !spatialPrefs.contains("$PREF_QWERTY_CENTERS:$group")
+        if (saveGroup || saveCenters) spatialPrefs.edit().apply {
+            if (saveGroup) putString(lastKey, group)
+            if (saveCenters) putString("$PREF_QWERTY_CENTERS:$group", serializeCenters(layout.centers))
+        }.apply()
+    }
+
+    private fun loadQwertyGroup(layout: KeyboardLayout, lastGroup: String?): QwertyModel {
+        val model = QwertyModel(layout)
+        val saved = spatialPrefs.getString(qwertyPrefKey(layout.geometryId), null)
+        if (saved != null) {
+            model.restore(saved)
+            return model
+        }
+        if (lastGroup == null || lastGroup == layout.geometryId) return model
+        val oldData = qwertyGroups[lastGroup]?.serialize() ?: spatialPrefs.getString(qwertyPrefKey(lastGroup), null) ?: return model
+        val oldCenters = if (lastGroup == KeyboardLayout.QWERTY_GEOMETRY) KeyboardLayout.QWERTY.centers
+        else parseCenters(spatialPrefs.getString("$PREF_QWERTY_CENTERS:$lastGroup", null)) ?: return model
+        model.migrateFrom(oldData, oldCenters)
+        Log.i(TAG, "版面鍵位改了：落點習慣依位置搬到新的一組")
+        return model
+    }
+
+    /** 鍵位：「字:x,y;…」（版面的字鍵不會是 * : ;） */
+    private fun serializeCenters(centers: Map<Char, Pair<Double, Double>>) =
+        centers.entries.joinToString(";") { (c, p) -> "$c:%.4f,%.4f".format(java.util.Locale.ROOT, p.first, p.second) }
+
+    private fun parseCenters(data: String?): Map<Char, Pair<Double, Double>>? {
+        if (data.isNullOrBlank()) return null
+        return data.split(';').mapNotNull { part ->
+            if (part.length < 3 || part[1] != ':') return@mapNotNull null
+            val nums = part.substring(2).split(',').mapNotNull { it.toDoubleOrNull() }
+            if (nums.size != 2) null else part[0] to (nums[0] to nums[1])
+        }.toMap()
     }
 
     /** QWERTY 只看落點時判對的次數：[總數, 有個人化時判對, 沒有個人化時判對] */
@@ -869,16 +939,15 @@ class ScorpioDictManager private constructor(private val context: Context) {
      * 落點以實際按到的鍵（rawChar）為準；按下當下被改判過的，原本按到的鍵一定列為候選
      */
     private fun englishNeighborKeys(touch: BopomofoComposer.TouchPoint): List<Pair<Char, Double>> {
+        val qwerty = qwerty
         val c = touch.char.lowercaseChar()
-        val pos = QWERTY_POS[c] ?: return emptyList()
-        val rawPos = QWERTY_POS[touch.rawChar.lowercaseChar()] ?: pos
-        val px = rawPos.first + touch.offsetX * 0.5
-        val py = rawPos.second + touch.offsetY * 0.5
+        val pos = qwerty.pos[c] ?: return emptyList()
+        val (px, py) = qwerty.point(touch) ?: (pos.first + touch.offsetX * 0.5 to pos.second + touch.offsetY * 0.5)
         // 距離以「瞄準該鍵時的習慣落點」為準（沒有個人化資料時就是鍵中心）
         val c0 = qwerty.center(c)!!
         val d0 = (px - c0.first) * (px - c0.first) + (py - c0.second) * (py - c0.second)
         val out = ArrayList<Pair<Char, Double>>(8)
-        for ((k, p) in QWERTY_POS) {
+        for ((k, p) in qwerty.pos) {
             if (k == c) continue
             val dx = p.first - pos.first
             val dy = p.second - pos.second
@@ -895,10 +964,10 @@ class ScorpioDictManager private constructor(private val context: Context) {
      * logScore(c)：接上 c 後最佳切分的分數（自然對數），null 為解不出來；與英文相同的權重與上限
      */
     fun resolveQwertyTap(raw: Char, offsetX: Float, offsetY: Float, logScore: (Char) -> Double?): Char {
-        val rawPos = QWERTY_POS[raw] ?: return raw
-        val px = rawPos.first + offsetX * 0.5
-        val py = rawPos.second + offsetY * 0.5
-        val options = QWERTY_POS.filter { (k, p) ->
+        val qwerty = qwerty
+        val rawPos = qwerty.pos[raw] ?: return raw
+        val (px, py) = qwerty.point(raw, offsetX, offsetY)!!
+        val options = qwerty.pos.filter { (k, p) ->
             k == raw || (p.first - rawPos.first).let { it * it } + (p.second - rawPos.second).let { it * it } <= 1.6
         }
         // 只評估落點夠近、可能翻盤的鍵（其餘鍵的落點代價已超過先驗上限，不必解碼）
@@ -932,11 +1001,11 @@ class ScorpioDictManager private constructor(private val context: Context) {
      */
     fun resolveEnglishTap(raw: Char, offsetX: Float, offsetY: Float, prefix: String): Char {
         val index = data.english ?: return raw
-        val rawPos = QWERTY_POS[raw] ?: return raw
+        val qwerty = qwerty
+        val rawPos = qwerty.pos[raw] ?: return raw
         if (!prefix.all { it in 'a'..'z' }) return raw
-        val px = rawPos.first + offsetX * 0.5
-        val py = rawPos.second + offsetY * 0.5
-        val options = QWERTY_POS.filter { (k, p) ->
+        val (px, py) = qwerty.point(raw, offsetX, offsetY)!!
+        val options = qwerty.pos.filter { (k, p) ->
             k == raw || (p.first - rawPos.first).let { it * it } + (p.second - rawPos.second).let { it * it } <= 1.6
         }
         val mass = HashMap<Char, Double>(options.size)
@@ -2687,7 +2756,14 @@ class ScorpioDictManager private constructor(private val context: Context) {
         spatial.restore(null)
         spatial.motion.restore(null)
         qwerty.restore(null)
-        spatialPrefs.edit().remove(PREF_SPATIAL_BIAS).remove(PREF_MOTION).remove(PREF_QWERTY_BIAS).apply()
+        synchronized(this) {
+            qwertyGroups.values.forEach { it.restore(null) }
+            qwertyDirty = 0
+        }
+        spatialPrefs.edit().apply {
+            remove(PREF_SPATIAL_BIAS).remove(PREF_MOTION).remove(PREF_QWERTY_BIAS)
+            for (k in spatialPrefs.all.keys) if (k.startsWith("$PREF_QWERTY_BIAS:")) remove(k)
+        }.apply()
         candidatesCache.evictAll()
     }
 

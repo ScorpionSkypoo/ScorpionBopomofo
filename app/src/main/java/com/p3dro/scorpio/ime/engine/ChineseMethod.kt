@@ -11,6 +11,8 @@ import java.io.File
  *   zhuyin26  26 鍵注音（keymap：41 個字母依序對應 ㄅ…ㄙ、ㄧㄨㄩ、ㄚ…ㄦ、˙ˊˇˋ）
  *   pinyin    漢語拼音
  *   cangjie   倉頡；quick 速成（requires 碼表資料包 cangjie）
+ * schema 2 可以加 keys 宣告 QWERTY 面板的字鍵排（KeyboardLayout，格式見 docs/keyboard-layouts.md）；沒寫就是內建 QWERTY。
+ * 目前的打字方式都用 26 個英文字母，所以 keys 的字鍵要剛好是 a–z 各一次
  * 設定存 id；啟用的輸入法以地球鍵依序切換（最後是英文）
  */
 data class ChineseMethod(
@@ -28,7 +30,9 @@ data class ChineseMethod(
     val sort: Int = 99,
     /** 語言（BCP 47）與顯示名稱：設定頁「新增輸入法」先選語言再選版面 */
     val language: String = "zh-TW",
-    val languageName: String = "中文（台灣）"
+    val languageName: String = "中文（台灣）",
+    /** QWERTY 面板的字鍵排（schema 2）；null 是內建 QWERTY */
+    val keys: KeyboardLayout? = null
 ) {
 
     enum class Engine(val id: String) { DACHEN("dachen"), ZHUYIN26("zhuyin26"), PINYIN("pinyin"), CANGJIE("cangjie"), QUICK("quick") }
@@ -51,7 +55,7 @@ data class ChineseMethod(
     companion object {
         const val PREF_ENABLED = "chinese_methods"
         const val PREF_CURRENT = "chinese_method"
-        const val SCHEMA = 1
+        const val SCHEMA = 2
 
         val DACHEN = ChineseMethod("dachen", "注音（大千）", "注音", "標準大千 41 鍵注音鍵盤，支援免聲調、簡拼與打錯修正。", Engine.DACHEN)
 
@@ -60,6 +64,7 @@ data class ChineseMethod(
             .mapIndexed { i, r -> ('a' + i) to r }.toMap()
 
         private val ID = Regex("[a-z0-9_]{1,32}")
+        private val LETTERS = ('a'..'z').toSet()
 
         /** 解析版面 JSON；格式不對、或是這版 App 不認得的打字方式回傳 null（新版面在舊 App 上不會出錯） */
         fun parse(json: String): ChineseMethod? = try {
@@ -67,16 +72,19 @@ data class ChineseMethod(
             val engine = Engine.entries.firstOrNull { it.id == o.optString("engine") && it != Engine.DACHEN }
             val id = o.getString("id")
             val keymap = o.optString("keymap").ifEmpty { null }
+            val keys = o.optJSONObject("keys")?.let { KeyboardLayout.parse(it) ?: return null }
             when {
                 o.optInt("schema", 1) > SCHEMA || engine == null || !ID.matches(id) || id == DACHEN.id -> null
                 engine == Engine.ZHUYIN26 && (keymap == null || !LetterDecoder.isValidKeymap(keymap)) -> null
+                keys != null && keys.centers.keys != LETTERS -> null
                 else -> ChineseMethod(
                     id, o.getString("name"), o.optString("spaceLabel").ifEmpty { o.getString("name") }, o.optString("description", ""),
                     engine, keymap, o.optString("version", ""),
                     o.optJSONArray("requires")?.let { a -> (0 until a.length()).map { a.getString(it) } } ?: emptyList(),
                     o.optInt("sort", 99),
                     o.optString("language").ifEmpty { "zh-TW" },
-                    o.optString("languageName").ifEmpty { "中文（台灣）" }
+                    o.optString("languageName").ifEmpty { "中文（台灣）" },
+                    keys
                 )
             }
         } catch (e: Exception) {

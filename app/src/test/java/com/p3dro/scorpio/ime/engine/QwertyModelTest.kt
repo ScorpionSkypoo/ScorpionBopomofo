@@ -3,6 +3,7 @@ package com.p3dro.scorpio.ime.engine
 import com.p3dro.scorpio.ime.engine.BopomofoComposer.TouchPoint
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -49,10 +50,30 @@ class QwertyModelTest {
 
     @Test
     fun adjacency() {
-        assertTrue(QwertyModel.adjacent('e', 'r'))
-        assertTrue(QwertyModel.adjacent('e', 'd'))
-        assertTrue(QwertyModel.adjacent('e', 's'))
-        assertFalse(QwertyModel.adjacent('e', 't'))
-        assertFalse(QwertyModel.adjacent('q', 'p'))
+        val m = QwertyModel()
+        assertTrue(m.adjacent('e', 'r'))
+        assertTrue(m.adjacent('e', 'd'))
+        assertTrue(m.adjacent('e', 's'))
+        assertFalse(m.adjacent('e', 't'))
+        assertFalse(m.adjacent('q', 'p'))
+    }
+
+    @Test
+    fun migrateMovesHabitsByPosition() {
+        // 舊版面習慣按 q 的右邊；新版面 a、q 對調（AZERTY 的 a 在 QWERTY q 的位置）：新的 a 拿到舊 q 的習慣
+        val old = QwertyModel()
+        repeat(100) { old.learn('q', TouchPoint('q', 0.5f, 0f)) }
+        val azerty = KeyboardLayout.parse(org.json.JSONObject(
+            """{"rows":["azertyuiop","qsdfghjklm",[{"special":"shift"},"wxcvbn",{"special":"backspace"}]]}"""
+        ))!!
+        val m = QwertyModel(azerty)
+        m.migrateFrom(old.serialize(), old.pos)
+        val from = old.keySpreads()['q']!!
+        val to = m.keySpreads()['a']!!
+        assertEquals(from.dx, to.dx, 1e-3)
+        // 樣本數減半：新版面打一陣子就跟上
+        assertEquals(from.n / 2, to.n, 1e-9)
+        // 新的 q 在舊 a 的位置，舊 a 沒有資料
+        assertNull(m.keySpreads()['q'])
     }
 }

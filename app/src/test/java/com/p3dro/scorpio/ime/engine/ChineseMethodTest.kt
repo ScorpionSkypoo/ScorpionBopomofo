@@ -33,7 +33,21 @@ class ChineseMethodTest {
         assertNull(ChineseMethod.parse("""{"id":"x","name":"x","engine":"stroke"}"""))
         assertNull(ChineseMethod.parse("""{"id":"x","name":"x","engine":"zhuyin26","keymap":"abc"}"""))
         assertNull(ChineseMethod.parse("""{"id":"dachen","name":"x","engine":"pinyin"}"""))
-        assertNull(ChineseMethod.parse("""{"schema":2,"id":"x","name":"x","engine":"pinyin"}"""))
+        assertNull(ChineseMethod.parse("""{"schema":3,"id":"x","name":"x","engine":"pinyin"}"""))
         assertNull(ChineseMethod.parse("""{"id":"../x","name":"x","engine":"pinyin"}"""))
+    }
+
+    @Test
+    fun declaredKeys() {
+        // Dvorak 拼音：字鍵是 a–z 各一次（第 3 排 9 鍵＋刪除剛好 10 欄，放不下 Shift）
+        val dvorak = """{"schema":2,"id":"pinyin_dvorak","name":"拼音（Dvorak）","engine":"pinyin",
+            "keys":{"numberRow":"1234567890","rows":["pyfgcrl","aoeuidhtns",["qjkxbmwvz",{"special":"backspace"}]]}}"""
+        val m = ChineseMethod.parse(dvorak)!!
+        assertEquals(0.0 + 1.5, m.keys!!.centers['p']!!.first, 1e-9)
+        assertEquals(null, ChineseMethod.parse(hsu)!!.keys)
+        // 少了字母、多了不是字母的鍵、keys 不合規則：整個版面都不收
+        assertNull(ChineseMethod.parse(dvorak.replace("qjkxbmwvz", "qjkxbmwv")))
+        assertNull(ChineseMethod.parse(dvorak.replace("pyfgcrl", "pyfgcrlー")))
+        assertNull(ChineseMethod.parse(dvorak.replace("\"columns\":", "").replace("{\"numberRow\"", "{\"columns\":20,\"numberRow\"")))
     }
 }

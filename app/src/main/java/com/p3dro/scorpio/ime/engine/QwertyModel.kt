@@ -3,33 +3,31 @@ package com.p3dro.scorpio.ime.engine
 import kotlin.math.abs
 
 /**
- * QWERTY 字母鍵的空間模型：英文、26 鍵注音、漢語拼音、倉頡、速成共用同一個實體鍵盤，所以共用一份落點習慣
+ * QWERTY 鍵盤（英文、26 鍵注音、漢語拼音、倉頡、速成共用的那個面板）字鍵的空間模型
  * - 每個鍵是一個二元高斯分佈（鍵寬單位，同排鄰鍵懲罰約 1.2、上下約 1.0）
  * - 個人化：跟大千的 SpatialModel 一樣學每鍵的平均偏移（KeyHabits）；沒有資料時跟沒有這個功能完全一樣
+ * - 鍵的位置來自版面宣告（KeyboardLayout）：同樣位置的版面共用一份習慣（geometryId），預設是內建 QWERTY
  *
- * 座標：鍵寬為 1（x）、排距為 1（y），原點為 q 的中心；觸控偏移沿用 SpatialKeyLayout 的單位（半個鍵寬／鍵高為 1）
+ * 座標：一欄為 1（x）、排距為 1（y），原點為第一欄的鍵中心（QWERTY 是 q）；觸控偏移沿用 SpatialKeyLayout 的單位（半個鍵寬／鍵高為 1）
  */
-class QwertyModel {
+class QwertyModel(val layout: KeyboardLayout = KeyboardLayout.QWERTY) {
 
     companion object {
-        // 字母鍵中心座標（第 2 排右移半鍵、第 3 排右移一鍵半，對應實際版面）
-        val POS: Map<Char, Pair<Double, Double>> = buildMap {
-            "qwertyuiop".forEachIndexed { i, c -> put(c, i.toDouble() to 0.0) }
-            "asdfghjkl".forEachIndexed { i, c -> put(c, i + 0.5 to 1.0) }
-            "zxcvbnm".forEachIndexed { i, c -> put(c, i + 1.5 to 2.0) }
-        }
-
         private const val VAR_X = 0.5 / 1.2
         private const val VAR_Y = 0.5
+    }
 
-        /** 兩個鍵是否相鄰（含斜角）：鍵心距離² ≤ 1.6 */
-        fun adjacent(a: Char, b: Char): Boolean {
-            val p = POS[a] ?: return false
-            val q = POS[b] ?: return false
-            val dx = p.first - q.first
-            val dy = p.second - q.second
-            return dx * dx + dy * dy <= 1.6
-        }
+    /** 字鍵中心座標 */
+    val pos: Map<Char, Pair<Double, Double>> = layout.centers
+    private val widths = layout.widths
+
+    /** 兩個鍵是否相鄰（含斜角）：鍵心距離² ≤ 1.6 */
+    fun adjacent(a: Char, b: Char): Boolean {
+        val p = pos[a] ?: return false
+        val q = pos[b] ?: return false
+        val dx = p.first - q.first
+        val dy = p.second - q.second
+        return dx * dx + dy * dy <= 1.6
     }
 
     private val habits = KeyHabits()
@@ -37,12 +35,15 @@ class QwertyModel {
     /** 落點的鍵盤座標；不是字母鍵（數字、符號）回傳 null */
     fun point(touch: BopomofoComposer.TouchPoint): Pair<Double, Double>? = point(touch.rawChar, touch.offsetX, touch.offsetY)
 
-    fun point(raw: Char, offsetX: Float, offsetY: Float): Pair<Double, Double>? =
-        POS[raw.lowercaseChar()]?.let { (it.first + offsetX * 0.5) to (it.second + offsetY * 0.5) }
+    fun point(raw: Char, offsetX: Float, offsetY: Float): Pair<Double, Double>? {
+        val c = raw.lowercaseChar()
+        val p = pos[c] ?: return null
+        return (p.first + offsetX * 0.5 * (widths[c] ?: 1.0)) to (p.second + offsetY * 0.5)
+    }
 
     /** 瞄準這個鍵時的落點中心（鍵中心＋個人化偏移） */
     fun center(key: Char, useHabits: Boolean = true): Pair<Double, Double>? {
-        val p = POS[key] ?: return null
+        val p = pos[key] ?: return null
         if (!useHabits) return p
         val (bx, by) = habits.effectiveBias(key)
         return (p.first + bx) to (p.second + by)
@@ -62,7 +63,7 @@ class QwertyModel {
         val (px, py) = point(touch) ?: return null
         var best = raw
         var bestCost = cost(px, py, raw, useHabits)
-        for (k in POS.keys) {
+        for (k in pos.keys) {
             if (k == raw || !adjacent(k, raw)) continue
             val c = cost(px, py, k, useHabits)
             if (c < bestCost - 1e-9) {
@@ -76,7 +77,7 @@ class QwertyModel {
     /** 記錄一筆「想按 intended、實際落在 touch」的樣本；離目標超過一個半鍵距多半是對錯位置，不納入 */
     fun learn(intended: Char, touch: BopomofoComposer.TouchPoint): Boolean {
         val key = intended.lowercaseChar()
-        val target = POS[key] ?: return false
+        val target = pos[key] ?: return false
         val (px, py) = point(touch) ?: return false
         val dx = px - target.first
         val dy = py - target.second
@@ -92,4 +93,8 @@ class QwertyModel {
     fun serialize(): String = habits.serialize()
 
     fun restore(data: String?) = habits.restore(data)
+
+    /** 版面改版：從舊版面的習慣（serialize 的內容）與鍵位搬過來（見 KeyHabits.migrateFrom） */
+    fun migrateFrom(oldData: String, oldCenters: Map<Char, Pair<Double, Double>>) =
+        habits.migrateFrom(KeyHabits().apply { restore(oldData) }, oldCenters, pos)
 }

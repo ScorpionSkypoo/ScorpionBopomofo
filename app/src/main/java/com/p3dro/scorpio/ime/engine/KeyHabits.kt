@@ -76,7 +76,29 @@ class KeyHabits {
         KeySpread(b.dx, b.dy, if (hasSpread) sqrt(b.vx) else null, if (hasSpread) sqrt(b.vy) else null, b.n)
     }
 
-    /** 序列化：「鍵:dx,dy,n,vx,vy,m;…」，全體平均以 * 為鍵 */
+    /**
+     * 版面改版、鍵的位置變了：每個新鍵拿舊版面裡「位置最近的鍵」的習慣（習慣主要跟拇指按在螢幕哪裡有關），
+     * 樣本數減半，用新版面打一陣子就會跟上；全體平均照搬（一樣減半）
+     */
+    fun migrateFrom(old: KeyHabits, oldCenters: Map<Char, Pair<Double, Double>>, newCenters: Map<Char, Pair<Double, Double>>) {
+        val snapshot = KeyHabits().apply { restore(old.serialize()) }
+        synchronized(this) {
+            keyBias.clear()
+            fun copy(from: Bias, to: Bias) {
+                to.dx = from.dx; to.dy = from.dy; to.n = from.n / 2
+                to.vx = from.vx; to.vy = from.vy; to.m = from.m / 2
+            }
+            copy(snapshot.globalBias, globalBias)
+            for ((k, p) in newCenters) {
+                val nearest = oldCenters.minByOrNull { (_, q) -> (p.first - q.first).let { it * it } + (p.second - q.second).let { it * it } }
+                    ?: continue
+                val b = snapshot.keyBias[nearest.key] ?: continue
+                copy(b, keyBias.getOrPut(k) { Bias() })
+            }
+        }
+    }
+
+    /** 序列化：「鍵:dx,dy,n,vx,vy,m;…」，全體平均以 * 為鍵（所以版面的字鍵不能是 * : ;） */
     @Synchronized
     fun serialize(): String {
         val sb = StringBuilder()
