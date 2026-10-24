@@ -123,6 +123,8 @@ class ScorpioImeService : InputMethodService() {
     private var codeCandidateJob: Job? = null
     // 與 englishWordBuffer 逐字對應的觸控落點（供英文補全鄰鍵容錯）
     private val englishTouches = mutableListOf<BopomofoComposer.TouchPoint>()
+    // 倉頡／速成每一碼的落點（QWERTY 落點學習用）
+    private val codeTouches = mutableListOf<BopomofoComposer.TouchPoint>()
     private var isVibrationEnabled = false
     private var lastNightMode = Configuration.UI_MODE_NIGHT_UNDEFINED
     private var keyboardRootView: View? = null
@@ -937,7 +939,8 @@ class ScorpioImeService : InputMethodService() {
         if (currentMode == KeyboardMode.ENGLISH) {
             if (englishWordBuffer.isNotEmpty()) {
                 englishWordBuffer.deleteCharAt(englishWordBuffer.length - 1)
-                if (englishTouches.isNotEmpty()) englishTouches.removeAt(englishTouches.size - 1)
+                val removed = englishTouches.removeLastOrNull()
+                rememberRetype(removed)
                 ic?.setComposingText(englishWordBuffer, 1)
                 if (englishWordBuffer.isEmpty()) ic?.finishComposingText()
                 updateEnglishCandidates()
@@ -963,6 +966,7 @@ class ScorpioImeService : InputMethodService() {
             // 倉頡／速成：刪掉最後一碼
             if (codeBuffer.isNotEmpty()) {
                 codeBuffer.deleteCharAt(codeBuffer.length - 1)
+                rememberRetype(codeTouches.removeLastOrNull())
                 updateCodeComposing()
                 return
             }
@@ -977,9 +981,7 @@ class ScorpioImeService : InputMethodService() {
                     // 徹底清除輸入框中的暫存注音，絕不殘留成已上屏字！
                     clearComposer(discardComposingText = true)
                 }
-                retypeCandidate = if (lastActionWasBackspace) null else removed?.takeIf { composer.decoder == null }
-                retypeAt = System.currentTimeMillis()
-                lastActionWasBackspace = true
+                rememberRetype(removed)
                 return
             } else {
                 // 若已經選好字或純文字，按一下刪除鍵刪掉前面一個字，並取消接續詞聯想
@@ -1213,6 +1215,7 @@ class ScorpioImeService : InputMethodService() {
             val word = englishWordBuffer.toString()
             serviceScope.launch { dictManager.recordEnglishWord(word) }
         }
+        if (learn) recordQwertyTouches(englishTouches, englishWordBuffer)
         // 暫存中的字照目前樣子確定送出
         if (englishWordBuffer.isNotEmpty()) currentInputConnection?.finishComposingText()
         englishWordBuffer.clear()
@@ -1225,6 +1228,7 @@ class ScorpioImeService : InputMethodService() {
         val resolved = dictManager.resolveEnglishTap(raw, offsetX, offsetY, englishWordBuffer.toString().lowercase())
         fun cased(c: Char) = if (shiftState != ShiftState.OFF) c.uppercaseChar() else c
         val outChar = cased(resolved)
+        learnQwertyRetype(resolved)
         englishWordBuffer.append(outChar)
         englishTouches.add(BopomofoComposer.TouchPoint(outChar, offsetX, offsetY, rawChar = cased(raw)))
         // 打字中的字先暫存（底線），空白、標點或選字時才確定送出
@@ -1307,6 +1311,45 @@ class ScorpioImeService : InputMethodService() {
     private var retypeCandidate: BopomofoComposer.TouchPoint? = null
     private var retypeAt = 0L
     private var lastActionWasBackspace = false
+
+    /** 刪掉一個鍵：記下被刪的落點；連刪多個鍵多半是改主意，不算 */
+    private fun rememberRetype(removed: BopomofoComposer.TouchPoint?) {
+        retypeCandidate = if (lastActionWasBackspace) null else removed
+        retypeAt = System.currentTimeMillis()
+        lastActionWasBackspace = true
+    }
+
+    /** QWERTY 鍵盤剛刪掉一個鍵、馬上改按旁邊的鍵：學「按歪的那一下其實想按 intended」 */
+    private fun learnQwertyRetype(intended: Char) {
+        val wrong = retypeCandidate
+        val key = intended.lowercaseChar()
+        if (wrong != null && lastActionWasBackspace && wrong.char.lowercaseChar() != key &&
+            com.p3dro.scorpio.ime.engine.QwertyModel.adjacent(key, wrong.rawChar.lowercaseChar()) &&
+            System.currentTimeMillis() - retypeAt < RETYPE_WINDOW_MS && personalizationAllowed()
+        ) {
+            dictManager.learnQwertyRetype(key, wrong)
+        }
+        retypeCandidate = null
+        lastActionWasBackspace = false
+    }
+
+    /**
+     * QWERTY 落點學習：每個落點對上 intended 同一位置的字母（送出的字、選的候選）。
+     * 有一個位置對不上（不是同一鍵也不是鄰鍵，例如補全或改字造成錯位）就整筆不學
+     */
+    private fun recordQwertyTouches(touches: List<BopomofoComposer.TouchPoint>, intended: CharSequence) {
+        if (!personalizationAllowed() || touches.isEmpty() || intended.length < touches.size) return
+        val pairs = ArrayList<Pair<Char, BopomofoComposer.TouchPoint>>(touches.size)
+        for ((i, t) in touches.withIndex()) {
+            val want = intended[i].lowercaseChar()
+            val raw = t.rawChar.lowercaseChar()
+            if (want != raw && !com.p3dro.scorpio.ime.engine.QwertyModel.adjacent(want, raw)) return
+            // 沒有落點的（不是從鍵盤觸控來的）不學
+            if (t.offsetX == 0f && t.offsetY == 0f) continue
+            pairs.add(want to t)
+        }
+        dictManager.recordQwertySamples(pairs)
+    }
 
     private fun onZhuyinKeyPressed(c: Char, offsetX: Float = 0f, offsetY: Float = 0f) {
         predictionJob?.cancel()
@@ -1442,6 +1485,7 @@ class ScorpioImeService : InputMethodService() {
         val resolved = if (decoder != null && decoder.isReady) {
             dictManager.resolveQwertyTap(raw, offsetX, offsetY) { c -> decoder.bestScoreWith(history, c) }
         } else raw
+        learnQwertyRetype(resolved)
         composer.append(BopomofoComposer.TouchPoint(resolved, offsetX, offsetY, raw))
         updateComposingAndCandidates()
     }
@@ -1579,7 +1623,9 @@ class ScorpioImeService : InputMethodService() {
         val quick = chineseMethod == com.p3dro.scorpio.ime.engine.ChineseMethod.QUICK
         val prefix = codeBuffer.toString()
         val resolved = dictManager.resolveQwertyTap(raw, offsetX, offsetY) { c -> dictManager.codePrefixLogMass(prefix + c, quick) }
+        learnQwertyRetype(resolved)
         codeBuffer.append(resolved)
+        codeTouches.add(BopomofoComposer.TouchPoint(resolved, offsetX, offsetY, raw))
         updateCodeComposing()
     }
 
@@ -1608,7 +1654,10 @@ class ScorpioImeService : InputMethodService() {
 
     private fun commitCodeCandidate(word: String) {
         codeCandidateJob?.cancel()
+        // 選了這組碼查到的字：打的每一碼都是想按的鍵
+        recordQwertyTouches(codeTouches, codeBuffer)
         codeBuffer.clear()
+        codeTouches.clear()
         currentInputConnection?.commitText(word, 1)
         candidateAdapter?.submitList(emptyList())
         if (isCandidateExpanded) collapseCandidates()
@@ -1620,6 +1669,7 @@ class ScorpioImeService : InputMethodService() {
     private fun clearCodeBuffer() {
         codeCandidateJob?.cancel()
         codeBuffer.clear()
+        codeTouches.clear()
         currentInputConnection?.setComposingText("", 1)
         currentInputConnection?.finishComposingText()
         candidateAdapter?.submitList(emptyList())
@@ -1669,6 +1719,7 @@ class ScorpioImeService : InputMethodService() {
             // 替換使用者輸入的前綴，補全英文單字並加一個空格
             // 暫存中的字直接被選中的字取代（commitText 會換掉暫存區）
             ic?.commitText("$candidate ", 1)
+            recordQwertyTouches(englishTouches, candidate)
             finishEnglishWord(learn = false)
             if (personalizationAllowed()) serviceScope.launch { dictManager.recordEnglishWord(candidate) }
             onEnglishWordDone(candidate)
@@ -1761,8 +1812,12 @@ class ScorpioImeService : InputMethodService() {
     }
 
     private fun recordTouchSamples(points: List<BopomofoComposer.TouchPoint>, word: String) {
-        // 落點學習只適用大千注音鍵盤
-        if (composer.decoder != null || !personalizationAllowed()) return
+        if (!personalizationAllowed()) return
+        // 26 鍵注音、拼音：選了這些字母解出來的字，按下當下判定的字母就是想按的鍵
+        if (composer.decoder != null) {
+            recordQwertyTouches(points, points.map { it.char }.joinToString(""))
+            return
+        }
         if (points.isEmpty() || !word.all { Character.UnicodeScript.of(it.code) == Character.UnicodeScript.HAN }) return
         serviceScope.launch { dictManager.recordTouchSamples(points, word) }
     }
