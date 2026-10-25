@@ -49,6 +49,8 @@ class ScorpioDictManager private constructor(private val context: Context) {
         // 用打字記錄 840 次選字重播比：1.5 → 76.8%、2.5 → 77.4%、3.5 → 77.7%、5 → 77.5%、8 → 77.4%（第一候選命中）
         private const val STRONG_CORRECTION = 0.4
         private const val LITERAL_MARGIN = 3.5
+        // 慣性打錯至少選過這麼多次（而且反方向很少）才算穩定的個人習慣，見 isTypoHabit
+        private const val TYPO_HABIT_MIN = 5
         // 按歪了的鄰鍵候選：鄰鍵懲罰在這以下才列（按在鍵中央時鄰鍵約 0.65～1.3（上下的鄰鍵比較便宜，個人習慣也會讓某個方向便宜一點），偏向某鄰鍵三、四成鍵寬就會低於這個）、最多幾個詞
         private const val NEIGHBOR_ALT_MAX = 0.6
         // 整句網格（全部選字的共同打分，log10）：
@@ -622,6 +624,17 @@ class ScorpioDictManager private constructor(private val context: Context) {
     /** 慣性打錯的懲罰：選過越多次越便宜；打出來的音節本身合法時保守一點，避免蓋掉本來就想打的字 */
     private fun typoPenalty(count: Int, typedIsValid: Boolean): Double =
         if (typedIsValid) maxOf(0.5, 1.2 - 0.3 * count) else maxOf(0.15, 1.0 - 0.35 * count)
+
+    /**
+     * 穩定的慣性打錯：打 typed 想打 intended 至少 TYPO_HABIT_MIN 次，反方向不到三分之一（ㄒㄧㄣ 想打 ㄒㄧㄢ）。
+     * 這是固定的個人習慣，修正它不算「改了你打的注音」，不受打對優先（LITERAL_MARGIN）限制；
+     * 兩個方向都常發生的（ㄧㄠ／ㄧㄡ）是隨手按錯，照打的優先
+     */
+    private fun isTypoHabit(typed: String, intended: String, count: Int): Boolean {
+        if (count < TYPO_HABIT_MIN) return false
+        val reverse = typoFixes(intended)[typed] ?: 0
+        return reverse * 3 < count
+    }
 
     private fun recordTypo(typed: String, intended: String) {
         val database = db ?: return
@@ -2358,7 +2371,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
         for ((v, pen) in fuzzy.variants(s)) putMin(v, pen, corr = true)
 
         // (D2) 個人慣性打錯（以前打 s 卻選了 intended 讀音的字）
-        for ((intended, cnt) in typoFixes(s)) putMin(intended, typoPenalty(cnt, isValidSyllable(s)), corr = true)
+        for ((intended, cnt) in typoFixes(s)) putMin(intended, typoPenalty(cnt, isValidSyllable(s)), corr = !isTypoHabit(s, intended, cnt))
 
         // (E) 鄰鍵手滑容錯：一律納入實體相鄰鍵，觸控落點只調整各方向的可能性（偏向哪邊，哪邊的鍵懲罰越低）
         for (i in s.indices) {
