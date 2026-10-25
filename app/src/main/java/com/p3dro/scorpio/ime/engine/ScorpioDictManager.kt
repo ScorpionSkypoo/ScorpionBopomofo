@@ -51,6 +51,8 @@ class ScorpioDictManager private constructor(private val context: Context) {
         private const val LITERAL_MARGIN = 3.5
         // 句尾只打一個聲母時，「前面那句」放在第幾個候選（0 起算），見 getCandidateGroups
         private const val TRAIL_HEAD_POSITION = 1
+        // 候選列前面先放幾個詞，才接 Emoji、顏文字。重播比過：2 → 3，前三命中 91.2% → 92.2%（4 一樣）
+        private const val INLINE_TEXT_FIRST = 3
         // 「前兩個詞」的搭配存在接續詞表裡，prev 是兩個詞用這個字元串起來（資料 repo 的 build_trigram_pack.py）
         const val TRIGRAM_SEP = '\u0001'
         // 慣性打錯至少選過這麼多次（而且反方向很少）才算穩定的個人習慣，見 isTypoHabit
@@ -1701,9 +1703,9 @@ class ScorpioDictManager private constructor(private val context: Context) {
             }
         }
 
-        // 6. 排列候選字：前兩個照實際按的鍵；按歪了（落點靠近鄰鍵）時接著列鄰鍵的詞，再來 Emoji、顏文字與其他
+        // 6. 排列候選字：前三個照實際按的鍵；按歪了（落點靠近鄰鍵）時接著列鄰鍵的詞，再來 Emoji、顏文字與其他
         var textIndex = 0
-        while (textIndex < textCandidates.size && textIndex < 2) {
+        while (textIndex < textCandidates.size && textIndex < INLINE_TEXT_FIRST) {
             addCandidate(textCandidates[textIndex].word)
             textIndex++
         }
