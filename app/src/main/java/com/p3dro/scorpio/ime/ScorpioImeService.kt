@@ -135,6 +135,10 @@ class ScorpioImeService : InputMethodService() {
     private var isVibrationEnabled = false
     private var lastNightMode = Configuration.UI_MODE_NIGHT_UNDEFINED
     private var keyboardRootView: View? = null
+
+    /** 最近一根手指按下的位置（鍵盤最外層的座標）：ㄦ 這類自己處理觸控的鍵用來算落點 */
+    private var lastDownX = 0f
+    private var lastDownY = 0f
     private var keyPreview: com.p3dro.scorpio.ime.ui.KeyPreview? = null
     private var lastCommittedWord: String? = null
 
@@ -415,6 +419,16 @@ class ScorpioImeService : InputMethodService() {
         gridZhuyin.onKeyTapListener = { char, offsetX, offsetY ->
             onZhuyinKeyPressed(char, offsetX, offsetY)
         }
+        // 握法判斷看鍵盤上的每一下（注音、聲調、ㄦ、空白、刪除、英文、符號鍵…），候選列與展開面板不算
+        val keyPanels = listOf(R.id.panel_zhuyin, R.id.panel_english, R.id.panel_symbols, R.id.panel_numpad).mapNotNull { root.findViewById<View>(it) }
+        (root as com.p3dro.scorpio.ime.ui.TapObserverLayout).onTapDown = { x, y, time ->
+            lastDownX = x
+            lastDownY = y
+            val panel = keyPanels.firstOrNull { it.visibility == View.VISIBLE && y >= it.top && y < it.bottom }
+            val w = panel?.let { it.width - it.paddingLeft - it.paddingRight } ?: 0
+            if (panel != null && w > 0) dictManager.noteKeyboardTap((x - panel.left - panel.paddingLeft).toDouble() / w * 10 - 0.5, time)
+        }
+        dictManager.postureFromKeyboard = true
         gridZhuyin.onKeyLongPressListener = { char ->
             if (composer.isComposing) {
                 clearComposer(discardComposingText = true)
@@ -885,8 +899,10 @@ class ScorpioImeService : InputMethodService() {
         }
 
         // ㄦ：點一下是注音，長按（放開時）直接輸入「ㄦ」這個符號
-        root.findViewById<View>(R.id.btn_er).setOnTouchListener(longPressKeyTouchListener("ㄦ", onTap = {
-            onZhuyinKeyPressed('ㄦ')
+        val erKey = root.findViewById<View>(R.id.btn_er)
+        erKey.setOnTouchListener(longPressKeyTouchListener("ㄦ", onTap = {
+            val (ox, oy) = erTouchOffset(erKey, root.findViewById(R.id.grid_zhuyin))
+            onZhuyinKeyPressed('ㄦ', ox, oy)
         }, onLong = {
             if (composer.isComposing) {
                 clearComposer(discardComposingText = true)
@@ -1418,6 +1434,21 @@ class ScorpioImeService : InputMethodService() {
             pairs.add(want to t)
         }
         dictManager.recordQwertySamples(pairs)
+    }
+
+    /**
+     * ㄦ 的落點：按下的位置相對 ㄦ 鍵中心，跟注音鍵一樣以「注音鍵的半個鍵寬／鍵高」為 1（ㄦ 比注音鍵窄，
+     * 不能用它自己的寬度，否則跟其他鍵的偏移不同尺度）
+     */
+    private fun erTouchOffset(er: View, grid: ViewGroup): Pair<Float, Float> {
+        val root = keyboardRootView ?: return 0f to 0f
+        val key = (grid.getChildAt(0) as? ViewGroup)?.getChildAt(0) ?: return 0f to 0f
+        if (key.width <= 0 || key.height <= 0) return 0f to 0f
+        val rootLoc = IntArray(2).also { root.getLocationInWindow(it) }
+        val erLoc = IntArray(2).also { er.getLocationInWindow(it) }
+        val cx = erLoc[0] - rootLoc[0] + er.width / 2f
+        val cy = erLoc[1] - rootLoc[1] + er.height / 2f
+        return ((lastDownX - cx) / (key.width / 2f)).coerceIn(-1.5f, 1.5f) to ((lastDownY - cy) / (key.height / 2f)).coerceIn(-1.5f, 1.5f)
     }
 
     private fun onZhuyinKeyPressed(c: Char, offsetX: Float = 0f, offsetY: Float = 0f) {

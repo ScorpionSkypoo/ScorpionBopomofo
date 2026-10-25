@@ -689,15 +689,35 @@ class ScorpioDictManager private constructor(private val context: Context) {
         /** 按下的時間（SystemClock.uptimeMillis）：判斷握法用；0 是不知道（不判斷） */
         time: Long = 0L
     ): BopomofoComposer.TouchPoint {
-        val p = if (time > 0) spatial.physicalPoint(BopomofoComposer.TouchPoint(rawChar, offsetX, offsetY))?.let { postureTracker.onTap(it.first, time) } ?: postureTracker.posture else 0
+        val p = when {
+            time <= 0 -> 0
+            postureFromKeyboard -> postureTracker.posture
+            else -> spatial.physicalPoint(BopomofoComposer.TouchPoint(rawChar, offsetX, offsetY))?.let { postureTracker.onTap(it.first, time) } ?: postureTracker.posture
+        }
         return spatial.resolveTap(rawChar, offsetX, offsetY, history, previous?.let { spatial.physicalPoint(it) }, time = time, posture = p)
     }
 
     /** 判斷握法（雙手拇指／單手）：每按一下鍵更新，大千與 QWERTY 共用 */
     val postureTracker = PostureTracker()
 
+    /**
+     * 鍵盤畫面把每一下（注音、英文、聲調、ㄦ、空白、刪除、符號鍵…）都交給 noteKeyboardTap 判斷握法時為 true：
+     * 這時按注音／英文鍵不再另外算一次，只拿目前的判斷
+     */
+    @Volatile
+    var postureFromKeyboard = false
+
+    /** 鍵盤上按下一下：column 是水平位置（以注音鍵的欄為單位，最左邊一欄的中心是 0），time 是 SystemClock.uptimeMillis */
+    fun noteKeyboardTap(column: Double, time: Long) {
+        postureTracker.onTap(column, time)
+    }
+
     private fun noteQwertyTap(raw: Char, offsetX: Float, offsetY: Float) {
         val q = qwerty
+        if (postureFromKeyboard) {
+            q.posture = postureTracker.posture
+            return
+        }
         val p = q.point(raw, offsetX, offsetY) ?: return
         q.posture = postureTracker.onTap(p.first, android.os.SystemClock.uptimeMillis())
     }
@@ -756,6 +776,23 @@ class ScorpioDictManager private constructor(private val context: Context) {
                 }
                 spatial.learn(intended[j], touch)
                 added++
+            }
+            // 聲調鍵：這個字的讀音（想打的那個）有這個聲調，才算確定按對；按到旁邊的聲調而這個讀音只有一種聲調、
+            // 落點又真的靠近它，就當成按歪學到那個聲調。免聲調（沒按）或猜不出想按哪個聲調時不學
+            val toneTouch = parsed[k].touches.values.firstOrNull { SpatialModel.isTone(it.rawChar) && it.rawChar != BopomofoComposer.FIRST_TONE }
+            if (toneTouch != null) {
+                val tones = words.readingsOfWord(chars[k]).filter { toToneless(it) == intended }
+                    .map { r -> r.lastOrNull()?.takeIf { SpatialModel.isTone(it) } ?: BopomofoComposer.FIRST_TONE }.toSet()
+                val want = when {
+                    toneTouch.rawChar in tones -> toneTouch.rawChar
+                    tones.size == 1 && tones.first() != BopomofoComposer.FIRST_TONE &&
+                        (spatial.neighborPenalties(toneTouch).firstOrNull { it.first == tones.first() }?.second ?: Double.MAX_VALUE) <= NEIGHBOR_ALT_MAX -> tones.first()
+                    else -> null
+                }
+                if (want != null) {
+                    spatial.learn(want, toneTouch)
+                    added++
+                }
             }
         }
         if (fuzzyDirty > 0) candidatesCache.evictAll()

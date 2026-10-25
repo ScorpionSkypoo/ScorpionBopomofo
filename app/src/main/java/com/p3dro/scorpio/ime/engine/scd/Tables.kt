@@ -245,6 +245,16 @@ class WordStore(val tables: List<WordTable>) {
         return out
     }
 
+    /** SELECT DISTINCT reading FROM dict WHERE word = ?（有聲調，一聲沒有符號） */
+    fun readingsOfWord(word: String): Set<String> {
+        val out = LinkedHashSet<String>()
+        for (w in tables) {
+            val k = w.wdIx.find(word)
+            if (k >= 0) for (pos in w.wdIx.start(k) until w.wdIx.end(k)) out.add(w.reading(w.wdIx.row(pos)))
+        }
+        return out
+    }
+
     /** 單音節（不含 -）的無聲調讀音 → 該讀音所有詞的 10^score 加總（SQL 的 instr(toneless, '-') = 0 AND toneless <> ''） */
     fun syllableFrequencies(): HashMap<String, Double> {
         val out = HashMap<String, Double>(1600)

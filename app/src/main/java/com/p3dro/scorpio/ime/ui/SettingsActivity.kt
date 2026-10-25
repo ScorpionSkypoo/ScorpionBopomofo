@@ -1133,14 +1133,15 @@ class SettingsActivity : AppCompatActivity() {
             maps.removeAllViews()
             val name = if (posture == Posture.TWO_THUMBS) "雙手" else "單手"
             if (zhuyin.isNotEmpty()) {
+                // 大千 4 排加上最底排的 ㄦ
                 val grid = com.p3dro.scorpio.ime.engine.SpatialModel.GRID
-                val keys = buildMap { for (r in grid.indices) for (c in grid[r].indices) put(grid[r][c], c.toDouble() to r.toDouble()) }
+                val keys = com.p3dro.scorpio.ime.engine.SpatialModel.KEY_CENTERS
                 val summary = if (posture == 0) {
                     val acc = dict.tapAccuracy()
                     if (acc[0] > 0) "連續打字時判對率 ${pct(acc[1], acc[0])}（共 ${acc[0]} 次）；不算移動造成的偏差是 ${pct(acc[2], acc[0])}。" else "連續打字時會學「從上一個鍵移過來時容易偏哪邊」，用一陣子後這裡會顯示有沒有比較準。"
                 } else postureSummary(dict.spatial.postureSampleCounts()[posture - 1], name)
                 infoRow(maps, "注音鍵盤", summary)
-                heatmap(keys, grid[0].size, grid.size, dict.spatial.keySpreads(posture))
+                heatmap(keys, grid[0].size, com.p3dro.scorpio.ime.engine.SpatialModel.ROWS, dict.spatial.keySpreads(posture))
             }
             if (qwerty.isNotEmpty()) {
                 val summary = if (posture == 0) {

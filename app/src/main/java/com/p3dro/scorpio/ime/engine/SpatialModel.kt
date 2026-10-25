@@ -43,8 +43,28 @@ class SpatialModel {
         private const val P_NEW_AFTER_COMPLETE = 0.25
         private const val P_NEW_AFTER_PARTIAL = 0.1
 
-        private val POS: Map<Char, Pair<Int, Int>> = buildMap {
-            for (r in GRID.indices) for (c in GRID[r].indices) put(GRID[r][c], r to c)
+        /**
+         * ㄦ 在最底排（符號、逗號、地球、空白之後）：欄位比例照 KeyRowLayout.SLOTS（總和 10.4，跟上面 10 個注音鍵同寬），
+         * 換成注音鍵的欄（ㄩ 的正下方偏右一點）
+         */
+        private const val ER_COLUMN = (1.4 + 0.9 + 0.9 + 3.3 + 0.9 / 2) / 10.4 * 10 - 0.5
+
+        /** 每個鍵的中心（列, 欄），鍵距單位：大千 4 排加上最底排的 ㄦ */
+        private val POS: Map<Char, Pair<Double, Double>> = buildMap {
+            for (r in GRID.indices) for (c in GRID[r].indices) put(GRID[r][c], r.toDouble() to c.toDouble())
+            put('ㄦ', GRID.size.toDouble() to ER_COLUMN)
+        }
+
+        /** 設定頁畫落點圖用：每個鍵的中心（欄, 列） */
+        val KEY_CENTERS: Map<Char, Pair<Double, Double>> = POS.mapValues { (_, rc) -> rc.second to rc.first }
+
+        /** 鍵盤有幾排（含最底排） */
+        val ROWS = GRID.size + 1
+
+        /** 每個鍵四周（上下左右與斜角，不到一個半鍵距）的鍵，照列、欄排 */
+        private val NEIGHBORS: Map<Char, List<Char>> = POS.mapValues { (k, rc) ->
+            POS.filter { (o, p) -> o != k && abs(p.first - rc.first) < 1.5 && abs(p.second - rc.second) < 1.5 }
+                .entries.sortedWith(compareBy({ it.value.first }, { it.value.second })).map { it.key }
         }
 
         fun isTone(c: Char) = BopomofoComposer.TONES.contains(c)
@@ -100,7 +120,7 @@ class SpatialModel {
 
     // ---------- 座標 ----------
 
-    /** 落點的實體座標（鍵距單位，原點為左上角鍵中心）；null 表示不在注音網格上（例如 ㄦ） */
+    /** 落點的實體座標（鍵距單位，原點為左上角鍵中心）；null 表示不是注音鍵 */
     fun physicalPoint(touch: BopomofoComposer.TouchPoint): Pair<Double, Double>? {
         val (r, c) = POS[touch.rawChar] ?: return null
         return Pair(c + touch.offsetX / pitchX, r + touch.offsetY / pitchY)
@@ -141,15 +161,7 @@ class SpatialModel {
         return 0.5 * (dx * dx / VAR_X + dy * dy / VAR_Y)
     }
 
-    private fun gridNeighbors(key: Char): List<Char> {
-        val (r, c) = POS[key] ?: return emptyList()
-        val out = ArrayList<Char>(8)
-        for (dr in -1..1) for (dc in -1..1) {
-            if (dr == 0 && dc == 0) continue
-            GRID.getOrNull(r + dr)?.getOrNull(c + dc)?.let { out.add(it) }
-        }
-        return out
-    }
+    private fun gridNeighbors(key: Char): List<Char> = NEIGHBORS[key].orEmpty()
 
     // ---------- 解碼器：鄰鍵懲罰 ----------
 
@@ -172,7 +184,8 @@ class SpatialModel {
 
     /**
      * 依落點、個人化偏移與音節合法性決定這一鍵實際算哪個鍵
-     * - 不會把一般按鍵改判成聲調鍵（聲調會直接結束音節，改錯代價太高）；聲調鍵可改判回一般鍵
+     * - 不會把一般按鍵改判成聲調鍵（聲調會直接結束音節，解碼時回不去；用打字記錄重播比過，改判會讓選字變差）；
+     *   聲調鍵可改判回一般鍵
      * - 回傳的 TouchPoint 保留原始按鍵與落點（rawChar / offset），解碼時仍能回頭考慮原本的鍵；
      *   連續打字時也記下上一下的落點（from），解碼與學習時用來算移動造成的偏差
      */

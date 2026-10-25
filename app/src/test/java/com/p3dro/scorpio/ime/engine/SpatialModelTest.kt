@@ -209,4 +209,22 @@ class SpatialModelTest {
         val old = model().apply { restore(m.serialize().substringBefore("||")) }
         assertEquals(general, old.effectiveBias('ㄨ').first, 1e-3)
     }
+
+    @Test
+    fun erSitsBelowTheBottomRow() {
+        val m = model()
+        val er = m.neighborPenalties(TouchPoint('ㄦ')).map { it.first }.toSet()
+        assertEquals(setOf('ㄙ', 'ㄩ', 'ㄝ'), er)
+        assertTrue(m.neighborPenalties(TouchPoint('ㄩ')).any { it.first == 'ㄦ' })
+        assertTrue(m.physicalPoint(TouchPoint('ㄦ')) != null)
+    }
+
+    @Test
+    fun tapLeaningOntoToneKeyStaysALetter() {
+        val m = model("ㄉㄨ", "ㄉㄨㄛ")
+        val history = listOf(TouchPoint('ㄉ'), TouchPoint('ㄨ'))
+        // ㄓ 的左緣外（往 ˋ 那邊）也不改判成聲調
+        assertEquals('ㄓ', m.resolveTap('ㄓ', -1.4f, 0f, history).char)
+    }
+
 }
