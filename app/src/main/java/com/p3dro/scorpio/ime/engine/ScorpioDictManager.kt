@@ -1653,7 +1653,9 @@ class ScorpioDictManager private constructor(private val context: Context) {
         // 「前面那句」排第二：打字途中隨時可以先選前面，句尾的聲母留著繼續打、繼續選。
         // 重播比過：第一候選不變，前三命中 90.0% → 89.4%（第三名被擠到第四）；放第一會從 77.7% 掉到 66～73%（送出時句尾多半就是簡拼的字）
         val lastTyped = primaryInput.lastOrNull()?.let { toToneless(it) }.orEmpty()
-        if (primaryInput.size >= 2 && lastTyped.length == 1 && lastTyped[0] in BopomofoComposer.INITIALS && ranked.isNotEmpty()) {
+        // 整串都是單打聲母（ㄒㄒ＝謝謝、ㄏㄏㄎ＝好好看）是一個簡拼詞，不拆
+        val allInitials = primaryInput.all { toToneless(it).let { t -> t.length == 1 && t[0] in BopomofoComposer.INITIALS } }
+        if (primaryInput.size >= 2 && !allInitials && lastTyped.length == 1 && lastTyped[0] in BopomofoComposer.INITIALS && ranked.isNotEmpty()) {
             val head = solveLatticeViterbi(primaryInput.dropLast(1), primaryTouches.take(primaryInput.size - 1), prevWord, prevWord2 = prevWord2).fullSentence
             if (head.isNotEmpty() && head != ranked.first()) {
                 ranked.remove(head)
