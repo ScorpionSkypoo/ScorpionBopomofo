@@ -49,6 +49,8 @@ class ScorpioDictManager private constructor(private val context: Context) {
         // 用打字記錄 840 次選字重播比：1.5 → 76.8%、2.5 → 77.4%、3.5 → 77.7%、5 → 77.5%、8 → 77.4%（第一候選命中）
         private const val STRONG_CORRECTION = 0.4
         private const val LITERAL_MARGIN = 3.5
+        // 句尾只打一個聲母時，「前面那句」放在第幾個候選（0 起算），見 getCandidateGroups
+        private const val TRAIL_HEAD_POSITION = 1
         // 慣性打錯至少選過這麼多次（而且反方向很少）才算穩定的個人習慣，見 isTypoHabit
         private const val TYPO_HABIT_MIN = 5
         // 按歪了的鄰鍵候選：鄰鍵懲罰在這以下才列（按在鍵中央時鄰鍵約 0.65～1.3（上下的鄰鍵比較便宜，個人習慣也會讓某個方向便宜一點），偏向某鄰鍵三、四成鍵寬就會低於這個）、最多幾個詞
@@ -1645,6 +1647,18 @@ class ScorpioDictManager private constructor(private val context: Context) {
             .sortedByDescending { it.value }.mapTo(ArrayList()) { it.key }
         val front = ranked.toHashSet()
         bestWordScores.entries.sortedByDescending { it.value }.forEach { if (it.key !in front) ranked.add(it.key) }
+        // 句尾只打了一個聲母（ㄓ、ㄅ）：可能是簡拼的字（之、吧），也可能是下一個詞剛開始打。整句照樣排第一，
+        // 「前面那句」排第二：打字途中隨時可以先選前面，句尾的聲母留著繼續打、繼續選。
+        // 重播比過：第一候選不變，前三命中 90.0% → 89.4%（第三名被擠到第四）；放第一會從 77.7% 掉到 66～73%（送出時句尾多半就是簡拼的字）
+        val lastTyped = primaryInput.lastOrNull()?.let { toToneless(it) }.orEmpty()
+        if (primaryInput.size >= 2 && lastTyped.length == 1 && lastTyped[0] in BopomofoComposer.INITIALS && ranked.isNotEmpty()) {
+            val head = solveLatticeViterbi(primaryInput.dropLast(1), primaryTouches.take(primaryInput.size - 1), prevWord, prevWord2 = prevWord2).fullSentence
+            if (head.isNotEmpty() && head != ranked.first()) {
+                ranked.remove(head)
+                ranked.add(minOf(TRAIL_HEAD_POSITION, ranked.size), head)
+                trace?.add("句尾單打聲母：前面那句「$head」排第 ${minOf(TRAIL_HEAD_POSITION, ranked.size - 1) + 1} 個")
+            }
+        }
         // 排第一的是學過的詞：沒選它時扣回一次（見 noteSkippedLearned）
         val primaryKey = segmentationsToUse.first().joinToString("-").replace("ˉ", "")
         val learnedTop = ranked.firstOrNull()?.takeIf { top ->
