@@ -1078,10 +1078,12 @@ class SettingsActivity : AppCompatActivity() {
                 live.postDelayed(this, 500)
             }
         }
+        // 列加進頁面時就已經在畫面上了（不會再收到 attach），所以先開始；離開頁面被移掉時停
         live.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
             override fun onViewAttachedToWindow(v: View) { v.post(poll) }
             override fun onViewDetachedFromWindow(v: View) { v.removeCallbacks(poll) }
         })
+        if (live.isAttachedToWindow) live.post(poll)
         testField(h, "在這裡打字，看看判斷的是哪種握法")
 
         val zhuyin = dict.spatial.keySpreads()
