@@ -227,4 +227,16 @@ class SpatialModelTest {
         assertEquals('ㄓ', m.resolveTap('ㄓ', -1.4f, 0f, history).char)
     }
 
+    @Test
+    fun postureWithoutSamplesUsesGeneralHabit() {
+        val m = model()
+        // 只學不分握法的：每次都按在 ㄨ 的右邊 0.3 鍵距
+        repeat(60) { m.learn('ㄨ', TouchPoint('ㄨ', (0.3 * SpatialModel.HALF_KEYS_PER_PITCH_X).toFloat(), 0f)) }
+        val general = m.effectiveBias('ㄨ')
+        assertTrue(general.first > 0.2)
+        // 雙手還沒有任何樣本：照全部的習慣，不會把整體偏移扣掉
+        val two = m.effectiveBias('ㄨ', PostureTracker.TWO_THUMBS)
+        assertEquals(general.first, two.first, 1e-9)
+        assertEquals(general.second, two.second, 1e-9)
+    }
 }

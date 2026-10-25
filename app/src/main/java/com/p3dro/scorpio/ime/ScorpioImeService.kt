@@ -172,6 +172,15 @@ class ScorpioImeService : InputMethodService() {
         const val PREF_RECENT_BAR = "recent_bar"
         const val PREF_PHOTO_ALPHA = "photo_alpha"
         const val PREF_RECENT_LIST = "recent_symbols"
+        // 握法（設定「選字引擎」）：auto／two／one；自動判斷看不出來時當成 two／one／none
+        const val PREF_POSTURE_MODE = "posture_mode"
+        const val PREF_POSTURE_FALLBACK = "posture_fallback"
+
+        fun postureOf(v: String?) = when (v) {
+            "two" -> com.p3dro.scorpio.ime.engine.PostureTracker.TWO_THUMBS
+            "one" -> com.p3dro.scorpio.ime.engine.PostureTracker.ONE_HAND
+            else -> com.p3dro.scorpio.ime.engine.PostureTracker.UNKNOWN
+        }
         private const val RECENT_SEP = "\u001F"
         // 最近用過的 Emoji、顏文字最多記幾個
         private const val MAX_RECENT_SYMBOLS = 10
@@ -477,6 +486,8 @@ class ScorpioImeService : InputMethodService() {
         isVibrationEnabled = prefs.getBoolean("vibrate_on_keypress", false)
         keyPreview?.enabled = prefs.getBoolean("key_preview", true)
         inlineSymbols = prefs.getBoolean("inline_emoji_kaomoji", true)
+        dictManager.postureMode = postureOf(prefs.getString(PREF_POSTURE_MODE, "auto"))
+        dictManager.postureFallback = postureOf(prefs.getString(PREF_POSTURE_FALLBACK, "two"))
         lastCommittedWord = null
         screenContextWord = null
         lastEnglishWord = null

@@ -54,6 +54,14 @@ class KeyHabits {
         return clampBias(x, y)
     }
 
+    /** 這一層的全體平均偏移，樣本少時向 prior（上一層的全體平均）收斂，不是向 0：例如某個握法 → 不分握法 */
+    @Synchronized
+    fun globalToward(prior: Pair<Double, Double>): Pair<Double, Double> {
+        val g = globalBias
+        return (g.n * g.dx + GLOBAL_PRIOR * prior.first) / (g.n + GLOBAL_PRIOR) to
+            (g.n * g.dy + GLOBAL_PRIOR * prior.second) / (g.n + GLOBAL_PRIOR)
+    }
+
     /** 全體平均偏移（已向 0 收斂） */
     @Synchronized
     fun globalEffective(): Pair<Double, Double> {

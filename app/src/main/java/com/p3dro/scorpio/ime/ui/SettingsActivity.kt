@@ -1064,12 +1064,63 @@ class SettingsActivity : AppCompatActivity() {
 
         sectionTitle("我的按鍵落點")
         val h = card()
-        // 現在判斷的握法：在測試欄打字時即時更新（頁面在畫面上才輪詢）
+        // 握法：雙手拇指和單手按的偏法不一樣，各學一份。可以自動判斷，也可以固定
         val Posture = com.p3dro.scorpio.ime.engine.PostureTracker
-        fun postureText() = when (dict.postureTracker.posture) {
+        val Ime = com.p3dro.scorpio.ime.ScorpioImeService
+        fun segmented(parent: LinearLayout, options: List<Pair<String, String>>, current: String, onPick: (String) -> Unit) {
+            val group = MaterialButtonToggleGroup(this).apply {
+                isSingleSelection = true
+                isSelectionRequired = true
+            }
+            val ids = HashMap<Int, String>()
+            for ((value, label) in options) {
+                val b = MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+                    id = View.generateViewId()
+                    text = label
+                    isAllCaps = false
+                }
+                ids[b.id] = value
+                group.addView(b, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                if (value == current) group.check(b.id)
+            }
+            group.addOnButtonCheckedListener { _, id, isChecked -> if (isChecked) ids[id]?.let(onPick) }
+            parent.addView(group, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                setMargins(dp(16), 0, dp(16), dp(12))
+            })
+        }
+        val modeRow = infoRow(h, "握法", "自動判斷：看按鍵間隔猜你現在是雙手拇指還是單手，各用各的落點習慣。")
+        val fallbackBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        segmented(h, listOf("auto" to "自動判斷", "two" to "一律雙手", "one" to "一律單手"),
+            prefs.getString(Ime.PREF_POSTURE_MODE, "auto") ?: "auto") { v ->
+            prefs.edit().putString(Ime.PREF_POSTURE_MODE, v).apply()
+            dict.postureMode = Ime.postureOf(v)
+            fallbackBox.visibility = if (v == "auto") View.VISIBLE else View.GONE
+            summaryOf(modeRow).text = when (v) {
+                "two" -> "一律當成雙手拇指：只用、只學雙手的落點習慣。"
+                "one" -> "一律當成單手：只用、只學單手的落點習慣。"
+                else -> "自動判斷：看按鍵間隔猜你現在是雙手拇指還是單手，各用各的落點習慣。"
+            }
+        }
+        h.addView(fallbackBox)
+        infoRow(fallbackBox, "看不出來時當作", "剛開始打、還沒有足夠的按鍵可以判斷時用哪一份習慣。")
+        segmented(fallbackBox, listOf("two" to "雙手", "one" to "單手", "none" to "不分"),
+            prefs.getString(Ime.PREF_POSTURE_FALLBACK, "two") ?: "two") { v ->
+            prefs.edit().putString(Ime.PREF_POSTURE_FALLBACK, v).apply()
+            dict.postureFallback = Ime.postureOf(v)
+        }
+        val mode = prefs.getString(Ime.PREF_POSTURE_MODE, "auto")
+        fallbackBox.visibility = if (mode == "auto") View.VISIBLE else View.GONE
+        if (mode == "two" || mode == "one") summaryOf(modeRow).text = if (mode == "two") "一律當成雙手拇指：只用、只學雙手的落點習慣。" else "一律當成單手：只用、只學單手的落點習慣。"
+        fun postureName(p: Int) = when (p) {
             Posture.TWO_THUMBS -> "雙手拇指"
             Posture.ONE_HAND -> "單手"
-            else -> "還看不出來：連續打一段字，要有跨過大半個鍵盤和按隔壁鍵的移動"
+            else -> "不分握法"
+        }
+        // 現在用哪一份習慣：在測試欄打字時即時更新（頁面在畫面上才輪詢）
+        fun postureText() = when {
+            dict.postureMode != 0 -> "${postureName(dict.postureMode)}（固定）"
+            dict.postureTracker.posture != Posture.UNKNOWN -> "${postureName(dict.postureTracker.posture)}（自動判斷）"
+            else -> "還看不出來，先當作${postureName(dict.postureFallback)}：連續打一段字，要有跨過大半個鍵盤和按隔壁鍵的移動"
         }
         val live = summaryOf(infoRow(h, "現在的握法", postureText()))
         val poll = object : Runnable {

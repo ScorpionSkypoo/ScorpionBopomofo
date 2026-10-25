@@ -691,14 +691,29 @@ class ScorpioDictManager private constructor(private val context: Context) {
     ): BopomofoComposer.TouchPoint {
         val p = when {
             time <= 0 -> 0
-            postureFromKeyboard -> postureTracker.posture
-            else -> spatial.physicalPoint(BopomofoComposer.TouchPoint(rawChar, offsetX, offsetY))?.let { postureTracker.onTap(it.first, time) } ?: postureTracker.posture
+            postureFromKeyboard -> currentPosture()
+            else -> currentPosture(spatial.physicalPoint(BopomofoComposer.TouchPoint(rawChar, offsetX, offsetY))?.let { postureTracker.onTap(it.first, time) } ?: postureTracker.posture)
         }
         return spatial.resolveTap(rawChar, offsetX, offsetY, history, previous?.let { spatial.physicalPoint(it) }, time = time, posture = p)
     }
 
     /** 判斷握法（雙手拇指／單手）：每按一下鍵更新，大千與 QWERTY 共用 */
     val postureTracker = PostureTracker()
+
+    /** 握法設定（設定頁）：0＝自動判斷，PostureTracker.TWO_THUMBS／ONE_HAND＝一律當成這個握法 */
+    @Volatile
+    var postureMode = 0
+
+    /** 自動判斷但還看不出來時當成哪個握法：TWO_THUMBS、ONE_HAND，或 0（不分握法） */
+    @Volatile
+    var postureFallback = PostureTracker.TWO_THUMBS
+
+    /** 落點校正與學習用的握法：照設定，自動判斷時看不出來就用 postureFallback */
+    fun currentPosture(detected: Int = postureTracker.posture) = when {
+        postureMode != 0 -> postureMode
+        detected != PostureTracker.UNKNOWN -> detected
+        else -> postureFallback
+    }
 
     /**
      * 鍵盤畫面把每一下（注音、英文、聲調、ㄦ、空白、刪除、符號鍵…）都交給 noteKeyboardTap 判斷握法時為 true：
@@ -715,11 +730,11 @@ class ScorpioDictManager private constructor(private val context: Context) {
     private fun noteQwertyTap(raw: Char, offsetX: Float, offsetY: Float) {
         val q = qwerty
         if (postureFromKeyboard) {
-            q.posture = postureTracker.posture
+            q.posture = currentPosture()
             return
         }
         val p = q.point(raw, offsetX, offsetY) ?: return
-        q.posture = postureTracker.onTap(p.first, android.os.SystemClock.uptimeMillis())
+        q.posture = currentPosture(postureTracker.onTap(p.first, android.os.SystemClock.uptimeMillis()))
     }
 
     /**
