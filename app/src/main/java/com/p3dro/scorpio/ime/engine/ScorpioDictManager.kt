@@ -51,6 +51,8 @@ class ScorpioDictManager private constructor(private val context: Context) {
         private const val LITERAL_MARGIN = 3.5
         // 句尾只打一個聲母時，「前面那句」放在第幾個候選（0 起算），見 getCandidateGroups
         private const val TRAIL_HEAD_POSITION = 1
+        // 中間多按一個鍵（完整音節後夾一個單打聲母）時，刪掉它的整句要扣的分，見 getCandidateGroups
+        const val EXTRA_KEY_PENALTY = 2.0
         // 候選列前面先放幾個詞，才接 Emoji、顏文字。重播比過：2 → 3，前三命中 91.2% → 92.2%（4 一樣）
         private const val INLINE_TEXT_FIRST = 3
         // 「前兩個詞」的搭配存在接續詞表裡，prev 是兩個詞用這個字元串起來（資料 repo 的 build_trigram_pack.py）
@@ -1663,6 +1665,28 @@ class ScorpioDictManager private constructor(private val context: Context) {
                 ranked.remove(head)
                 ranked.add(minOf(TRAIL_HEAD_POSITION, ranked.size), head)
                 trace?.add("句尾單打聲母：前面那句「$head」排第 ${minOf(TRAIL_HEAD_POSITION, ranked.size - 1) + 1} 個")
+            }
+        }
+        // 中間多按了一個鍵：完整的音節後面夾了一個單打聲母（ㄅㄨㄟ-ㄅㄨ-ㄘ-ㄉ 的 ㄘ），而它單獨也是字（次），不會被當成拼不起來修掉。
+        // 試著刪掉它：刪掉後的整句跟第一名差不到 EXTRA_KEY_PENALTY 就放第三（少一個音節、長詞加分也少，分數不能直接比；
+        // 不搶第一、第二：句中打簡拼也很常見，ㄨㄛ-ㄐ-ㄉ）
+        if (primaryInput.size >= 3 && ranked.size >= 2) {
+            var drop: Pair<String, Double>? = null
+            for (i in 1 until primaryInput.size - 1) {
+                val t = toToneless(primaryInput[i])
+                if (t.length != 1 || t[0] !in BopomofoComposer.INITIALS || toToneless(primaryInput[i - 1]).length < 2) continue
+                val syl = primaryInput.filterIndexed { k, _ -> k != i }
+                val tch = if (primaryTouches.size == primaryInput.size) primaryTouches.filterIndexed { k, _ -> k != i } else emptyList()
+                val best = solveLatticeViterbi(syl, tch, prevWord, prevWord2 = prevWord2).scored.firstOrNull() ?: continue
+                if (best.first.isNotEmpty() && best.second > (drop?.second ?: Double.NEGATIVE_INFINITY)) drop = best
+            }
+            val first = pool[ranked[0]] ?: Double.NEGATIVE_INFINITY
+            drop?.let { (text, v) ->
+                trace?.add("多按一個鍵：刪掉後「$text」%.2f（第一名 %.2f）".format(v, first))
+                if (v > first - EXTRA_KEY_PENALTY && text !in ranked.take(2)) {
+                    ranked.remove(text)
+                    ranked.add(minOf(2, ranked.size), text)
+                }
             }
         }
         // 排第一的是學過的詞：沒選它時扣回一次（見 noteSkippedLearned）
