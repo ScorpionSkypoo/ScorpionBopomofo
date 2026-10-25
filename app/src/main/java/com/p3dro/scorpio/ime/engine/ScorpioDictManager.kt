@@ -256,6 +256,8 @@ class ScorpioDictManager private constructor(private val context: Context) {
     private val candidatesCache = LruCache<String, CandidateGroups>(300)
     // 網格每段讀音的候選與個人化分數（還沒扣聲調，見 spanLookup）；學習資料一變就清掉（同 candidatesCache）
     private val spanCache = LruCache<String, List<SpanHit>>(2000)
+    /** 片段 → 拆成的詞庫詞（不是片段存空的），見 chunkParts */
+    private val chunkCache = LruCache<String, List<String>>(4000)
 
     // ---------- 詞庫檔（SCD） ----------
 
@@ -1998,6 +2000,51 @@ class ScorpioDictManager private constructor(private val context: Context) {
     }
 
     /**
+     * 學過、但詞庫沒有的「片段」：整句送出時學到的相鄰幾個詞（現在打＝現在＋打、講你就＝講＋你＋就），拆成詞庫的詞。
+     * 詞庫有的詞、拆不出來的、或只能拆成兩個單字的（小蠍＝小＋蠍，多半是自己造的新詞）回傳 null。
+     * 片段在整句網格裡的長詞加分照拆出來的詞算、上文照最後一個詞算：不然學過一次的「現在打」整塊拿三個字的長詞加分，
+     * 蓋過「現在／打字」，「打」後面接什麼的接續詞也用不上
+     */
+    private fun chunkParts(word: String): List<String>? {
+        chunkCache.get(word)?.let { return it.ifEmpty { null } }
+        val parts = splitChunk(word)
+        chunkCache.put(word, parts ?: emptyList())
+        return parts
+    }
+
+    private fun splitChunk(word: String): List<String>? {
+        val n = word.length
+        if (n < 2 || !isHanWord(word) || words.hasWord(word)) return null
+        // 段數最少的切法
+        val best = IntArray(n + 1) { Int.MAX_VALUE }
+        val back = IntArray(n + 1)
+        best[0] = 0
+        for (i in 0 until n) {
+            if (best[i] == Int.MAX_VALUE) continue
+            for (l in 1..minOf(6, n - i)) {
+                if (l == n || best[i] + 1 >= best[i + l]) continue
+                if (words.hasWord(word.substring(i, i + l))) {
+                    best[i + l] = best[i] + 1
+                    back[i + l] = i
+                }
+            }
+        }
+        if (best[n] == Int.MAX_VALUE) return null
+        val parts = ArrayList<String>()
+        var j = n
+        while (j > 0) {
+            parts.add(word.substring(back[j], j))
+            j = back[j]
+        }
+        parts.reverse()
+        return parts.takeIf { it.size >= 3 || it.any { p -> p.length >= 2 } }
+    }
+
+    /** 整句網格的長詞加分：多字詞每多一個字 2.8；片段照拆出來的詞算 */
+    private fun lengthBonusOf(word: String, len: Int): Double =
+        chunkParts(word)?.sumOf { (it.length - 1) * 2.8 } ?: ((len - 1) * 2.8)
+
+    /**
      * 詞間轉移加權：前詞 prev 之後接 w 的條件機率 b 若比 w 自身單詞分數 s 高，代表搭配性強
      * 例如「載具」→「發票」：即使「在劇」「災區」單詞分數相近，也會因搭配而置頂
      * 搭配性弱的組合（「位置」→「不」、「不」→「排」）不加分，否則拆成單字反而能吃到較多轉移加分
@@ -2094,7 +2141,6 @@ class ScorpioDictManager private constructor(private val context: Context) {
 
                 if (spanCands.isEmpty()) continue
                 val bestCands = spanCands.entries.sortedByDescending { it.value }.take(if (len == n) FULL_SPAN_WORDS else 4)
-                val lengthBonus = (len - 1) * 2.8
                 val target = dp[i + len]
                 val targetIndex = dpIndex[i + len]
                 for (node in dp[i]) {
@@ -2103,6 +2149,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
                         val w = e.key
                         val sc = e.value
                         val bb = bbs[k]
+                        val lengthBonus = if (len >= 2) lengthBonusOf(w, len) else 0.0
                         val total = node.score + sc + lengthBonus + bb
                         val text = node.text + w
                         val corr = node.corr + (spanCorr[w] ?: 0.0)
@@ -2228,7 +2275,9 @@ class ScorpioDictManager private constructor(private val context: Context) {
     private fun contextBonuses(prev: String, prev2: String?, cands: List<Map.Entry<String, Double>>, now: Long): DoubleArray {
         val n = cands.size
         if (prev.isEmpty() || n == 0) return DoubleArray(n)
-        val static = DoubleArray(n) { bigramBonus(prev, cands[it].key, cands[it].value) }
+        // 字典的接續詞：前面是片段就看它最後一個詞；候選是片段不加（片段的分數不是一個詞的字頻，比不出搭配強不強）
+        val prevWord = chunkParts(prev)?.last() ?: prev
+        val static = DoubleArray(n) { if (chunkParts(cands[it].key) != null) 0.0 else bigramBonus(prevWord, cands[it].key, cands[it].value) }
         val top = (0 until n).maxOf { cands[it].value + static[it] }
         val prior = DoubleArray(n) { 10.0.pow(cands[it].value + static[it] - top) }
         val z = prior.sum()
@@ -2712,6 +2761,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
     private fun invalidateCandidateCaches() {
         candidatesCache.evictAll()
         spanCache.evictAll()
+        chunkCache.evictAll()
         userOnlyCache.evictAll()
         syllableFreqCache = null
     }
