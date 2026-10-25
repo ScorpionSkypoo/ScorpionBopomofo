@@ -51,6 +51,8 @@ class ScorpioDictManager private constructor(private val context: Context) {
         private const val LITERAL_MARGIN = 3.5
         // 句尾只打一個聲母時，「前面那句」放在第幾個候選（0 起算），見 getCandidateGroups
         private const val TRAIL_HEAD_POSITION = 1
+        // 「前兩個詞」的搭配存在接續詞表裡，prev 是兩個詞用這個字元串起來（資料 repo 的 build_trigram_pack.py）
+        const val TRIGRAM_SEP = '\u0001'
         // 慣性打錯至少選過這麼多次（而且反方向很少）才算穩定的個人習慣，見 isTypoHabit
         private const val TYPO_HABIT_MIN = 5
         // 按歪了的鄰鍵候選：鄰鍵懲罰在這以下才列（按在鍵中央時鄰鍵約 0.65～1.3（上下的鄰鍵比較便宜，個人習慣也會讓某個方向便宜一點），偏向某鄰鍵三、四成鍵寬就會低於這個）、最多幾個詞
@@ -2079,8 +2081,13 @@ class ScorpioDictManager private constructor(private val context: Context) {
     private fun bigramBonus(prev: String, w: String, s: Double): Double {
         if (prev.isEmpty()) return 0.0
         val b = bigramsFor(prev)[w] ?: return 0.0
-        return (b - s + 1.0).coerceIn(0.0, 8.0)
+        return contextBonus(b, s)
     }
+
+    /** 接續的條件機率 b（ln）比詞本身的分數 s 高多少（見 bigramBonus） */
+    private fun contextBonus(b: Double, s: Double) = (b - s + 1.0).coerceIn(0.0, 8.0)
+
+
 
     private fun solveLatticeViterbi(
         syllables: List<String>,
@@ -2100,12 +2107,13 @@ class ScorpioDictManager private constructor(private val context: Context) {
         if (words.tables.isEmpty()) return LatticeResult("", emptyList(), emptyList())
 
         // corr：這條路徑上「把打的注音改成別的」的懲罰合計（見 SyllableVariant.corrective）
-        data class Node(val score: Double, val text: String, val last: String, val corr: Double = 0.0)
+        // last2：last 前面那個詞（前兩個詞的搭配用）
+        data class Node(val score: Double, val text: String, val last: String, val corr: Double = 0.0, val last2: String = "")
         val beam = 6
         val dp = Array(n + 1) { mutableListOf<Node>() }
         // 每個位置「整句文字 → 在 dp 裡的位置」：同一句話只留最高分，不必每次從頭比對字串
         val dpIndex = Array(n + 1) { HashMap<String, Int>() }
-        dp[0].add(Node(0.0, "", prevWord.orEmpty()))
+        dp[0].add(Node(0.0, "", prevWord.orEmpty(), last2 = prevWord2.orEmpty()))
 
         val variantsPerPos = syllables.mapIndexed { idx, syl ->
             getWeightedSyllableVariants(syl, touchesPerSyllable.getOrNull(idx) ?: emptyMap())
@@ -2171,7 +2179,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
                 val target = dp[i + len]
                 val targetIndex = dpIndex[i + len]
                 for (node in dp[i]) {
-                    val bbs = contextBonuses(node.last, if (i == 0) prevWord2 else null, bestCands, now)
+                    val bbs = contextBonuses(node.last, node.last2, bestCands, now)
                     for ((k, e) in bestCands.withIndex()) {
                         val w = e.key
                         val sc = e.value
@@ -2182,10 +2190,10 @@ class ScorpioDictManager private constructor(private val context: Context) {
                         val corr = node.corr + (spanCorr[w] ?: 0.0)
                         val existing = targetIndex[text]
                         if (existing != null) {
-                            if (total > target[existing].score) target[existing] = Node(total, text, w, corr)
+                            if (total > target[existing].score) target[existing] = Node(total, text, w, corr, node.last)
                         } else {
                             targetIndex[text] = target.size
-                            target.add(Node(total, text, w, corr))
+                            target.add(Node(total, text, w, corr, node.last))
                         }
                     }
                 }
@@ -2302,9 +2310,20 @@ class ScorpioDictManager private constructor(private val context: Context) {
     private fun contextBonuses(prev: String, prev2: String?, cands: List<Map.Entry<String, Double>>, now: Long): DoubleArray {
         val n = cands.size
         if (prev.isEmpty() || n == 0) return DoubleArray(n)
-        // 字典的接續詞：前面是片段就看它最後一個詞；候選是片段不加（片段的分數不是一個詞的字頻，比不出搭配強不強）
-        val prevWord = chunkParts(prev)?.last() ?: prev
-        val static = DoubleArray(n) { if (chunkParts(cands[it].key) != null) 0.0 else bigramBonus(prevWord, cands[it].key, cands[it].value) }
+        // 字典的接續詞：有「前兩個詞」的搭配（三詞資料包）就用它，沒有才看前一個詞；
+        // 前面是片段就看它最後兩個詞；候選是片段不加（片段的分數不是一個詞的字頻，比不出搭配強不強）
+        val prevParts = chunkParts(prev)
+        val prevWord = prevParts?.last() ?: prev
+        val prevWord2 = prevParts?.getOrNull(prevParts.size - 2) ?: prev2?.let { p -> chunkParts(p)?.last() ?: p }.orEmpty()
+        val tri = if (prevWord2.isNotEmpty() && prevWord.isNotEmpty()) bigramsFor(prevWord2 + TRIGRAM_SEP + prevWord) else emptyMap()
+        val static = DoubleArray(n) {
+            val w = cands[it].key
+            when {
+                chunkParts(w) != null -> 0.0
+                tri[w] != null -> contextBonus(tri.getValue(w), cands[it].value)
+                else -> bigramBonus(prevWord, w, cands[it].value)
+            }
+        }
         val top = (0 until n).maxOf { cands[it].value + static[it] }
         val prior = DoubleArray(n) { 10.0.pow(cands[it].value + static[it] - top) }
         val z = prior.sum()
@@ -2376,8 +2395,10 @@ class ScorpioDictManager private constructor(private val context: Context) {
             }
         }
 
-        // (C) 簡拼展開（鍵盤設定的 lazySyllables）
-        ImeConfig.get(context).lazySyllables[s]?.forEachIndexed { index, exp ->
+        // (C) 簡拼展開（鍵盤設定的 lazySyllables）。ㄓㄔㄕㄖㄗㄘㄙ 單打本身就是完整的音節，打了聲調（ㄗˋ）就是打完了，
+        // 不再展開成 ㄗㄞˋ（打字記錄裡「ㄗˋ」想打「字」，卻排「在」第一）
+        val completeWithTone = s.length == 1 && s[0] in BopomofoComposer.STANDALONE_INITIALS && typedToneOf(rawSyllable) != null
+        if (!completeWithTone) ImeConfig.get(context).lazySyllables[s]?.forEachIndexed { index, exp ->
             putMin(exp, 0.45 + index * 0.05)
         }
 
