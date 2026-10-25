@@ -195,6 +195,33 @@ object PackUpdater {
         installPack(context, dict, p, onProgress)
     }
 
+    private fun configPending(context: Context, c: ManifestConfig, appVersionCode: Long) =
+        c.id == ImeConfig.ID && c.minAppVersion <= appVersionCode && PackVersion.compare(c.version, ImeConfig.installedVersion(context)) > 0
+
+    /** 上次讀到的 manifest 裡、比手機上新的鍵盤設定（設定頁顯示「有新版」用）；沒有回傳 null */
+    fun pendingConfig(context: Context): ManifestConfig? = try {
+        val json = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(PREF_MANIFEST, null) ?: "{}"
+        parseConfigs(json).firstOrNull { configPending(context, it, appVersion(context)) }
+    } catch (e: Exception) {
+        null
+    }
+
+    /** 下載並套用鍵盤設定 */
+    suspend fun installConfig(context: Context, c: ManifestConfig): Boolean = withContext(Dispatchers.IO) {
+        val part = File(context.cacheDir, "config-${c.id}.part")
+        try {
+            download(c.url, c.size, c.sha256, part)
+            ImeConfig.install(context, part.readText()).also { ok ->
+                if (ok) ScorpioDictManager.getInstance(context.applicationContext).onConfigChanged()
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "更新鍵盤設定失敗", e)
+            false
+        } finally {
+            part.delete()
+        }
+    }
+
     /** 設定頁列出可以安裝的外掛 */
     suspend fun availablePlugins(context: Context): List<ManifestPlugin>? = withContext(Dispatchers.IO) {
         try {
@@ -361,20 +388,8 @@ object PackUpdater {
         }
         // 鍵盤設定（簡拼展開、顏文字對照、讀音混用預設、符號鍵盤）有新版就更新
         for (c in parseConfigs(json)) {
-            if (c.id != ImeConfig.ID || c.minAppVersion > appVersion || PackVersion.compare(c.version, ImeConfig.installedVersion(context)) <= 0) continue
-            val part = File(context.cacheDir, "config-${c.id}.part")
-            try {
-                download(c.url, c.size, c.sha256, part)
-                if (ImeConfig.install(context, part.readText())) {
-                    dict.onConfigChanged()
-                    updated.add("鍵盤設定" to c.version)
-                } else failed.add("鍵盤設定")
-            } catch (e: Exception) {
-                Log.w(TAG, "更新鍵盤設定失敗", e)
-                failed.add("鍵盤設定")
-            } finally {
-                part.delete()
-            }
+            if (!configPending(context, c, appVersion)) continue
+            if (installConfig(context, c)) updated.add("鍵盤設定" to c.version) else failed.add("鍵盤設定")
         }
         // 已安裝的外掛有新版就更新
         for (p in parsePlugins(json)) {

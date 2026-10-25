@@ -486,7 +486,7 @@ class SettingsActivity : AppCompatActivity() {
         row.addView(this, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
     }
 
-    private fun navRow(parent: LinearLayout, icon: Int?, title: String, summary: String?, onClick: () -> Unit) {
+    private fun navRow(parent: LinearLayout, icon: Int?, title: String, summary: String?, onClick: () -> Unit): LinearLayout {
         val row = row(parent, icon, clickable = true)
         texts(textColumn(row), title, summary)
         row.addView(ImageView(this).apply {
@@ -494,11 +494,64 @@ class SettingsActivity : AppCompatActivity() {
             setColorFilter(cOnSurfaceVariant)
         }, LinearLayout.LayoutParams(dp(24), dp(24)).apply { marginStart = dp(8) })
         row.setOnClickListener { onClick() }
+        return row
     }
 
-    private fun infoRow(parent: LinearLayout, title: String, summary: String?, icon: Int? = null) {
-        texts(textColumn(row(parent, icon, clickable = false)), title, summary)
+    private fun infoRow(parent: LinearLayout, title: String, summary: String?, icon: Int? = null): LinearLayout =
+        row(parent, icon, clickable = false).also { texts(textColumn(it), title, summary) }
+
+    /** 列的第二行字（說明） */
+    private fun summaryOf(row: LinearLayout) = (row.getChildAt(0) as LinearLayout).getChildAt(1) as TextView
+
+    /** 接在 anchor 這列底下、靠右的文字按鈕（更新到新版、刪除詞庫） */
+    private fun rowAction(list: LinearLayout, anchor: View, text: String, color: Int, onClick: (TextView) -> Unit): LinearLayout {
+        val rr = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(dp(16), 0, dp(4), dp(4))
+        }
+        rr.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
+        rr.addView(TextView(this).apply {
+            this.text = text
+            textSize = 14f
+            setTextColor(color)
+            setPadding(dp(16), dp(8), dp(16), dp(8))
+            setOnClickListener { onClick(this) }
+        })
+        list.addView(rr, list.indexOfChild(anchor) + 1)
+        return rr
     }
+
+    /** 下載一個資料包到最新版：進度條放在 anchor 這列底下、進度寫在 sub；回傳成功與否 */
+    private suspend fun downloadPack(list: LinearLayout, anchor: View, sub: TextView, id: String): Boolean {
+        var bar: com.google.android.material.progressindicator.LinearProgressIndicator? = null
+        val ok = com.p3dro.scorpio.ime.engine.PackUpdater.ensureLatest(this, id) { f ->
+            runOnUiThread {
+                val b = bar ?: com.google.android.material.progressindicator.LinearProgressIndicator(this).apply {
+                    max = 100
+                    trackCornerRadius = dp(4)
+                    list.addView(this, list.indexOfChild(anchor) + 1, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                        setMargins(dp(20), 0, dp(20), dp(12))
+                    })
+                    bar = this
+                }
+                if (f < 0) {
+                    if (!b.isIndeterminate) {
+                        b.visibility = View.INVISIBLE
+                        b.isIndeterminate = true
+                        b.visibility = View.VISIBLE
+                    }
+                    sub.text = "安裝中…"
+                } else {
+                    b.setProgressCompat((f * 100).toInt(), true)
+                    sub.text = "下載中 ${(f * 100).toInt()}%"
+                }
+            }
+        }
+        bar?.let { list.removeView(it) }
+        return ok
+    }
+
+    private fun sizeText(bytes: Long) = if (bytes >= 1048576) "%.1f MB".format(bytes / 1048576.0) else "${(bytes + 1023) / 1024} KB"
 
     /** onRowClick 有給時，點列本身做那件事（例如看詞庫內容），只有開關切換開關 */
     private fun switchRow(
@@ -1059,7 +1112,7 @@ class SettingsActivity : AppCompatActivity() {
         val up = card()
         val updatePrefs = getSharedPreferences(com.p3dro.scorpio.ime.engine.PackUpdater.PREFS, Context.MODE_PRIVATE)
         switchRow(
-            up, "自動更新詞庫", "每天在 Wi-Fi 下檢查一次，有新版的流行用語、地名、接續詞語料就自動下載。",
+            up, "自動更新詞庫", "每天在 Wi-Fi 下檢查一次，開著的詞庫、Emoji、英文、倉頡碼表與鍵盤設定有新版就自動下載。",
             updatePrefs.getBoolean(com.p3dro.scorpio.ime.engine.PackUpdater.PREF_AUTO, true)
         ) { on ->
             updatePrefs.edit().putBoolean(com.p3dro.scorpio.ime.engine.PackUpdater.PREF_AUTO, on).apply()
@@ -1069,7 +1122,7 @@ class SettingsActivity : AppCompatActivity() {
             val t = updatePrefs.getLong(com.p3dro.scorpio.ime.engine.PackUpdater.PREF_LAST_CHECK, 0)
             return if (t == 0L) "還沒檢查過" else "上次檢查：" + java.text.SimpleDateFormat("M/d HH:mm", java.util.Locale.TAIWAN).format(java.util.Date(t))
         }
-        val checkButton = button(up, "立即檢查更新", filled = false) {}
+        val checkButton = button(up, "全部檢查並更新", filled = false) {}
         val status = TextView(this).apply {
             text = lastCheckText()
             textAppearance(this, com.google.android.material.R.attr.textAppearanceBodySmall)
@@ -1078,6 +1131,9 @@ class SettingsActivity : AppCompatActivity() {
             setPadding(dp(16), 0, dp(16), dp(12))
         }
         up.addView(status)
+        // 不在詞庫清單上的內建資料：版本與單獨更新（讀到線上清單後補上）
+        val builtins = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        up.addView(builtins)
         checkButton.setOnClickListener {
             checkButton.isEnabled = false
             checkButton.text = "檢查中…"
@@ -1093,7 +1149,7 @@ class SettingsActivity : AppCompatActivity() {
                 if (stack.lastOrNull() != Page.DICTIONARY) return@launch
                 if (r.updated.isNotEmpty()) render() else {
                     checkButton.isEnabled = true
-                    checkButton.text = "立即檢查更新"
+                    checkButton.text = "全部檢查並更新"
                     status.text = lastCheckText()
                 }
             }
@@ -1133,6 +1189,45 @@ class SettingsActivity : AppCompatActivity() {
             val dicts = dict.dictionaries(available)
             if (stack.lastOrNull() != Page.DICTIONARY) return@launch
             for ((key, c) in cards) c.removeView(loadings[key])
+            for ((id, name) in listOf("en" to "英文詞庫", "cangjie" to "倉頡／速成碼表")) {
+                val have = dict.installedPackVersion(id, "")
+                if (have.isEmpty()) continue
+                val r = infoRow(builtins, name, "版本 $have")
+                val m = manifest[id] ?: continue
+                if (com.p3dro.scorpio.ime.engine.PackVersion.compare(m.version, have) <= 0) continue
+                lateinit var action: LinearLayout
+                action = rowAction(builtins, r, "更新到 ${m.version}（${sizeText(m.size)}）", cPrimary) { btn ->
+                    btn.isEnabled = false
+                    lifecycleScope.launch {
+                        val sub = summaryOf(r)
+                        if (downloadPack(builtins, r, sub, id)) {
+                            sub.text = "版本 ${m.version}"
+                            builtins.removeView(action)
+                        } else {
+                            sub.text = "版本 $have"
+                            btn.isEnabled = true
+                            android.widget.Toast.makeText(this@SettingsActivity, "下載失敗，確認網路後再試一次", android.widget.Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                }
+            }
+            val configRow = infoRow(builtins, "鍵盤設定", "簡拼展開、顏文字對照、讀音混用預設、符號鍵盤・版本 " +
+                com.p3dro.scorpio.ime.engine.ImeConfig.installedVersion(this@SettingsActivity))
+            com.p3dro.scorpio.ime.engine.PackUpdater.pendingConfig(this@SettingsActivity)?.let { c ->
+                lateinit var action: LinearLayout
+                action = rowAction(builtins, configRow, "更新到 ${c.version}（${sizeText(c.size)}）", cPrimary) { btn ->
+                    btn.isEnabled = false
+                    lifecycleScope.launch {
+                        if (com.p3dro.scorpio.ime.engine.PackUpdater.installConfig(this@SettingsActivity, c)) {
+                            summaryOf(configRow).text = "簡拼展開、顏文字對照、讀音混用預設、符號鍵盤・版本 ${c.version}"
+                            builtins.removeView(action)
+                        } else {
+                            btn.isEnabled = true
+                            android.widget.Toast.makeText(this@SettingsActivity, "下載失敗，確認網路後再試一次", android.widget.Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                }
+            }
             fun groupOf(d: ScorpioDictManager.DictionaryInfo) = manifest[d.id]?.category?.takeIf { it in groups } ?: when {
                 d.group == "bigram" -> "bigram"
                 d.removable -> "import"
@@ -1162,8 +1257,32 @@ class SettingsActivity : AppCompatActivity() {
                         android.widget.Toast.makeText(this@SettingsActivity, "打開開關下載後就能看內容", android.widget.Toast.LENGTH_SHORT).show()
                     }
                 }
+                // 線上有新版：這列底下出現「更新到…」，可以只更新這一個（內建資料一律可更新；可開關的要開著）
+                val online = manifest[d.id]
+                var updateAction: LinearLayout? = null
+                fun offerUpdate(anchor: LinearLayout) {
+                    if (online == null || !installed || !(online.system || d.enabled || !d.toggleable)) return
+                    if (com.p3dro.scorpio.ime.engine.PackVersion.compare(online.version, d.version.orEmpty()) <= 0) return
+                    updateAction = rowAction(list, anchor, "更新到 ${online.version}（${sizeText(online.size)}）", cPrimary) { btn ->
+                        btn.isEnabled = false
+                        val sub = summaryOf(anchor)
+                        val before = sub.text
+                        lifecycleScope.launch {
+                            if (downloadPack(list, anchor, sub, d.id)) {
+                                sub.text = summary(true, online.rows.takeIf { it > 0 } ?: d.count, online.version)
+                                updateAction?.let { list.removeView(it) }
+                                updateAction = null
+                                android.widget.Toast.makeText(this@SettingsActivity, "已更新「${d.name}」到 ${online.version}", android.widget.Toast.LENGTH_SHORT).show()
+                            } else {
+                                sub.text = before
+                                btn.isEnabled = true
+                                android.widget.Toast.makeText(this@SettingsActivity, "下載失敗，確認網路後再試一次", android.widget.Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    }
+                }
                 if (!d.toggleable) {
-                    navRow(list, null, d.name, summary(true, d.count, d.version)) { openDetail() }
+                    offerUpdate(navRow(list, null, d.name, summary(true, d.count, d.version)) { openDetail() })
                     continue
                 }
                 var ignore = false
@@ -1183,38 +1302,16 @@ class SettingsActivity : AppCompatActivity() {
                         dict.setDictionaryEnabled(d.id, on)
                         if (!on || d.removable || d.id == "emoji") return@launch
                         // 有東西要下載時才在這列底下出現進度條：下載顯示百分比，套用時轉成不確定進度
-                        var bar: com.google.android.material.progressindicator.LinearProgressIndicator? = null
                         val before = sub.text
                         sw.isEnabled = false
-                        val ok = com.p3dro.scorpio.ime.engine.PackUpdater.ensureLatest(this@SettingsActivity, d.id) { f ->
-                            runOnUiThread {
-                                val b = bar ?: com.google.android.material.progressindicator.LinearProgressIndicator(this@SettingsActivity).apply {
-                                    max = 100
-                                    trackCornerRadius = dp(4)
-                                    list.addView(this, list.indexOfChild(r) + 1, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-                                        setMargins(dp(20), 0, dp(20), dp(12))
-                                    })
-                                    bar = this
-                                }
-                                if (f < 0) {
-                                    if (!b.isIndeterminate) {
-                                        b.visibility = View.INVISIBLE
-                                        b.isIndeterminate = true
-                                        b.visibility = View.VISIBLE
-                                    }
-                                    sub.text = "安裝中…"
-                                } else {
-                                    b.setProgressCompat((f * 100).toInt(), true)
-                                    sub.text = "下載中 ${(f * 100).toInt()}%"
-                                }
-                            }
-                        }
-                        bar?.let { list.removeView(it) }
+                        val ok = downloadPack(list, r, sub, d.id)
                         sw.isEnabled = true
                         val m = manifest[d.id]
                         when {
                             ok -> {
                                 installed = true
+                                updateAction?.let { list.removeView(it) }
+                                updateAction = null
                                 sub.text = summary(true, m?.rows ?: d.count, m?.version ?: d.version)
                                 android.widget.Toast.makeText(this@SettingsActivity,
                                     if (d.installed) "已更新「${d.name}」到最新版" else "已安裝「${d.name}」", android.widget.Toast.LENGTH_SHORT).show()
@@ -1233,24 +1330,16 @@ class SettingsActivity : AppCompatActivity() {
                 }
                 r = pair.first
                 sw = pair.second
+                offerUpdate(r)
                 if (d.removable) {
-                    val rr = row(list, null, clickable = false)
-                    rr.setPadding(dp(16), 0, dp(4), dp(4))
-                    rr.addView(View(this@SettingsActivity), LinearLayout.LayoutParams(0, 1, 1f))
-                    rr.addView(TextView(this@SettingsActivity).apply {
-                        text = "刪除這個詞庫"
-                        textSize = 14f
-                        setTextColor(cError)
-                        setPadding(dp(16), dp(8), dp(16), dp(8))
-                        setOnClickListener {
-                            confirm("刪除「${d.name}」？", "這個匯入的詞庫會從輸入法移除，原本的檔案不受影響。", "刪除") {
-                                lifecycleScope.launch {
-                                    dict.removeImportedDictionary(d.id)
-                                    render()
-                                }
+                    rowAction(list, r, "刪除這個詞庫", cError) {
+                        confirm("刪除「${d.name}」？", "這個匯入的詞庫會從輸入法移除，原本的檔案不受影響。", "刪除") {
+                            lifecycleScope.launch {
+                                dict.removeImportedDictionary(d.id)
+                                render()
                             }
                         }
-                    })
+                    }
                 }
             }
         }

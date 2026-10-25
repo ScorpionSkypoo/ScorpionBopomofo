@@ -2775,7 +2775,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
         out.add(
             DictionaryInfo(
                 "emoji", "Emoji", "打字時依詞意穿插 Emoji 候選", d.emoji?.all()?.size ?: 0, emojiEnabled,
-                source = "Unicode CLDR 繁中註解（Unicode License v3）"
+                source = "Unicode CLDR 繁中註解（Unicode License v3）", version = loaded["emoji"]?.version
             )
         )
         out.add(DictionaryInfo(
