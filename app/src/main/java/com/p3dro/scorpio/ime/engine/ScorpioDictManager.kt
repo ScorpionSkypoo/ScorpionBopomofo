@@ -45,9 +45,10 @@ class ScorpioDictManager private constructor(private val context: Context) {
         private const val PREF_USER_DICT_CLEANUP = "user_dict_cleanup_v1"
 
         // 整句選字「打對的注音優先」：改注音懲罰（未乘權重）合計至少這麼多，才算靠修正拼出來的整句；
-        // 這種整句要比照打的整句高出 LITERAL_MARGIN 分才排第一（落點壓在兩鍵交界時鄰鍵懲罰 < 0.4，不受影響）
+        // 這種整句要比照打的整句高出 LITERAL_MARGIN 分才排第一（落點壓在兩鍵交界時鄰鍵懲罰 < 0.4，不受影響）。
+        // 用打字記錄 840 次選字重播比：1.5 → 76.8%、2.5 → 77.4%、3.5 → 77.7%、5 → 77.5%、8 → 77.4%（第一候選命中）
         private const val STRONG_CORRECTION = 0.4
-        private const val LITERAL_MARGIN = 1.5
+        private const val LITERAL_MARGIN = 3.5
         // 按歪了的鄰鍵候選：鄰鍵懲罰在這以下才列（按在鍵中央時鄰鍵約 0.65～1.3（上下的鄰鍵比較便宜，個人習慣也會讓某個方向便宜一點），偏向某鄰鍵三、四成鍵寬就會低於這個）、最多幾個詞
         private const val NEIGHBOR_ALT_MAX = 0.6
         // 整句網格（全部選字的共同打分，log10）：
