@@ -1064,39 +1064,99 @@ class SettingsActivity : AppCompatActivity() {
 
         sectionTitle("我的按鍵落點")
         val h = card()
+        // 現在判斷的握法：在測試欄打字時即時更新（頁面在畫面上才輪詢）
+        val Posture = com.p3dro.scorpio.ime.engine.PostureTracker
+        fun postureText() = when (dict.postureTracker.posture) {
+            Posture.TWO_THUMBS -> "雙手拇指"
+            Posture.ONE_HAND -> "單手"
+            else -> "還看不出來：連續打一段字，要有跨過大半個鍵盤和按隔壁鍵的移動"
+        }
+        val live = summaryOf(infoRow(h, "現在的握法", postureText()))
+        val poll = object : Runnable {
+            override fun run() {
+                live.text = postureText()
+                live.postDelayed(this, 500)
+            }
+        }
+        live.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
+            override fun onViewAttachedToWindow(v: View) { v.post(poll) }
+            override fun onViewDetachedFromWindow(v: View) { v.removeCallbacks(poll) }
+        })
+        testField(h, "在這裡打字，看看判斷的是哪種握法")
+
         val zhuyin = dict.spatial.keySpreads()
         val qwerty = dict.qwerty.keySpreads()
         if (zhuyin.isEmpty() && qwerty.isEmpty()) {
             infoRow(h, "還沒有資料", "打字、選字之後，這裡會畫出你按每個鍵的習慣（注音鍵盤與 QWERTY 鍵盤各一張）。")
             return
         }
+        // 切換看全部、雙手、單手各自學到的落點
+        val group = MaterialButtonToggleGroup(this).apply {
+            isSingleSelection = true
+            isSelectionRequired = true
+        }
+        val ids = HashMap<Int, Int>()
+        for ((posture, label) in listOf(0 to "全部", Posture.TWO_THUMBS to "雙手", Posture.ONE_HAND to "單手")) {
+            val b = MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+                id = View.generateViewId()
+                text = label
+                isAllCaps = false
+            }
+            ids[b.id] = posture
+            group.addView(b, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            if (posture == 0) group.check(b.id)
+        }
+        h.addView(group, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            setMargins(dp(16), dp(4), dp(16), dp(4))
+        })
+        val maps = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        h.addView(maps)
         fun pct(v: Long, total: Long) = "%.1f%%".format(java.util.Locale.ROOT, v * 100.0 / total)
         fun heatmap(keys: Map<Char, Pair<Double, Double>>, cols: Int, rows: Int, spreads: Map<Char, com.p3dro.scorpio.ime.engine.KeyHabits.KeySpread>) {
-            h.addView(
+            maps.addView(
                 TapHeatmapView(this, keys, cols, rows, spreads, keyColor = cSurfaceHighest, labelColor = cOnSurface, heatColor = cPrimary),
                 LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
                     setMargins(dp(12), dp(4), dp(12), dp(4))
                 }
             )
         }
-        if (zhuyin.isNotEmpty()) {
-            val grid = com.p3dro.scorpio.ime.engine.SpatialModel.GRID
-            val keys = buildMap { for (r in grid.indices) for (c in grid[r].indices) put(grid[r][c], c.toDouble() to r.toDouble()) }
-            val acc = dict.tapAccuracy()
-            infoRow(h, "注音鍵盤", if (acc[0] > 0) "連續打字時判對率 ${pct(acc[1], acc[0])}（共 ${acc[0]} 次）；不算移動造成的偏差是 ${pct(acc[2], acc[0])}。" else "連續打字時會學「從上一個鍵移過來時容易偏哪邊」，用一陣子後這裡會顯示有沒有比較準。")
-            heatmap(keys, grid[0].size, grid.size, zhuyin)
+        // 某個握法學了幾下：少的時候打字主要還是照「全部」的習慣（分層退回，見 KeyHabits.biasToward）
+        fun postureSummary(n: Int, name: String) = when {
+            n == 0 -> "還沒有${name}的資料。"
+            n < 30 -> "${name}時學了 $n 下，樣本還少，打字時主要照「全部」的習慣。"
+            n >= 300 -> "${name}時學滿 300 下，之後依最近約 300 下持續更新。"
+            else -> "${name}時學了 $n 下，越多越照${name}自己的習慣。"
         }
-        if (qwerty.isNotEmpty()) {
-            val acc = dict.qwertyAccuracy()
-            infoRow(
-                h, "QWERTY 鍵盤（英文、26 鍵注音、拼音、倉頡、速成）",
-                if (acc[0] > 0) "只看落點的判對率 ${pct(acc[1], acc[0])}（共 ${acc[0]} 次）；沒有個人化是 ${pct(acc[2], acc[0])}。" else null
-            )
-            // 目前 QWERTY 面板上的版面（內建 QWERTY，或有宣告字鍵的輸入法）那一組
-            val layout = dict.qwerty.layout
-            heatmap(dict.qwerty.pos, layout.columns, layout.rows.size, qwerty)
+        fun showMaps(posture: Int) {
+            maps.removeAllViews()
+            val name = if (posture == Posture.TWO_THUMBS) "雙手" else "單手"
+            if (zhuyin.isNotEmpty()) {
+                val grid = com.p3dro.scorpio.ime.engine.SpatialModel.GRID
+                val keys = buildMap { for (r in grid.indices) for (c in grid[r].indices) put(grid[r][c], c.toDouble() to r.toDouble()) }
+                val summary = if (posture == 0) {
+                    val acc = dict.tapAccuracy()
+                    if (acc[0] > 0) "連續打字時判對率 ${pct(acc[1], acc[0])}（共 ${acc[0]} 次）；不算移動造成的偏差是 ${pct(acc[2], acc[0])}。" else "連續打字時會學「從上一個鍵移過來時容易偏哪邊」，用一陣子後這裡會顯示有沒有比較準。"
+                } else postureSummary(dict.spatial.postureSampleCounts()[posture - 1], name)
+                infoRow(maps, "注音鍵盤", summary)
+                heatmap(keys, grid[0].size, grid.size, dict.spatial.keySpreads(posture))
+            }
+            if (qwerty.isNotEmpty()) {
+                val summary = if (posture == 0) {
+                    val acc = dict.qwertyAccuracy()
+                    if (acc[0] > 0) "只看落點的判對率 ${pct(acc[1], acc[0])}（共 ${acc[0]} 次）；沒有個人化是 ${pct(acc[2], acc[0])}。" else null
+                } else postureSummary(dict.qwerty.postureSampleCounts()[posture - 1], name)
+                infoRow(maps, "QWERTY 鍵盤（英文、26 鍵注音、拼音、倉頡、速成）", summary)
+                // 目前 QWERTY 面板上的版面（內建 QWERTY，或有宣告字鍵的輸入法）那一組
+                val layout = dict.qwerty.layout
+                heatmap(dict.qwerty.pos, layout.columns, layout.rows.size, dict.qwerty.keySpreads(posture))
+            }
         }
-        infoRow(h, "怎麼看", "圓點是你瞄準這個鍵時平均按到的位置，細線從鍵中心指向它；暈開的範圍是落點的散佈，顏色越深代表這個鍵的樣本越多。")
+        showMaps(0)
+        group.addOnButtonCheckedListener { _, id, isChecked ->
+            if (isChecked) ids[id]?.let { showMaps(it) }
+        }
+        infoRow(h, "怎麼看", "圓點是你瞄準這個鍵時平均按到的位置，細線從鍵中心指向它；暈開的範圍是落點的散佈，顏色越深代表這個鍵的樣本越多。" +
+            "「雙手」「單手」只算判斷得出握法的那幾下；「全部」是每一下都算。")
     }
 
     // ---------- 字典與學習 ----------

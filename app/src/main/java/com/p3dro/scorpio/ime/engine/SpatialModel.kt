@@ -296,7 +296,9 @@ class SpatialModel {
 
     fun sampleCount(): Int = habits.sampleCount()
 
-    fun keySpreads(): Map<Char, KeyHabits.KeySpread> = habits.keySpreads()
+    /** 設定頁的落點分佈圖：posture 0 是不分握法的，TWO_THUMBS、ONE_HAND 是那個握法自己學到的 */
+    fun keySpreads(posture: Int = 0): Map<Char, KeyHabits.KeySpread> =
+        (postureHabits.getOrNull(posture - 1) ?: habits).keySpreads()
 
     /** 不分握法的習慣，接著是各握法的（以 || 隔開；舊版只有第一段） */
     fun serialize(): String = (listOf(habits) + postureHabits).joinToString("||") { it.serialize() }
@@ -307,6 +309,6 @@ class SpatialModel {
         for ((i, h) in postureHabits.withIndex()) h.restore(parts.getOrNull(i + 1))
     }
 
-    /** 各握法學了幾筆（設定頁、開發用） */
+    /** 各握法學了幾筆（設定頁用） */
     fun postureSampleCounts(): List<Int> = postureHabits.map { it.sampleCount() }
 }
