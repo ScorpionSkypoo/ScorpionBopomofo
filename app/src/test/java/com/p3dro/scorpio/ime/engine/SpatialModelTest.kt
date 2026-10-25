@@ -189,4 +189,24 @@ class SpatialModelTest {
         val back = model().apply { motion.restore(m.motion.serialize()) }
         assertEquals(m.motion.shift(3.0, 3.0).first, back.motion.shift(3.0, 3.0).first, 1e-4)
     }
+
+    @Test
+    fun postureHabitsBackOffToGeneralAndKeepTheirOwnOffset() {
+        val m = model()
+        // 單手時每次都按在 ㄨ 偏右 0.6 個半鍵；雙手拇指時按在中央
+        repeat(60) { m.learn('ㄨ', TouchPoint('ㄨ', 0.6f, 0f, posture = PostureTracker.ONE_HAND)) }
+        repeat(60) { m.learn('ㄨ', TouchPoint('ㄨ', 0f, 0f, posture = PostureTracker.TWO_THUMBS)) }
+        val one = m.effectiveBias('ㄨ', PostureTracker.ONE_HAND).first
+        val two = m.effectiveBias('ㄨ', PostureTracker.TWO_THUMBS).first
+        val general = m.effectiveBias('ㄨ').first
+        assertTrue("單手偏右 $one > 不分 $general", one > general + 0.03)
+        assertTrue("雙手偏回中央 $two < 不分 $general", two < general - 0.03)
+        // 不知道握法：跟不分握法一樣
+        assertEquals(general, m.effectiveBias('ㄨ', PostureTracker.UNKNOWN).first, 1e-9)
+        // 存起來再讀回來一樣；舊版（沒有分握法）的資料也讀得進來
+        val back = model().apply { restore(m.serialize()) }
+        assertEquals(one, back.effectiveBias('ㄨ', PostureTracker.ONE_HAND).first, 1e-3)
+        val old = model().apply { restore(m.serialize().substringBefore("||")) }
+        assertEquals(general, old.effectiveBias('ㄨ').first, 1e-3)
+    }
 }

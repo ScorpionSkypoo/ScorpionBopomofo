@@ -22,6 +22,8 @@ class UserStore {
     private val byInitials = HashMap<String, MutableList<Word>>()
     private val byWord = HashMap<String, MutableList<Word>>()
     private val bigrams = HashMap<String, MutableList<Pair2>>()
+    /** 前兩個詞 → 下一個詞（user_trigram）；鍵是 trigramKey(prev2, prev1)，Pair2.prev 也存這個鍵 */
+    private val trigrams = HashMap<String, MutableList<Pair2>>()
     private val english = TreeMap<String, English>()
 
     private val wordOrder = Comparator<Word> { a, b ->
@@ -36,7 +38,7 @@ class UserStore {
 
     @Synchronized
     fun load(db: SQLiteDatabase) {
-        byToneless.clear(); byReading.clear(); byInitials.clear(); byWord.clear(); bigrams.clear(); english.clear()
+        byToneless.clear(); byReading.clear(); byInitials.clear(); byWord.clear(); bigrams.clear(); trigrams.clear(); english.clear()
         db.rawQuery("SELECT reading, toneless, initials, word, count, last_used, rowid FROM user_dict", null).use { c ->
             while (c.moveToNext()) addWord(Word(c.getString(0), c.getString(1), c.getString(2), c.getString(3), c.getInt(4), c.getLong(5), c.getLong(6)))
         }
@@ -45,6 +47,24 @@ class UserStore {
         }
         db.rawQuery("SELECT key, word, count, last_used, rowid FROM user_english", null).use { c ->
             while (c.moveToNext()) english[c.getString(0)] = English(c.getString(0), c.getString(1), c.getInt(2), c.getLong(3), c.getLong(4))
+        }
+        db.rawQuery("SELECT prev2, prev1, next_word, count, last_used, rowid FROM user_trigram", null).use { c ->
+            while (c.moveToNext()) addTrigram(Pair2(trigramKey(c.getString(0), c.getString(1)), c.getString(2), c.getInt(3), c.getLong(4), c.getLong(5)))
+        }
+    }
+
+    private fun trigramKey(prev2: String, prev1: String) = "$prev2\u0001$prev1"
+
+    private fun addTrigram(p: Pair2) {
+        trigrams.getOrPut(p.prev) { ArrayList(2) }.add(p)
+    }
+
+    @Synchronized
+    fun reloadTrigrams(db: SQLiteDatabase, prev2: String, prev1: String) {
+        val key = trigramKey(prev2, prev1)
+        trigrams.remove(key)
+        db.rawQuery("SELECT next_word, count, last_used, rowid FROM user_trigram WHERE prev2 = ? AND prev1 = ?", arrayOf(prev2, prev1)).use { c ->
+            while (c.moveToNext()) addTrigram(Pair2(key, c.getString(0), c.getInt(1), c.getLong(2), c.getLong(3)))
         }
     }
 
@@ -96,6 +116,12 @@ class UserStore {
             if (list.isEmpty()) empty.add(prev)
         }
         empty.forEach { bigrams.remove(it) }
+        empty.clear()
+        for ((key, list) in trigrams) {
+            if (key.split('\u0001').contains(word)) list.clear() else list.removeAll { it.next == word }
+            if (list.isEmpty()) empty.add(key)
+        }
+        empty.forEach { trigrams.remove(it) }
     }
 
     @Synchronized
@@ -108,7 +134,7 @@ class UserStore {
 
     @Synchronized
     fun clear() {
-        byToneless.clear(); byReading.clear(); byInitials.clear(); byWord.clear(); bigrams.clear(); english.clear()
+        byToneless.clear(); byReading.clear(); byInitials.clear(); byWord.clear(); bigrams.clear(); trigrams.clear(); english.clear()
     }
 
     // ---------- 選字（user_dict） ----------
@@ -161,6 +187,15 @@ class UserStore {
 
     @Synchronized
     fun bigramCount() = bigrams.values.sumOf { it.size }
+
+    /** 前兩個詞是 prev2、prev1 時接過的詞（次數多的在前） */
+    @Synchronized
+    fun nextAfter(prev2: String, prev1: String, limit: Int): List<Pair2> =
+        trigrams[trigramKey(prev2, prev1)]?.sortedWith(pairByCountRecent)?.take(limit) ?: emptyList()
+
+    /** 前一個詞接過的詞與次數（不排序，給要自己算分的人用） */
+    @Synchronized
+    fun nextAll(prev: String): List<Pair2> = bigrams[prev]?.toList() ?: emptyList()
 
     // ---------- 英文（user_english） ----------
 

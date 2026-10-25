@@ -54,6 +54,25 @@ class KeyHabits {
         return clampBias(x, y)
     }
 
+    /** 全體平均偏移（已向 0 收斂） */
+    @Synchronized
+    fun globalEffective(): Pair<Double, Double> {
+        val gw = globalBias.n / (globalBias.n + GLOBAL_PRIOR)
+        return (globalBias.dx * gw) to (globalBias.dy * gw)
+    }
+
+    /**
+     * 分層退回（Yin et al. 2013 的 spatial backoff）：這一層的樣本少時向 prior（上一層的估計）收斂，
+     * 例如某個握法的某個鍵 → 不分握法的這個鍵
+     */
+    @Synchronized
+    fun biasToward(key: Char, prior: Pair<Double, Double>): Pair<Double, Double> {
+        val k = keyBias[key] ?: return clampBias(prior.first, prior.second)
+        val x = (k.n * k.dx + KEY_PRIOR * prior.first) / (k.n + KEY_PRIOR)
+        val y = (k.n * k.dy + KEY_PRIOR * prior.second) / (k.n + KEY_PRIOR)
+        return clampBias(x, y)
+    }
+
     private fun clampBias(x: Double, y: Double): Pair<Double, Double> {
         val len = sqrt(x * x + y * y)
         if (len <= MAX_BIAS) return x to y

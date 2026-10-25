@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# 從資料 repo 的 Release「base」下載最新的內建詞庫（SCD），解壓放進 App 內建資產 app/src/main/assets/scd/
+# 從資料 repo 的 Release「base」下載最新的內建詞庫（SCD）與鍵盤設定，解壓放進 App 內建資產
+# app/src/main/assets/scd/（*.scd）、app/src/main/assets/config/（*.json）
 # （詞庫的建置、更新都在 https://github.com/ScorpionSkypoo/scorpio-ime-data）
 #
 # 內建詞庫不壓縮進 APK（build.gradle.kts 的 noCompress），App 執行時直接 mmap；
@@ -12,12 +13,17 @@ mkdir -p "$A"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 curl -fsSL --retry 3 "https://api.github.com/repos/$REPO/releases/tags/base" \
-  | python3 -c 'import json,sys; [print(a["browser_download_url"]) for a in json.load(sys.stdin)["assets"] if a["name"].endswith(".scd.gz")]' \
+  | python3 -c 'import json,sys; [print(a["browser_download_url"]) for a in json.load(sys.stdin)["assets"] if a["name"].endswith((".scd.gz", ".json.gz"))]' \
   > "$TMP/urls"
 [ -s "$TMP/urls" ] || { echo "Release base 裡沒有 .scd.gz（資料 repo 還沒改成建置 SCD？）" >&2; exit 1; }
-rm -f "$A"/*.scd
+C="$A/../config"
+mkdir -p "$C"
+rm -f "$A"/*.scd "$C"/*.json
 while read -r url; do
   f=$(basename "$url" .gz)
-  curl -fsSL --retry 3 "$url" | gunzip -c > "$A/$f"
+  case "$f" in
+    *.json) curl -fsSL --retry 3 "$url" | gunzip -c > "$C/$f" ;;
+    *) curl -fsSL --retry 3 "$url" | gunzip -c > "$A/$f" ;;
+  esac
 done < "$TMP/urls"
-ls -la "$A"
+ls -la "$A" "$C"

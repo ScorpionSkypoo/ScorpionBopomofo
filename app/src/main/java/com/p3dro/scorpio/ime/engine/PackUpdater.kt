@@ -51,7 +51,9 @@ object PackUpdater {
         val bundled: Boolean = true,
         val rows: Int = 0,
         /** 設定頁的分組：basic、places、symbols、terms、bigram */
-        val category: String = ""
+        val category: String = "",
+        /** App 內建、一律使用的資料（主詞庫、Emoji、英文、倉頡）：不在設定頁另列開關，有新版就自動更新 */
+        val system: Boolean = false
     )
 
     data class ManifestPlugin(
@@ -83,6 +85,19 @@ object PackUpdater {
         val languageName: String = "中文（台灣）"
     )
 
+    /** 線上的鍵盤設定（config/）：見 ImeConfig */
+    data class ManifestConfig(val id: String, val version: String, val size: Long, val sha256: String, val url: String, val minAppVersion: Int)
+
+    fun parseConfigs(json: String): List<ManifestConfig> {
+        val root = JSONObject(json)
+        if (root.optInt("schema", 0) > SUPPORTED_SCHEMA) return emptyList()
+        val arr = root.optJSONArray("configs") ?: return emptyList()
+        return (0 until arr.length()).map { i ->
+            val o = arr.getJSONObject(i)
+            ManifestConfig(o.getString("id"), o.getString("version"), o.optLong("size", -1), o.getString("sha256"), o.getString("url"), o.optInt("minAppVersion", 0))
+        }
+    }
+
     data class Result(val updated: List<Pair<String, String>>, val failed: List<String>, val error: String? = null)
 
     fun parseManifest(json: String): List<ManifestPack> {
@@ -98,7 +113,7 @@ object PackUpdater {
                 o.getString("version"), o.optLong("size", -1), o.getString("sha256"), o.getString("url"),
                 o.optInt("minAppVersion", 0), o.optString("description", ""), o.optString("source", ""),
                 o.optString("license", ""), o.optBoolean("bundled", true), o.optInt("rows", 0),
-                o.optString("category", "")
+                o.optString("category", ""), o.optBoolean("system", false)
             )
         }
     }
@@ -329,8 +344,8 @@ object PackUpdater {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putLong(PREF_LAST_CHECK, System.currentTimeMillis()).apply()
         val updated = ArrayList<Pair<String, String>>()
         val failed = ArrayList<String>()
-        // 只更新有開的詞庫（開關就是安裝）
-        val enabled = manifest.filter { dict.isPackEnabled(it.id, it.group) }
+        // 只更新有開的詞庫（開關就是安裝）；App 內建的資料（主詞庫、Emoji…）一律更新
+        val enabled = manifest.filter { it.system || dict.isPackEnabled(it.id, it.group) }
         for (p in pending(enabled, appVersion) { dict.installedPackVersion(it.id, it.group) }) {
             if (installPack(context, dict, p)) updated.add(p.name to p.version) else failed.add(p.name)
         }
@@ -342,6 +357,23 @@ object PackUpdater {
             val have = ChineseMethod.installedVersion(context, l.id)
             if ((have != null && PackVersion.compare(l.version, have) > 0) || (have == null && l.id in missing)) {
                 if (installLayout(context, l)) updated.add(l.name to l.version) else failed.add(l.name)
+            }
+        }
+        // 鍵盤設定（簡拼展開、顏文字對照、讀音混用預設、符號鍵盤）有新版就更新
+        for (c in parseConfigs(json)) {
+            if (c.id != ImeConfig.ID || c.minAppVersion > appVersion || PackVersion.compare(c.version, ImeConfig.installedVersion(context)) <= 0) continue
+            val part = File(context.cacheDir, "config-${c.id}.part")
+            try {
+                download(c.url, c.size, c.sha256, part)
+                if (ImeConfig.install(context, part.readText())) {
+                    dict.onConfigChanged()
+                    updated.add("鍵盤設定" to c.version)
+                } else failed.add("鍵盤設定")
+            } catch (e: Exception) {
+                Log.w(TAG, "更新鍵盤設定失敗", e)
+                failed.add("鍵盤設定")
+            } finally {
+                part.delete()
             }
         }
         // 已安裝的外掛有新版就更新

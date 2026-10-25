@@ -32,6 +32,21 @@ class QwertyModel(val layout: KeyboardLayout = KeyboardLayout.QWERTY) {
 
     private val habits = KeyHabits()
 
+    /** 分握法的偏移（PostureTracker 的 TWO_THUMBS、ONE_HAND）：樣本少時退回不分握法的 habits */
+    private val postureHabits = arrayOf(KeyHabits(), KeyHabits())
+
+    /** 目前判斷的握法（每按一下由 ScorpioDictManager 更新）；0 是不確定 */
+    @Volatile
+    var posture = 0
+
+    private fun bias(key: Char): Pair<Double, Double> {
+        val general = habits.effectiveBias(key)
+        val ph = postureHabits.getOrNull(posture - 1) ?: return general
+        val (pgx, pgy) = ph.globalEffective()
+        val (gx, gy) = habits.globalEffective()
+        return ph.biasToward(key, (general.first + pgx - gx) to (general.second + pgy - gy))
+    }
+
     /** 落點的鍵盤座標；不是字母鍵（數字、符號）回傳 null */
     fun point(touch: BopomofoComposer.TouchPoint): Pair<Double, Double>? = point(touch.rawChar, touch.offsetX, touch.offsetY)
 
@@ -45,7 +60,7 @@ class QwertyModel(val layout: KeyboardLayout = KeyboardLayout.QWERTY) {
     fun center(key: Char, useHabits: Boolean = true): Pair<Double, Double>? {
         val p = pos[key] ?: return null
         if (!useHabits) return p
-        val (bx, by) = habits.effectiveBias(key)
+        val (bx, by) = bias(key)
         return (p.first + bx) to (p.second + by)
     }
 
@@ -83,6 +98,7 @@ class QwertyModel(val layout: KeyboardLayout = KeyboardLayout.QWERTY) {
         val dy = py - target.second
         if (abs(dx) > 1.5 || abs(dy) > 1.5) return false
         habits.add(key, dx, dy)
+        postureHabits.getOrNull(posture - 1)?.add(key, dx, dy)
         return true
     }
 
@@ -90,11 +106,16 @@ class QwertyModel(val layout: KeyboardLayout = KeyboardLayout.QWERTY) {
 
     fun keySpreads(): Map<Char, KeyHabits.KeySpread> = habits.keySpreads()
 
-    fun serialize(): String = habits.serialize()
+    /** 不分握法的習慣，接著是各握法的（以 || 隔開；舊版只有第一段） */
+    fun serialize(): String = (listOf(habits) + postureHabits).joinToString("||") { it.serialize() }
 
-    fun restore(data: String?) = habits.restore(data)
+    fun restore(data: String?) {
+        val parts = data?.split("||").orEmpty()
+        habits.restore(parts.getOrNull(0))
+        for ((i, h) in postureHabits.withIndex()) h.restore(parts.getOrNull(i + 1))
+    }
 
-    /** 版面改版：從舊版面的習慣（serialize 的內容）與鍵位搬過來（見 KeyHabits.migrateFrom） */
+    /** 版面改版：從舊版面的習慣（serialize 的內容）與鍵位搬過來（見 KeyHabits.migrateFrom；分握法的不搬，重新學） */
     fun migrateFrom(oldData: String, oldCenters: Map<Char, Pair<Double, Double>>) =
-        habits.migrateFrom(KeyHabits().apply { restore(oldData) }, oldCenters, pos)
+        habits.migrateFrom(KeyHabits().apply { restore(oldData.substringBefore("||")) }, oldCenters, pos)
 }

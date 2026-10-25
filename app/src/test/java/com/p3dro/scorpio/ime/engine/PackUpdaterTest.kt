@@ -43,6 +43,15 @@ class PackUpdaterTest {
     }
 
     @Test
+    fun systemPacks() {
+        val json = """{"schema": 1, "packs": [
+            {"id": "emoji", "group": "emoji", "version": "2026.10.25", "sha256": "ab", "url": "https://example.com/emoji.scd.gz", "system": true},
+            {"id": "trendy", "version": "2026.10.25", "sha256": "cd", "url": "https://example.com/trendy.scd.gz"}
+        ]}"""
+        assertEquals(listOf(true, false), PackUpdater.parseManifest(json).map { it.system })
+    }
+
+    @Test
     fun legacySqlitePacksAreIgnored() {
         val legacy = """{"schema": 1, "packs": [{"id": "old", "version": "1", "sha256": "ab", "url": "https://example.com/old.db.gz"}]}"""
         assertEquals(emptyList<PackUpdater.ManifestPack>(), PackUpdater.parseManifest(legacy))

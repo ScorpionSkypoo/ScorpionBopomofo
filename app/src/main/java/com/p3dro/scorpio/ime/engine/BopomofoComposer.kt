@@ -152,7 +152,11 @@ class BopomofoComposer {
         val rawChar: Char = char,
         /** 上一下的落點（大千鍵盤座標，鍵距單位）；連續打字才有，沒有是 NaN（剛開始打、停頓太久、中間按了別的鍵） */
         val fromX: Float = Float.NaN,
-        val fromY: Float = Float.NaN
+        val fromY: Float = Float.NaN,
+        /** 按下的時間（SystemClock.uptimeMillis）；0 是不知道 */
+        val time: Long = 0L,
+        /** 按下當下判斷的握法（PostureTracker：0 不確定、1 雙手拇指、2 單手） */
+        val posture: Int = 0
     ) {
         val from: Pair<Double, Double>? get() = if (fromX.isNaN()) null else fromX.toDouble() to fromY.toDouble()
     }

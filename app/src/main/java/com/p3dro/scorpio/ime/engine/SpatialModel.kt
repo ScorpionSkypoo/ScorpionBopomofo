@@ -56,6 +56,7 @@ class SpatialModel {
     @Volatile
     private var pitchY = HALF_KEYS_PER_PITCH_Y
 
+
     /** 以實際鍵盤版面更新換算：相鄰兩鍵中心距離 ÷ 半個鍵寬（鍵高） */
     fun setPitch(halfKeysPerPitchX: Double, halfKeysPerPitchY: Double) {
         if (halfKeysPerPitchX in 1.5..4.0) pitchX = halfKeysPerPitchX
@@ -64,6 +65,9 @@ class SpatialModel {
 
     /** 每鍵的個人化偏移（鍵距單位） */
     private val habits = KeyHabits()
+
+    /** 分握法的偏移（PostureTracker 的 TWO_THUMBS、ONE_HAND 各一份）：樣本少時退回不分握法的 habits */
+    private val postureHabits = arrayOf(KeyHabits(), KeyHabits())
 
     /** 移動造成的偏差（連續打字時） */
     val motion = MotionBias()
@@ -105,6 +109,18 @@ class SpatialModel {
     /** 個人化偏移（鍵距單位）：樣本少的鍵以全體平均為準 */
     fun effectiveBias(key: Char): Pair<Double, Double> = habits.effectiveBias(key)
 
+    /**
+     * 某個握法時的偏移：先拿不分握法的這個鍵，加上這個握法整體比平常偏多少，再向這個握法這個鍵自己的樣本靠
+     * （樣本越多越像自己）；不知道握法時就是不分握法的
+     */
+    fun effectiveBias(key: Char, posture: Int): Pair<Double, Double> {
+        val general = habits.effectiveBias(key)
+        val ph = postureHabits.getOrNull(posture - 1) ?: return general
+        val (pgx, pgy) = ph.globalEffective()
+        val (gx, gy) = habits.globalEffective()
+        return ph.biasToward(key, (general.first + pgx - gx) to (general.second + pgy - gy))
+    }
+
     /** 從 from 移到 key 時，移動造成的偏差（沒有上一下時是 0） */
     private fun motionShift(key: Char, from: Pair<Double, Double>?): Pair<Double, Double> {
         if (from == null) return 0.0 to 0.0
@@ -116,9 +132,9 @@ class SpatialModel {
      * 落點相對某鍵的高斯代價（負對數機率）：先扣掉使用者瞄準該鍵時的習慣偏移、從上一下移過來的偏差（鍵中央的代價是 0）。
      * 不加常態分佈的正規化項：這裡的高斯寬度是調過的懲罰尺度（比手指實際的散佈寬很多）
      */
-    private fun cost(point: Pair<Double, Double>, key: Char, from: Pair<Double, Double>? = null, useMotion: Boolean = true): Double {
+    private fun cost(point: Pair<Double, Double>, key: Char, from: Pair<Double, Double>? = null, useMotion: Boolean = true, posture: Int = 0): Double {
         val (r, c) = POS[key] ?: return Double.MAX_VALUE
-        val (bx, by) = effectiveBias(key)
+        val (bx, by) = effectiveBias(key, posture)
         val (mx, my) = if (useMotion) motionShift(key, from) else 0.0 to 0.0
         val dx = point.first - (c + bx + mx)
         val dy = point.second - (r + by + my)
@@ -145,11 +161,11 @@ class SpatialModel {
         if (!POS.containsKey(touch.char)) return emptyList()
         val point = physicalPoint(touch) ?: return emptyList()
         val from = touch.from
-        val base = cost(point, touch.char, from)
+        val base = cost(point, touch.char, from, posture = touch.posture)
         val keys = LinkedHashSet(gridNeighbors(touch.char))
         // 被改判過的鍵，原本按到的鍵一定要列為候選
         if (touch.rawChar != touch.char && POS.containsKey(touch.rawChar)) keys.add(touch.rawChar)
-        return keys.map { k -> k to (cost(point, k, from) - base).coerceIn(MIN_PENALTY, MAX_PENALTY) }
+        return keys.map { k -> k to (cost(point, k, from, posture = touch.posture) - base).coerceIn(MIN_PENALTY, MAX_PENALTY) }
     }
 
     // ---------- 按下當下：判定這一鍵 ----------
@@ -168,18 +184,22 @@ class SpatialModel {
         /** 上一下的落點（大千鍵盤座標）；剛開始打、停頓太久時是 null */
         from: Pair<Double, Double>? = null,
         /** false：不看移動造成的偏差（只用來跟有的版本比判對率） */
-        useMotion: Boolean = true
+        useMotion: Boolean = true,
+        time: Long = 0L,
+        /** 目前判斷的握法（PostureTracker） */
+        posture: Int = 0
     ): BopomofoComposer.TouchPoint {
         val raw = BopomofoComposer.TouchPoint(
             rawChar, offsetX, offsetY,
-            fromX = from?.first?.toFloat() ?: Float.NaN, fromY = from?.second?.toFloat() ?: Float.NaN
+            fromX = from?.first?.toFloat() ?: Float.NaN, fromY = from?.second?.toFloat() ?: Float.NaN,
+            time = time, posture = posture
         )
         if (!POS.containsKey(rawChar)) return raw
         val point = physicalPoint(raw) ?: return raw
 
         val options = listOf(rawChar) + gridNeighbors(rawChar).filter { !isTone(it) }
         val priors = priorPenalties(history, options)
-        fun score(k: Char) = cost(point, k, from, useMotion) + (priors[k] ?: 0.0)
+        fun score(k: Char) = cost(point, k, from, useMotion, posture) + (priors[k] ?: 0.0)
 
         var best = rawChar
         var bestScore = score(rawChar)
@@ -261,13 +281,16 @@ class SpatialModel {
         // 離目標超過一個半鍵距多半是解析錯位而非手滑，不納入
         if (abs(dx) > 1.5 || abs(dy) > 1.5) return
         val from = touch.from
+        val ph = postureHabits.getOrNull(touch.posture - 1)
         if (from == null) {
             habits.add(intended, dx, dy)
+            ph?.add(intended, dx, dy)
             return
         }
         val (mx, my) = motion.shift(c - from.first, r - from.second)
-        val (bx, by) = effectiveBias(intended)
+        val (bx, by) = effectiveBias(intended, touch.posture)
         habits.add(intended, dx - mx, dy - my)
+        ph?.add(intended, dx - mx, dy - my)
         motion.add(c - from.first, r - from.second, dx - bx, dy - by)
     }
 
@@ -275,7 +298,15 @@ class SpatialModel {
 
     fun keySpreads(): Map<Char, KeyHabits.KeySpread> = habits.keySpreads()
 
-    fun serialize(): String = habits.serialize()
+    /** 不分握法的習慣，接著是各握法的（以 || 隔開；舊版只有第一段） */
+    fun serialize(): String = (listOf(habits) + postureHabits).joinToString("||") { it.serialize() }
 
-    fun restore(data: String?) = habits.restore(data)
+    fun restore(data: String?) {
+        val parts = data?.split("||").orEmpty()
+        habits.restore(parts.getOrNull(0))
+        for ((i, h) in postureHabits.withIndex()) h.restore(parts.getOrNull(i + 1))
+    }
+
+    /** 各握法學了幾筆（設定頁、開發用） */
+    fun postureSampleCounts(): List<Int> = postureHabits.map { it.sampleCount() }
 }

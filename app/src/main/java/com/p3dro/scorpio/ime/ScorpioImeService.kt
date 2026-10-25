@@ -145,6 +145,14 @@ class ScorpioImeService : InputMethodService() {
     private var screenContextWord: String? = null
     private var lastCommittedReading: String? = null
     private var lastCommitTime: Long = 0L
+    /** 連續打字時 lastCommittedWord 的前一個詞（5 秒內接著打的），學「前兩個詞」的搭配用 */
+    private var prevCommittedWord: String? = null
+
+    /** 上一次整個送出的中文詞（落點、注音、上文）：整個刪掉改打別的詞時拿來學 */
+    private class FullCommit(val word: String, val syllables: List<String>, val touches: List<BopomofoComposer.TouchPoint>, val prev: String?, val at: Long)
+    private var retypeCommit: FullCommit? = null
+    /** 送出 retypeCommit 之後連續刪掉的字數 */
+    private var retypeDeleted = 0
 
     // 累加本次輸入會話中連續部分選字的音節與文字（如先選「佩」再選「卓」，智慧串聯為「佩卓」自動學習）
     private val sessionComposingReadings = mutableListOf<String>()
@@ -736,6 +744,7 @@ class ScorpioImeService : InputMethodService() {
             lastEnglishWord = null
         }
         updateBarVisibility()
+        arrangeIdleBar()
     }
 
     private fun setupRow(rowLayout: LinearLayout, keys: List<Char>) {
@@ -997,6 +1006,7 @@ class ScorpioImeService : InputMethodService() {
                 predictionJob?.cancel()
                 candidateAdapter?.submitList(emptyList())
                 lastCommittedWord = null
+                trackRetypeDelete()
                 deleteCharBeforeCursor()
                 updateBarVisibility()
             }
@@ -1416,7 +1426,7 @@ class ScorpioImeService : InputMethodService() {
         // 空間模型判定實際的鍵：落點 + 個人化偏移 + 從上一下移過來的偏差 + 音節是否拼得起來（保留原始落點供解碼回頭修正）
         val now = android.os.SystemClock.uptimeMillis()
         val previous = lastZhuyinTap?.takeIf { now - lastZhuyinTapAt < com.p3dro.scorpio.ime.engine.MotionBias.MAX_GAP_MS }
-        val touch = dictManager.resolveZhuyinTap(c, offsetX, offsetY, composer.getTouchPoints(), previous)
+        val touch = dictManager.resolveZhuyinTap(c, offsetX, offsetY, composer.getTouchPoints(), previous, now)
         lastZhuyinTap = touch
         lastZhuyinTapAt = now
         composer.append(touch)
@@ -1472,6 +1482,7 @@ class ScorpioImeService : InputMethodService() {
 
     /** 選字用的上文：上一個送出的詞，沒有就用畫面上游標前的最後一個詞 */
     private val contextWord: String? get() = lastCommittedWord ?: screenContextWord
+    private val contextWord2: String? get() = if (lastCommittedWord != null) prevCommittedWord else null
 
     /** 大千注音鍵盤的觸控落點（供空間模型與鄰鍵修正）；字母鍵輸入法沒有注音落點 */
     private fun zhuyinTouches(): List<BopomofoComposer.TouchPoint>? =
@@ -2046,6 +2057,7 @@ class ScorpioImeService : InputMethodService() {
         if (composer.isComposing) commitTopCandidateOrRaw()
         currentInputConnection?.commitText(p, 1)
         lastCommittedWord = null
+        retypeCommit = null
         candidateAdapter?.submitList(emptyList())
         updateBarVisibility()
     }
@@ -2063,7 +2075,7 @@ class ScorpioImeService : InputMethodService() {
             val touchPoints = zhuyinTouches()
 
             candidateJob = serviceScope.launch {
-                val candidates = dictManager.getCandidates(segmentations, hasTone, contextWord, touchPoints, inlineSymbols)
+                val candidates = dictManager.getCandidates(segmentations, hasTone, contextWord, touchPoints, inlineSymbols, contextWord2)
                 candidateAdapter?.submitList(candidates)
                 candidateAdapter?.markUserWords(candidates, dictManager.userOnlyWords(candidates.take(40)))
                 rvCandidates?.scrollToPosition(0)
@@ -2151,6 +2163,14 @@ class ScorpioImeService : InputMethodService() {
 
                 if (composer.isComposing && isChineseWord && (candidate.length == syllables.size || coversAll)) {
                     recordTouchSamples(composer.getTouchPoints(), candidate)
+                    // 排第一的是學過才往前排的詞，卻選了別的：扣回它的學習
+                    val top = candidateAdapter?.topCandidate
+                    val primary = composer.getAllSegmentations().firstOrNull().orEmpty()
+                    val ctx = contextWord
+                    if (top != null && top != candidate && personalizationAllowed()) {
+                        serviceScope.launch { dictManager.noteSkippedLearned(ctx, primary, top, candidate) }
+                    }
+                    noteFullCommit(candidate, primary)
                 }
                 ic?.commitText(candidate, 1)
                 composer.clear()
@@ -2176,6 +2196,36 @@ class ScorpioImeService : InputMethodService() {
                 collapseCandidates()
             }
         }
+    }
+
+    /**
+     * 整個送出一個中文詞（送出前呼叫，composer 還在）：剛把上一個送出的詞整個刪掉、改打同樣字數的別的詞（一分鐘內）時，
+     * 扣回刪掉那次的學習、拿那次的落點對新的詞學；再記下這次的，給下一次比
+     */
+    private fun noteFullCommit(word: String, syllables: List<String>) {
+        val now = System.currentTimeMillis()
+        val old = retypeCommit
+        if (old != null && retypeDeleted == old.word.length && now - old.at < 60_000L && personalizationAllowed() &&
+            old.word != word && old.word.length == word.length
+        ) {
+            serviceScope.launch { dictManager.learnCommitRetype(old.word, old.syllables, old.touches, old.prev, word, syllables) }
+        }
+        retypeCommit = if (personalizationAllowed() && composer.decoder == null) FullCommit(word, syllables, composer.getTouchPoints().toList(), contextWord, now) else null
+        retypeDeleted = 0
+    }
+
+    /** 刪掉已送出的字：剛送出的詞從最後一個字開始一路刪，才算「整個刪掉重打」 */
+    private fun trackRetypeDelete() {
+        val rc = retypeCommit ?: return
+        if (retypeDeleted == 0) {
+            val before = try { currentInputConnection?.getTextBeforeCursor(rc.word.length, 0)?.toString() } catch (e: Exception) { null }
+            if (before != rc.word) {
+                retypeCommit = null
+                return
+            }
+        }
+        retypeDeleted++
+        if (retypeDeleted > rc.word.length) retypeCommit = null
     }
 
     private fun recordTouchSamples(points: List<BopomofoComposer.TouchPoint>, word: String) {
@@ -2222,6 +2272,7 @@ class ScorpioImeService : InputMethodService() {
             return
         }
         spaceArmedFor = null
+        retypeCommit = null
         ic?.commitText(" ", 1)
     }
 
@@ -2246,6 +2297,9 @@ class ScorpioImeService : InputMethodService() {
         val reading = composer.getDictLookupKey()
         if (topWord.isNotEmpty() && (topWord.length == composer.getAllSyllables().size || topWord.length == composer.mergedSyllableCount())) {
             recordTouchSamples(composer.getTouchPoints(), topWord)
+            if (topWord.all { Character.UnicodeScript.of(it.code) == Character.UnicodeScript.HAN }) {
+                noteFullCommit(topWord, composer.getAllSegmentations().firstOrNull().orEmpty())
+            }
         }
         ic.commitText(topWord, 1)
         composer.clear()
@@ -2269,6 +2323,7 @@ class ScorpioImeService : InputMethodService() {
         compoundWord: String? = null
     ) {
         val prev = lastCommittedWord
+        val prev2 = contextWord2
         val prevReading = lastCommittedReading
         val now = System.currentTimeMillis()
 
@@ -2281,9 +2336,10 @@ class ScorpioImeService : InputMethodService() {
             if (!compoundWord.isNullOrEmpty() && !compoundReading.isNullOrEmpty() && compoundWord.length > 1 && compoundWord != word) {
                 dictManager.recordSelection(compoundReading, compoundWord)
             }
-            // 3. 連續單字或短詞快速打字（5秒內），自動串聯為多字詞與 Bigram 搭配機率
+            // 3. 連續單字或短詞快速打字（5秒內），自動串聯為多字詞與 Bigram 搭配機率（前兩個詞都是連續打的再記三個詞的搭配）
             if (!prev.isNullOrBlank() && word.isNotBlank() && (now - lastCommitTime) < 5000L) {
                 dictManager.recordBigram(prev, word)
+                if (!prev2.isNullOrBlank()) dictManager.recordTrigram(prev2, prev, word)
                 if (!prevReading.isNullOrBlank() && reading.isNotEmpty() && (prev.length + word.length) <= 6) {
                     val seqWord = "$prev$word"
                     val seqReading = "$prevReading-$reading"
@@ -2291,6 +2347,7 @@ class ScorpioImeService : InputMethodService() {
                 }
             }
         }
+        prevCommittedWord = if (!prev.isNullOrBlank() && (now - lastCommitTime) < 5000L) prev else null
         lastCommittedWord = word
         lastCommittedReading = reading
         lastCommitTime = now
@@ -2311,7 +2368,7 @@ class ScorpioImeService : InputMethodService() {
         candidateJob?.cancel()
         predictionJob?.cancel()
         predictionJob = serviceScope.launch {
-            val predictions = dictManager.getNextWordPredictions(word)
+            val predictions = dictManager.getNextWordPredictions(word, prevCommittedWord)
             if (predictions.isNotEmpty() && !composer.isComposing && englishWordBuffer.isEmpty()) {
                 candidateAdapter?.submitList(predictions)
                 candidateAdapter?.markUserWords(predictions, dictManager.userOnlyWords(predictions.take(40)))
@@ -2752,18 +2809,25 @@ class ScorpioImeService : InputMethodService() {
      * - 有自動填入建議：整條只放建議（置中），工具與最近使用列都先收起來
      * - 開著最近使用列：前兩個工具＋「更多」｜最近使用列；展開後整條是工具（可左右滑）＋「收合」
      * - 沒開最近使用列：整條都是工具，可以左右滑
+     * - 開著面板（Emoji、顏文字、擴充功能、符號、手寫）：右邊放返回鈕，不放最近使用列（工具照沒開最近使用列的排法）
      */
     private fun arrangeIdleBar() {
         val root = keyboardRootView ?: return
         val scrollTools = root.findViewById<View>(R.id.scroll_tools) ?: return
         val box = root.findViewById<LinearLayout>(R.id.layout_tools) ?: return
         val divider = root.findViewById<View>(R.id.tool_divider)
+        val back = root.findViewById<View>(R.id.btn_idle_back)
+        val panelOpen = currentMode == KeyboardMode.EXPANDED || currentMode == KeyboardMode.SYMBOLS || currentMode == KeyboardMode.HANDWRITING
+        back?.setOnClickListener {
+            triggerHaptic(it)
+            collapseCandidates()
+        }
         // 按了「更新」：整條換成更新列（版本、下載進度、按鈕）
         val idleBar = layoutIdleBar as? LinearLayout
         updateStripView?.let { idleBar?.removeView(it) }
         updateStripView = null
         if (updateStage != null && idleBar != null) {
-            for (v in listOf(scrollTools, divider, scrollRecent)) v?.visibility = View.GONE
+            for (v in listOf(scrollTools, divider, scrollRecent, back)) v?.visibility = View.GONE
             updateStripView = buildUpdateStrip().also {
                 idleBar.addView(it, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f))
             }
@@ -2771,15 +2835,16 @@ class ScorpioImeService : InputMethodService() {
             return
         }
         if (inlineSuggestionViews.isNotEmpty()) {
-            for (v in listOf(scrollTools, divider, scrollRecent)) v?.visibility = View.GONE
+            for (v in listOf(scrollTools, divider, scrollRecent, back)) v?.visibility = View.GONE
             scrollInlineSuggestions?.visibility = View.VISIBLE
             return
         }
         scrollInlineSuggestions?.visibility = View.GONE
         scrollTools.visibility = View.VISIBLE
+        back?.visibility = if (panelOpen) View.VISIBLE else View.GONE
 
         val all = com.p3dro.scorpio.ime.engine.Toolbar.visible(this)
-        val recentOn = prefs.getBoolean(PREF_RECENT_BAR, false)
+        val recentOn = prefs.getBoolean(PREF_RECENT_BAR, false) && !panelOpen
         val canFold = recentOn && all.size > MAX_TOOLS_WITH_RECENT
         val compact = canFold && !toolsExpanded
         // 有新版：「更新」放在工具最前面（收合時只在「⋯」上亮紅點，展開才看得到）；紅點每一版只亮到看過為止
@@ -3166,28 +3231,14 @@ class ScorpioImeService : InputMethodService() {
         symPanel.onKeyTapListener = { char, _, _ -> currentInputConnection?.commitText(char.toString(), 1) }
         val chinese = previousMode != KeyboardMode.ENGLISH
 
-        val rows: List<List<String>>
-        val row3: List<String>
-        if (symbolsPage == 0) {
-            // 比照 Gboard：第 1 頁數字、常用符號、標點（中文是全形標點）
-            rows = listOf(
-                listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "0"),
-                listOf("@", "#", "$", "_", "&", "-", "+", "(", ")", "/")
-            )
-            row3 = if (chinese) listOf("、", "“", "”", "：", "；", "！", "？")
-            else listOf("*", "\"", "'", ":", ";", "!", "?")
-        } else {
-            // 第 2 頁：數學、貨幣、括號（中文多了「」與 §）
-            rows = if (chinese) listOf(
-                listOf("~", "`", "|", "•", "√", "π", "÷", "×", "*", "§"),
-                listOf("£", "¢", "€", "¥", "^", "°", "=", "「", "」", "\\")
-            ) else listOf(
-                listOf("~", "`", "|", "•", "√", "π", "÷", "×", "¶", "∆"),
-                listOf("£", "¢", "€", "¥", "^", "°", "=", "{", "}", "\\")
-            )
-            row3 = if (chinese) listOf("%", "‘", "’", "™", "✓", "[", "]")
-            else listOf("%", "©", "®", "™", "✓", "[", "]")
-        }
+        // 每頁的符號在鍵盤設定（ImeConfig，跟著資料 repo 更新）：比照 Gboard，第 1 頁數字、常用符號、標點（中文是全形標點），
+        // 第 2 頁數學、貨幣、括號（中文多了「」與 §）
+        val pages = com.p3dro.scorpio.ime.engine.ImeConfig.get(this).symbols[if (chinese) "zh" else "en"].orEmpty()
+        if (pages.isEmpty()) return
+        if (symbolsPage >= pages.size) symbolsPage = 0
+        val rows = pages[symbolsPage].rows
+        val row3 = pages[symbolsPage].row3
+        val lastPage = symbolsPage == pages.size - 1
 
         // 版面照切過來的那個鍵盤：大千注音鍵盤（底排有 ㄦ 與刪除鍵）或 QWERTY（英文、26 鍵注音、拼音）
         val fromZhuyinPanel = chinese && !chineseMethod.usesQwerty
@@ -3268,10 +3319,10 @@ class ScorpioImeService : InputMethodService() {
         // 第 3 排：翻頁鍵 + 7 個符號 + 刪除鍵（同 Gboard）
         val thirdRow = newRow(2, 10f)
         thirdRow.addView(functionKey(1.5f, R.attr.imeKeyFunctionDrawable).apply {
-            addView(label(if (symbolsPage == 0) "=\\<" else "?123", 14f))
+            addView(label(if (lastPage && symbolsPage > 0) "?123" else "=\\<", 14f))
             setOnClickListener {
                 triggerHaptic(it)
-                symbolsPage = 1 - symbolsPage
+                symbolsPage = if (lastPage) 0 else symbolsPage + 1
                 buildSymbolsPanel()
             }
         })
@@ -3296,8 +3347,8 @@ class ScorpioImeService : InputMethodService() {
             addView(bottomRowLabel(sym, 18f))
             symPanel.registerKey(this, sym[0])
         }
-        val left = if (symbolsPage == 1) "<" else if (chinese) "，" else ","
-        val right = if (symbolsPage == 1) ">" else if (chinese) "。" else "."
+        val left = if (symbolsPage > 0) "<" else if (chinese) "，" else ","
+        val right = if (symbolsPage > 0) ">" else if (chinese) "。" else "."
         bottomRow.addView(bottomSymbolKey(left, 0.9f))
         bottomRow.addView(functionKey(0.9f, R.attr.imeKeyFunctionDrawable).apply {
             // 兩行字用一般 TextView（KeyLabelView 只照第一行置中）

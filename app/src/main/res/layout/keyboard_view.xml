@@ -88,6 +88,21 @@
                     android:paddingEnd="4dp" />
             </HorizontalScrollView>
 
+            <!-- 開著面板（Emoji、顏文字、擴充功能、符號、手寫）時右邊的返回鈕：按了回到鍵盤；這時不放最近使用列 -->
+            <FrameLayout
+                android:id="@+id/btn_idle_back"
+                android:layout_width="40dp"
+                android:layout_height="36dp"
+                android:background="?attr/imeItemBackgroundBorderless"
+                android:contentDescription="返回鍵盤"
+                android:visibility="gone">
+                <ImageView
+                    android:layout_width="22dp"
+                    android:layout_height="22dp"
+                    android:layout_gravity="center"
+                    android:src="@drawable/ic_ime_back" />
+            </FrameLayout>
+
         </LinearLayout>
 
         <!-- 狀態 B: 活躍候選字列 (打字時顯示) -->

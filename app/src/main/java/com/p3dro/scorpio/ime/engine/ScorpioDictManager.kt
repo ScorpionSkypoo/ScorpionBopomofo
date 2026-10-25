@@ -16,10 +16,13 @@ import com.p3dro.scorpio.ime.engine.scd.ScdFile
 import com.p3dro.scorpio.ime.engine.scd.ScdWriter
 import com.p3dro.scorpio.ime.engine.scd.WordStore
 import com.p3dro.scorpio.ime.engine.scd.WordTable
+import com.p3dro.scorpio.ime.engine.scd.WordHit
 import com.p3dro.scorpio.ime.engine.scd.compareUtf8
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
+import kotlin.math.log10
+import kotlin.math.pow
 import kotlin.math.roundToInt
 
 /**
@@ -47,6 +50,19 @@ class ScorpioDictManager private constructor(private val context: Context) {
         private const val LITERAL_MARGIN = 1.5
         // 按歪了的鄰鍵候選：鄰鍵懲罰在這以下才列（按在鍵中央時鄰鍵約 0.65～1.3（上下的鄰鍵比較便宜，個人習慣也會讓某個方向便宜一點），偏向某鄰鍵三、四成鍵寬就會低於這個）、最多幾個詞
         private const val NEIGHBOR_ALT_MAX = 0.6
+        // 整句網格（全部選字的共同打分，log10）：
+        // 打滿整個輸入的那一段列幾個詞；個人化比例的混合強度（見 spanLookup、contextBonus）；聲調打錯扣分；
+        // 字典沒有這個讀音、只有自己學過的詞時，當作這個讀音的字頻總和
+        private const val FULL_SPAN_WORDS = 8
+        private const val MU_READING = 2.0
+        private const val MU_CONTEXT = 2.0
+        private const val TONE_MISMATCH = 6.0
+        private const val USER_READING_MASS = 1e-4
+        // 鄰鍵修正幾種讀法的整句放進統一分數；排在最前面的統一分數最多比第一名低多少（再低的照原本的順序排在後面）
+        private const val REPAIRS_POOLED = 4
+        private const val POOL_MARGIN = 5.0
+        // 簡拼（只打聲母）查到的詞比打完整讀音的少多少分（log10）
+        private const val ABBREV_COST = 1.5
         // 注音組合依懲罰排不進前幾名、但拼得成詞的另外留幾個：懲罰上限（約兩個鄰鍵／慣性打錯）、最多幾個
         private const val WORD_KEEP_MAX_PENALTY = 2.0
         private const val WORD_KEEP_EXTRA = 8
@@ -55,6 +71,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
         private const val PREF_SPATIAL_BIAS = "spatial_bias_v1"
         // v2：判對統計改成比「有／沒有移動偏差」（v1 比的是散佈，已拿掉）
         private const val PREF_TAP_STATS = "tap_stats_v2"
+        private const val PREF_FUZZY = "fuzzy_sounds_v1"
         private const val PREF_MOTION = "motion_bias_v1"
         private const val PREF_QWERTY_BIAS = "qwerty_bias_v1"
         private const val PREF_QWERTY_STATS = "qwerty_tap_stats_v1"
@@ -66,35 +83,9 @@ class ScorpioDictManager private constructor(private val context: Context) {
         // 英文學習詞（key 為小寫，word 保留最近一次的大小寫，例如 iPhone）
         // 個人慣性打錯：打了 typed 音節、實際選的是 intended 讀音的字（例如 ㄉㄨㄠ → ㄉㄧㄠ）
         private const val USER_TYPO_DDL = "CREATE TABLE IF NOT EXISTS user_typo (typed TEXT NOT NULL, intended TEXT NOT NULL, count INTEGER NOT NULL DEFAULT 1, last_used INTEGER NOT NULL, PRIMARY KEY(typed, intended))"
+        private const val USER_TRIGRAM_DDL = "CREATE TABLE IF NOT EXISTS user_trigram (prev2 TEXT NOT NULL, prev1 TEXT NOT NULL, next_word TEXT NOT NULL, count INTEGER NOT NULL DEFAULT 1, last_used INTEGER NOT NULL, PRIMARY KEY(prev2, prev1, next_word))"
         private const val USER_ENGLISH_DDL = "CREATE TABLE IF NOT EXISTS user_english (key TEXT PRIMARY KEY, word TEXT NOT NULL, count INTEGER NOT NULL DEFAULT 1, last_used INTEGER NOT NULL)"
 
-        val LAZY_SYLLABLES = mapOf(
-            // 聲母簡拼高頻音節展開
-            "ㄅ" to listOf("ㄅㄨ", "ㄅㄚ", "ㄅㄞ", "ㄅㄢ"),
-            "ㄆ" to listOf("ㄆㄧㄥ", "ㄆㄥ", "ㄆㄧ"),
-            "ㄇ" to listOf("ㄇㄟ", "ㄇㄚ", "ㄇㄜ", "ㄇㄣ", "ㄇㄧㄥ"),
-            "ㄈ" to listOf("ㄈㄚ", "ㄈㄤ", "ㄈㄣ"),
-            "ㄉ" to listOf("ㄉㄜ", "ㄉㄠ", "ㄉㄚ", "ㄉㄤ", "ㄉㄡ", "ㄉㄧ"),
-            "ㄊ" to listOf("ㄊㄧ", "ㄊㄚ", "ㄊㄞ", "ㄊㄧㄢ", "ㄊㄨㄥ"),
-            "ㄋ" to listOf("ㄋㄧ", "ㄋㄚ", "ㄋㄥ", "ㄋㄧㄢ"),
-            "ㄌ" to listOf("ㄌㄜ", "ㄌㄞ", "ㄌㄧ", "ㄌㄧㄤ"),
-            "ㄍ" to listOf("ㄍㄢ", "ㄍㄨㄛ", "ㄍㄟ", "ㄍㄨㄥ", "ㄍㄣ"),
-            "ㄎ" to listOf("ㄎㄜ", "ㄎㄢ", "ㄎㄨ", "ㄎㄞ"),
-            "ㄏ" to listOf("ㄏㄠ", "ㄏㄣ", "ㄏㄜ", "ㄏㄞ", "ㄏㄨㄟ", "ㄏㄡ"),
-            "ㄐ" to listOf("ㄐㄧㄡ", "ㄐㄧㄣ", "ㄐㄧㄚ", "ㄐㄩㄝ", "ㄐㄧㄢ", "ㄐㄧ"),
-            "ㄑ" to listOf("ㄑㄩ", "ㄑㄧㄥ", "ㄑㄧ", "ㄑㄧㄢ"),
-            "ㄒ" to listOf("ㄒㄧㄠ", "ㄒㄧㄤ", "ㄒㄧㄝ", "ㄒㄧ", "ㄒㄧㄣ"),
-            "ㄓ" to listOf("ㄓㄜ", "ㄓ", "ㄓㄨㄥ", "ㄓㄣ", "ㄓㄤ"),
-            "ㄔ" to listOf("ㄔㄨ", "ㄔ", "ㄔㄥ", "ㄔㄤ"),
-            "ㄕ" to listOf("ㄕ", "ㄕㄣ", "ㄕㄜ", "ㄕㄨㄛ", "ㄕㄤ"),
-            "ㄖ" to listOf("ㄖㄣ", "ㄖㄨ", "ㄖㄤ"),
-            "ㄗ" to listOf("ㄗㄞ", "ㄗㄨㄟ", "ㄗㄣ", "ㄗ"),
-            "ㄘ" to listOf("ㄘㄨㄛ", "ㄘㄨㄥ", "ㄘ"),
-            "ㄙ" to listOf("ㄙㄨㄛ", "ㄙㄢ", "ㄙ"),
-            "ㄧ" to listOf("ㄧㄠ", "ㄧ", "ㄧㄡ", "ㄧㄝ", "ㄧㄣ", "ㄧㄥ"),
-            "ㄨ" to listOf("ㄨㄛ", "ㄨㄟ", "ㄨㄣ", "ㄨㄢ"),
-            "ㄩ" to listOf("ㄩㄝ", "ㄩㄥ", "ㄩㄣ")
-        )
 
         @Volatile
         private var instance: ScorpioDictManager? = null
@@ -176,45 +167,26 @@ class ScorpioDictManager private constructor(private val context: Context) {
             return syls.size == hanLength(word)
         }
 
-        /** 學習加分：疊加在字典分數上，讓選過的字在同一層級內勝出，而非蓋過所有正確讀音 */
-        fun learnBonus(count: Int): Double = minOf(3.0 + count * 1.5, 12.0)
+        /** 學習加分（學過的長詞補全、簡拼）：疊加在字典分數上；count 是淡出後的次數 */
+        fun learnBonus(count: Double): Double = minOf(3.0 + count * 1.5, 12.0)
+
+        /** 學習的證據隨時間淡出：大約一個月沒用，次數剩一半 */
+        const val LEARN_HALF_LIFE_DAYS = 30.0
+
+        /**
+         * user_dict、user_bigram 的 count：第一次學就是 2（新增時預設 1，接著又加 1），所以實際選過的次數是 count − 1
+         * （user_trigram 從 0 開始加，count 就是次數）
+         */
+        fun timesChosen(count: Int) = (count - 1).coerceAtLeast(0)
+
+        fun decayedCount(count: Int, lastUsed: Long, now: Long): Double {
+            val days = (now - lastUsed).coerceAtLeast(0L) / 86_400_000.0
+            return count * Math.pow(0.5, days / LEARN_HALF_LIFE_DAYS)
+        }
 
         /** 多音節輸入時，只蓋到前幾個音節的詞加完上文分數的上限：低於整句（115）與整句備選（108、107） */
         const val PARTIAL_CAP = 106.0
 
-        // 顏文字關鍵字 → 分類（打「笑臉」「開心」等詞時同步穿插對應顏文字；分類見 tools/build_kaomoji.py）
-        val KAOMOJI_KEYWORDS: Map<String, String> = buildMap {
-            fun reg(cat: String, vararg words: String) { words.forEach { put(it, cat) } }
-            reg("開心", "笑臉", "微笑", "笑", "笑容", "哈哈", "開心", "高興", "快樂", "愉快", "歡樂", "好笑", "笑死", "太好了", "爽", "讚", "好棒", "萬歲", "歡呼",
-                "加油", "努力", "奮鬥", "衝", "拼了", "打氣", "撐住", "興奮")
-            reg("喜歡", "喜歡", "愛", "愛你", "想你", "愛心", "謝謝", "感謝", "多謝", "謝啦", "感恩")
-            reg("親親抱抱", "親親", "抱抱", "親一個", "擁抱", "么么噠")
-            reg("打招呼", "你好", "哈囉", "嗨", "早安", "午安", "掰掰", "再見", "招手")
-            reg("害羞", "害羞", "臉紅", "不好意思", "尷尬", "靦腆", "可愛", "萌", "撒嬌", "乖", "躲起來")
-            reg("眨眼", "眨眼", "放電")
-            reg("得意", "得意", "嘿嘿", "嘲諷", "跩")
-            reg("哭泣", "哭", "哭哭", "難過", "傷心", "眼淚", "流淚", "嗚嗚", "悲傷", "委屈", "心碎", "好痛")
-            reg("生氣", "生氣", "憤怒", "火大", "氣死", "怒", "不爽", "靠北", "抓狂")
-            reg("翻桌", "翻桌", "掀桌")
-            reg("驚訝", "驚訝", "驚嚇", "嚇到", "震驚", "哇", "不會吧", "傻眼", "害怕", "好可怕")
-            reg("疑惑", "疑惑", "為什麼", "不懂", "什麼", "想想", "思考", "嗯")
-            reg("擔心", "擔心", "緊張", "怎麼辦")
-            reg("無奈", "無奈", "沒辦法", "囧", "算了", "唉", "好吧", "無言", "汗", "隨便")
-            reg("投降", "投降", "認輸", "我輸了")
-            reg("抱歉", "抱歉", "對不起", "歹勢", "失禮")
-            reg("崩潰", "崩潰", "瘋了", "發瘋")
-            reg("陣亡", "陣亡", "死了", "掛了", "累死")
-            reg("盯著", "盯著", "瞪", "盯")
-            reg("睡覺", "睡覺", "晚安", "睡", "好睏", "想睡", "累", "好累", "疲憊")
-            reg("跳舞", "跳舞", "音樂", "唱歌", "派對")
-            reg("逃跑", "逃跑", "快跑", "跑")
-            reg("寫字", "寫字", "筆記", "讀書", "寫作業")
-            reg("貓咪", "貓", "貓咪", "喵")
-            reg("熊熊", "熊", "熊熊")
-            reg("兔兔", "兔子", "兔兔")
-            reg("狗狗", "狗", "狗狗", "汪")
-            reg("動物", "動物", "小鳥", "豬", "猴子", "魚")
-        }
     
 
         fun getInitialsFromReading(reading: String): String {
@@ -280,8 +252,9 @@ class ScorpioDictManager private constructor(private val context: Context) {
     private var user = UserStore()
 
     // 計算結果的快取（詞庫查詢本身直接讀 mmap，不必快取）
-    private val subSyllableCache = LruCache<String, List<Pair<String, Double>>>(1500)
     private val candidatesCache = LruCache<String, CandidateGroups>(300)
+    // 網格每段讀音的候選與個人化分數（還沒扣聲調，見 spanLookup）；學習資料一變就清掉（同 candidatesCache）
+    private val spanCache = LruCache<String, List<SpanHit>>(2000)
 
     // ---------- 詞庫檔（SCD） ----------
 
@@ -328,6 +301,9 @@ class ScorpioDictManager private constructor(private val context: Context) {
 
     /** 注音鍵盤空間模型（高斯落點機率、個人化偏移、逐鍵音節合法性） */
     val spatial = SpatialModel()
+    // 每個人自己的讀音混用比例（前後鼻音、平捲舌…），見 FuzzySounds
+    val fuzzy = FuzzySounds { ImeConfig.get(context).fuzzyPriors }
+    private var fuzzyDirty = 0
     private val spatialPrefs = context.getSharedPreferences("scorpio_spatial", Context.MODE_PRIVATE)
     private var spatialDirty = 0
 
@@ -448,35 +424,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
             } catch (e: Exception) {
                 // Ignore
             }
-            database.execSQL(
-                """
-                CREATE TABLE IF NOT EXISTS user_dict (
-                    reading TEXT NOT NULL,
-                    toneless TEXT NOT NULL DEFAULT '',
-                    initials TEXT NOT NULL DEFAULT '',
-                    word TEXT NOT NULL,
-                    count INTEGER NOT NULL DEFAULT 1,
-                    last_used INTEGER NOT NULL,
-                    PRIMARY KEY(reading, word)
-                )
-                """.trimIndent()
-            )
-            // 寫入時依詞讀回記憶體鏡像、userOnlyWords 依詞查
-            database.execSQL("CREATE INDEX IF NOT EXISTS idx_user_dict_word ON user_dict(word)")
-            database.execSQL(
-                """
-                CREATE TABLE IF NOT EXISTS user_bigram (
-                    prev_word TEXT NOT NULL,
-                    next_word TEXT NOT NULL,
-                    count INTEGER NOT NULL DEFAULT 1,
-                    last_used INTEGER NOT NULL,
-                    PRIMARY KEY(prev_word, next_word)
-                )
-                """.trimIndent()
-            )
-            database.execSQL("CREATE INDEX IF NOT EXISTS idx_user_bigram_prev ON user_bigram(prev_word)")
-            database.execSQL(USER_ENGLISH_DDL)
-            database.execSQL(USER_TYPO_DDL)
+            createUserTables(database)
             db = database
 
             val oldFile = context.getDatabasePath(OLD_DICT_DB_NAME)
@@ -498,6 +446,39 @@ class ScorpioDictManager private constructor(private val context: Context) {
         } catch (e: Exception) {
             Log.e(TAG, "個人學習資料庫初始化失敗", e)
         }
+    }
+
+    private fun createUserTables(database: SQLiteDatabase) {
+        database.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS user_dict (
+                reading TEXT NOT NULL,
+                toneless TEXT NOT NULL DEFAULT '',
+                initials TEXT NOT NULL DEFAULT '',
+                word TEXT NOT NULL,
+                count INTEGER NOT NULL DEFAULT 1,
+                last_used INTEGER NOT NULL,
+                PRIMARY KEY(reading, word)
+            )
+            """.trimIndent()
+        )
+        // 寫入時依詞讀回記憶體鏡像、userOnlyWords 依詞查
+        database.execSQL("CREATE INDEX IF NOT EXISTS idx_user_dict_word ON user_dict(word)")
+        database.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS user_bigram (
+                prev_word TEXT NOT NULL,
+                next_word TEXT NOT NULL,
+                count INTEGER NOT NULL DEFAULT 1,
+                last_used INTEGER NOT NULL,
+                PRIMARY KEY(prev_word, next_word)
+            )
+            """.trimIndent()
+        )
+        database.execSQL("CREATE INDEX IF NOT EXISTS idx_user_bigram_prev ON user_bigram(prev_word)")
+        database.execSQL(USER_ENGLISH_DDL)
+        database.execSQL(USER_TYPO_DDL)
+        database.execSQL(USER_TRIGRAM_DDL)
     }
 
     /** 舊版的學習紀錄（在 scorpio_dict.db 裡）依原本的順序搬到 scorpio_user.db */
@@ -655,7 +636,8 @@ class ScorpioDictManager private constructor(private val context: Context) {
                 val m = typoMemory.getOrPut(typed) { HashMap() }
                 m[intended] = (m[intended] ?: 0) + 1
             }
-            subSyllableCache.evictAll()
+            candidatesCache.evictAll()
+            spanCache.evictAll()
             Log.i(TAG, "記住一筆慣性打錯")
         } catch (e: Exception) {
             Log.e(TAG, "更新 user_typo 失敗", e)
@@ -703,14 +685,27 @@ class ScorpioDictManager private constructor(private val context: Context) {
         offsetX: Float,
         offsetY: Float,
         history: List<BopomofoComposer.TouchPoint>,
-        previous: BopomofoComposer.TouchPoint? = null
-    ): BopomofoComposer.TouchPoint = spatial.resolveTap(rawChar, offsetX, offsetY, history, previous?.let { spatial.physicalPoint(it) })
+        previous: BopomofoComposer.TouchPoint? = null,
+        /** 按下的時間（SystemClock.uptimeMillis）：判斷握法用；0 是不知道（不判斷） */
+        time: Long = 0L
+    ): BopomofoComposer.TouchPoint {
+        val p = if (time > 0) spatial.physicalPoint(BopomofoComposer.TouchPoint(rawChar, offsetX, offsetY))?.let { postureTracker.onTap(it.first, time) } ?: postureTracker.posture else 0
+        return spatial.resolveTap(rawChar, offsetX, offsetY, history, previous?.let { spatial.physicalPoint(it) }, time = time, posture = p)
+    }
+
+    /** 判斷握法（雙手拇指／單手）：每按一下鍵更新，大千與 QWERTY 共用 */
+    val postureTracker = PostureTracker()
+
+    private fun noteQwertyTap(raw: Char, offsetX: Float, offsetY: Float) {
+        val q = qwerty
+        val p = q.point(raw, offsetX, offsetY) ?: return
+        q.posture = postureTracker.onTap(p.first, android.os.SystemClock.uptimeMillis())
+    }
 
     /**
      * 個人化偏移學習：確定選字後，比對每個音節的按鍵與該字的正確讀音，
      * 打對的鍵與只錯一個鍵的音節都是「想按某鍵、實際落在某處」的樣本
      */
-
     suspend fun recordTouchSamples(points: List<BopomofoComposer.TouchPoint>, word: String) = withContext(Dispatchers.IO) {
         val chars = ArrayList<String>()
         var i = 0
@@ -740,6 +735,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
             val typed = toToneless(parsed[k].text)
             val intended = intendedOf[k]
             if (intended != typed) recordTypo(typed, intended)
+            if (fuzzy.observe(typed, intended)) fuzzyDirty++
             for (j in typed.indices) {
                 val touch = parsed[k].touches[typed[j]] ?: continue
                 if (SpatialModel.isTone(touch.rawChar)) continue
@@ -761,6 +757,11 @@ class ScorpioDictManager private constructor(private val context: Context) {
                 spatial.learn(intended[j], touch)
                 added++
             }
+        }
+        if (fuzzyDirty > 0) candidatesCache.evictAll()
+        if (fuzzyDirty >= 8) {
+            spatialPrefs.edit().putString(PREF_FUZZY, fuzzy.serialize()).apply()
+            fuzzyDirty = 0
         }
         if (added > 0) {
             spatialDirty += added
@@ -851,6 +852,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
             qwertyGroups[qwerty.layout.geometryId] = qwerty
             qwerty = qwertyGroups.getOrPut(group) { loadQwertyGroup(layout, lastGroup) }
             candidatesCache.evictAll()
+            spanCache.evictAll()
         }
         val saveGroup = lastKey != null && lastGroup != group
         val saveCenters = group != KeyboardLayout.QWERTY_GEOMETRY && !spatialPrefs.contains("$PREF_QWERTY_CENTERS:$group")
@@ -981,6 +983,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
      * logScore(c)：接上 c 後最佳切分的分數（自然對數），null 為解不出來；與英文相同的權重與上限
      */
     fun resolveQwertyTap(raw: Char, offsetX: Float, offsetY: Float, logScore: (Char) -> Double?): Char {
+        noteQwertyTap(raw, offsetX, offsetY)
         val qwerty = qwerty
         val rawPos = qwerty.pos[raw] ?: return raw
         val (px, py) = qwerty.point(raw, offsetX, offsetY)!!
@@ -1017,6 +1020,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
      * - 字典還沒載入：照按的鍵
      */
     fun resolveEnglishTap(raw: Char, offsetX: Float, offsetY: Float, prefix: String): Char {
+        noteQwertyTap(raw, offsetX, offsetY)
         val index = data.english ?: return raw
         val qwerty = qwerty
         val rawPos = qwerty.pos[raw] ?: return raw
@@ -1215,9 +1219,11 @@ class ScorpioDictManager private constructor(private val context: Context) {
         hasTone: Boolean,
         prevWord: String? = null,
         touchPoints: List<BopomofoComposer.TouchPoint>? = null,
-        inlineSymbols: Boolean = true
+        inlineSymbols: Boolean = true,
+        /** 再前一個詞（連續打字時）：前兩個詞都一樣的搭配學過的話，下一個詞往前排 */
+        prevWord2: String? = null
     ): List<String> {
-        val groups = getCandidateGroups(allSegmentations, hasTone, prevWord, touchPoints)
+        val groups = getCandidateGroups(allSegmentations, hasTone, prevWord, touchPoints, prevWord2 = prevWord2)
         return if (inlineSymbols) groups.inline else groups.words
     }
 
@@ -1225,7 +1231,8 @@ class ScorpioDictManager private constructor(private val context: Context) {
         allSegmentations: List<List<String>>,
         hasTone: Boolean,
         prevWord: String? = null,
-        touchPoints: List<BopomofoComposer.TouchPoint>? = null
+        touchPoints: List<BopomofoComposer.TouchPoint>? = null,
+        prevWord2: String? = null
     ): CandidateGroups = withContext(Dispatchers.IO) {
         if (allSegmentations.isEmpty()) return@withContext CandidateGroups.EMPTY
         val d = data
@@ -1245,7 +1252,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
         val touchSig = touchPoints?.joinToString("") {
             "${it.rawChar}${(it.offsetX * 4).roundToInt()},${(it.offsetY * 4).roundToInt()};"
         }.orEmpty()
-        val cacheKey = "${prevWord.orEmpty()}_${hasTone}_" + allSegmentations.joinToString(";") { it.joinToString("-") } + "|" + touchSig
+        val cacheKey = "${prevWord2.orEmpty()}_${prevWord.orEmpty()}_${hasTone}_" + allSegmentations.joinToString(";") { it.joinToString("-") } + "|" + touchSig
         candidatesCache.get(cacheKey)?.let { return@withContext it }
 
         if (spatial.syllablePrefixes == null) spatial.setSyllableFrequencies(syllableFrequencies())
@@ -1258,25 +1265,34 @@ class ScorpioDictManager private constructor(private val context: Context) {
         val rawPoints = touchPoints?.map { if (it.rawChar != it.char) it.copy(char = it.rawChar) else it }
         val rawInvalid = rawPoints != null && rawPoints != touchPoints &&
             BopomofoComposer.parseSyllables(rawPoints).let { p -> p.size == primaryInput.size && p.any { !isValidSyllable(it.text) } }
+        // 打滿整個輸入的候選（整句、整個詞）共同的分數：網格的分數（落點、字頻、上文、個人習慣同一個尺度），
+        // 鄰鍵修正的再扣修正懲罰；排在候選最前面（見下面「依統一分數排序」）
+        val pool = HashMap<String, Double>()
+        fun poolLattice(lattice: LatticeResult, offset: Double) {
+            for ((text, score) in lattice.scored) {
+                val v = score - offset
+                if (text.isNotEmpty() && v > (pool[text] ?: Double.NEGATIVE_INFINITY)) pool[text] = v
+            }
+        }
         if (touchPoints != null && primaryInput.isNotEmpty() && (rawInvalid || primaryInput.any { !isValidSyllable(it) })) {
             val repairs = repairByNeighborKeys(if (rawInvalid) rawPoints!! else touchPoints, primaryInput.size)
             if (repairs.isNotEmpty()) {
-                // 同樣懲罰的修正可能有好幾種（ㄐ→ㄍ／ㄔ／聲調鍵），交給語言模型挑最像一句話的
+                // 同樣懲罰的修正可能有好幾種（ㄐ→ㄍ／ㄔ／聲調鍵），每種都走網格（單一音節也是），扣掉修正的懲罰後一起排
                 val scored = repairs.map { r ->
-                    val lattice = if (r.syllables.size > 1) solveLatticeViterbi(r.syllables, r.touches, prevWord) else null
-                    val plausibility = lattice?.bestScore ?: topDictScore(toToneless(r.syllables.first()))
-                    Triple(r, lattice, plausibility - r.penalty * 1.8)
+                    val lattice = solveLatticeViterbi(r.syllables, r.touches, prevWord, prevWord2 = prevWord2)
+                    Triple(r, lattice, lattice.bestScore - r.penalty * 1.8)
                 }.sortedByDescending { it.third }
+                for ((r, lattice, _) in scored.take(REPAIRS_POOLED)) poolLattice(lattice, r.penalty * 1.8)
                 val best = scored.first()
                 primaryTouches = best.first.touches
-                precomputedLattice = best.second
+                precomputedLattice = best.second.takeIf { best.first.syllables.size > 1 }
                 segmentationsToUse = buildList {
                     add(best.first.syllables)
                     addAll(allSegmentations)
                     scored.drop(1).take(2).forEach { if (!contains(it.first.syllables)) add(it.first.syllables) }
                 }
                 // 其他修正方式的整句也列在前排（ㄏㄣㄉㄨㄠ 最可能是「很多」，但「很屌」也要看得到，選過一次就會學起來）
-                repairAlternatives = scored.drop(1).take(4).mapNotNull { it.second?.fullSentence?.takeIf { s -> s.isNotEmpty() } }
+                repairAlternatives = scored.drop(1).take(4).mapNotNull { it.second.fullSentence.takeIf { s -> s.isNotEmpty() && best.first.syllables.size > 1 } }
                 Log.d(TAG, "鄰鍵修正：${primaryInput.size} 個音節 (懲罰 ${best.first.penalty})")
             }
         }
@@ -1289,11 +1305,13 @@ class ScorpioDictManager private constructor(private val context: Context) {
                 val repairs = repairByNeighborKeys(touchPoints, mergedParse.size, merged = true)
                 if (repairs.isNotEmpty()) {
                     val scored = repairs.map { r ->
-                        val lattice = solveLatticeViterbi(r.syllables, r.touches, prevWord)
+                        val lattice = solveLatticeViterbi(r.syllables, r.touches, prevWord, prevWord2 = prevWord2)
                         Triple(r, lattice, lattice.bestScore - r.penalty * 1.8)
                     }.sortedByDescending { it.third }
                     val best = scored.first()
-                    val split = solveLatticeViterbi(primaryInput, primaryTouches, prevWord)
+                    val split = solveLatticeViterbi(primaryInput, primaryTouches, prevWord, prevWord2 = prevWord2)
+                    poolLattice(split, 0.0)
+                    for ((r, lattice, _) in scored.take(REPAIRS_POOLED)) poolLattice(lattice, r.penalty * 1.8)
                     if (best.third > split.bestScore) {
                         primaryTouches = best.first.touches
                         precomputedLattice = best.second
@@ -1324,7 +1342,9 @@ class ScorpioDictManager private constructor(private val context: Context) {
         data class ScoredCandidate(val word: String, val score: Double)
         val bestWordScores = LinkedHashMap<String, Double>()
 
-        // 查詢 user_bigram 上下文即時加權
+        // 查詢 user_bigram 上下文：打滿整個輸入的詞由網格的統一分數處理（見 contextBonus），
+        // 這裡只給只蓋到前幾個音節的詞加分（加完一樣受 PARTIAL_CAP 限制）
+        val now = System.currentTimeMillis()
         val bigramBoostMap = mutableMapOf<String, Double>()
         if (!prevWord.isNullOrBlank()) {
             for (p in user.next(prevWord, 20)) {
@@ -1335,24 +1355,21 @@ class ScorpioDictManager private constructor(private val context: Context) {
         // 靜態 Bigram：前一個已上屏詞對下一個詞的搭配加權（例如「載具」→「發票」），跟個人搭配取大的。
         // 用到哪個詞才查（常用的前詞後面接的詞有幾千個，不必每按一鍵都抄一份）
         val staticBigrams = if (prevWord.isNullOrBlank()) null else bigramsFor(prevWord)
-        fun contextBoostOf(word: String): Double {
-            val personal = bigramBoostMap[word] ?: 0.0
+        fun contextBoostOf(word: String, partial: Boolean): Double {
+            val personal = if (partial) bigramBoostMap[word] ?: 0.0 else 0.0
             val b = staticBigrams?.get(word) ?: return personal
             val boost = (6.0 + (b + 5.0).coerceIn(0.0, 5.0) * 2.0)
             return if (personal < boost) boost else personal
         }
-
-        // 個人學習加分（僅限讀音完全吻合的選字紀錄）
-        val learnBoostMap = mutableMapOf<String, Double>()
 
         // 只蓋到前幾個音節的詞（打 ㄉㄜㄈㄨㄏㄠ 的「的」）：上文搭配加分最多加到 PARTIAL_CAP，
         // 不會因為常在「鍵盤」後面接「的」就排到整句「的符號」前面；本來就比這高的不受影響
         val fullLength = segmentationsToUse.firstOrNull()?.size ?: 0
         fun addScoredWord(word: String, baseScore: Double) {
             if (word.isNotBlank() && !word.startsWith("MACRO@")) {
-                val contextBoost = contextBoostOf(word)
-                var finalScore = baseScore + contextBoost + (learnBoostMap[word] ?: 0.0)
-                if (fullLength > 1 && hanLength(word) in 1 until fullLength && finalScore > PARTIAL_CAP) {
+                val partial = fullLength > 1 && hanLength(word) in 1 until fullLength
+                var finalScore = baseScore + contextBoostOf(word, partial)
+                if (partial && finalScore > PARTIAL_CAP) {
                     finalScore = maxOf(PARTIAL_CAP, baseScore)
                 }
                 val cur = bestWordScores[word]
@@ -1364,15 +1381,16 @@ class ScorpioDictManager private constructor(private val context: Context) {
 
         val allReadingsForKaomoji = mutableListOf<String>()
 
-        // 智慧簡拼/懶人注音展開：例如輸入 [ㄨ, ㄐㄩㄝ, ㄉㄜ] 自動展開出 [ㄨㄛ, ㄐㄩㄝ, ㄉㄜ] (我覺得)
+        // 智慧簡拼/懶人注音展開：例如輸入 [ㄨ, ㄐㄩㄝ, ㄉㄜ] 自動展開出 [ㄨㄛ, ㄐㄩㄝ, ㄉㄜ] (我覺得)；展開表在鍵盤設定（ImeConfig）
+        val lazySyllables = ImeConfig.get(context).lazySyllables
         val augmentedSegmentations = mutableListOf<List<String>>()
         augmentedSegmentations.addAll(segmentationsToUse)
         for (syllables in segmentationsToUse) {
-            val hasLazy = syllables.any { LAZY_SYLLABLES.containsKey(it) }
+            val hasLazy = syllables.any { lazySyllables.containsKey(it) }
             if (hasLazy) {
                 val variantLists = syllables.map { syl ->
                     val list = mutableListOf(SyllableVariant(syl, 0.0))
-                    LAZY_SYLLABLES[syl]?.forEachIndexed { idx, exp ->
+                    lazySyllables[syl]?.forEachIndexed { idx, exp ->
                         list.add(SyllableVariant(exp, 0.45 + idx * 0.05))
                     }
                     list
@@ -1395,9 +1413,13 @@ class ScorpioDictManager private constructor(private val context: Context) {
 
             val isPrimary = (segIndex == 0)
 
+            // Step 0: 單一音節也走網格，結果放進統一分數（鄰鍵修正過的已經在修正那邊放了）
+            if (isPrimary && syllables.size == 1 && pool.isEmpty()) {
+                poolLattice(solveLatticeViterbi(syllables, primaryTouches, prevWord, prevWord2 = prevWord2), 0.0)
+            }
             // Step 1: 多音節時，Lattice Viterbi 網格全句最佳組合（只在主要切分計算一次）
             if (isPrimary && syllables.size > 1) {
-                val lattice = precomputedLattice ?: solveLatticeViterbi(syllables, primaryTouches, prevWord)
+                val lattice = precomputedLattice ?: solveLatticeViterbi(syllables, primaryTouches, prevWord, prevWord2 = prevWord2).also { if (pool.isEmpty()) poolLattice(it, 0.0) }
                 if (lattice.fullSentence.isNotEmpty()) {
                     addScoredWord(lattice.fullSentence, 115.0) // 全句最佳路徑置頂 (例如：好像還可以、我覺得、為什麼、沒問題)
                 }
@@ -1446,8 +1468,6 @@ class ScorpioDictManager private constructor(private val context: Context) {
                 val word = u.word
                 if (!isHanWord(word) || hanLength(word) != syllables.size) continue
                 if (toneConflictCount(syllables, u.reading) > 0) continue
-                val bonus = learnBonus(u.count)
-                if (bonus > (learnBoostMap[word] ?: 0.0)) learnBoostMap[word] = bonus
                 val inDict = words.hasTonelessWord(fullTonelessKey, word)
                 if (!inDict) addScoredWord(word, (if (isPrimary) 104.0 else 94.0) - 4.5)
             }
@@ -1455,7 +1475,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
             for (u in user.tonelessBetween("$fullTonelessKey-", "$fullTonelessKey-\uffff", 5)) {
                 val word = u.word
                 if (isHanWord(word) && hanLength(word) > syllables.size) {
-                    addScoredWord(word, 68.0 - 4.5 + learnBonus(u.count))
+                    addScoredWord(word, 68.0 - 4.5 + learnBonus(decayedCount(u.count, u.lastUsed, now)))
                 }
             }
             // (c) 簡拼輸入（含單聲母音節）時，比對學過的同聲母、同字數詞
@@ -1467,7 +1487,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
                 for (u in user.initialsLike(getInitialsFromReading(fullTonelessKey), likeUser, 5)) {
                     val word = u.word
                     if (isHanWord(word) && hanLength(word) == syllables.size) {
-                        addScoredWord(word, 96.0 - 4.5 + learnBonus(u.count))
+                        addScoredWord(word, 96.0 - 4.5 + learnBonus(decayedCount(u.count, u.lastUsed, now)))
                     }
                 }
             }
@@ -1519,7 +1539,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
             // 1. 先查個人學習庫中首音節的單字 (若曾自選過高頻單字優先加權)
             for (u in user.matches(tonelessFirst, firstReading, 5, singleChar = true)) {
                 if (!isHanWord(u.word)) continue
-                addScoredWord(u.word, 78.0 + minOf(u.count * 1.5, 12.0))
+                addScoredWord(u.word, 78.0 + minOf(decayedCount(u.count, u.lastUsed, now) * 1.5, 12.0))
             }
 
             // 2. 精確聲調單字 (若首音節有標聲調，如 ㄏㄠˇ 出 好、郝)
@@ -1544,8 +1564,27 @@ class ScorpioDictManager private constructor(private val context: Context) {
             }
         }
 
-        // 依據評分降序排序（修復低分覆蓋高分 Bug）
-        val textCandidates = bestWordScores.map { ScoredCandidate(it.key, it.value) }.sortedByDescending { it.score }
+        // 依統一分數排序：打滿整個輸入的候選（網格分數：落點、字頻、上文、個人習慣同一個尺度）在前，
+        // 跟第一名差 POOL_MARGIN 以內的照分數排；其他（只蓋到前幾個音節的詞、前綴補全、差很多的）照原本的分層順序接在後面
+        // 只打了一個聲母（ㄅ）：多半還在打，第一個照原本放符號本身，不照網格的字頻排
+        if (primaryInput.size == 1 && toToneless(primaryInput[0]).let { it.length == 1 && it[0] in BopomofoComposer.INITIALS && it[0] !in BopomofoComposer.STANDALONE_INITIALS }) pool.clear()
+        // 按歪了（落點靠近鄰鍵）時鄰鍵拼出來的詞：照落點懲罰放進統一分數一起排，不另外插隊到第三個
+        val neighborAlts = if (touchPoints != null && precomputedLattice == null && (pool.isNotEmpty() || bestWordScores.isNotEmpty())) neighborAlternatives(touchPoints, primaryInput.size) else emptyList()
+        val altsPooled = pool.isNotEmpty()
+        if (altsPooled) for ((w, v) in neighborAlts) if (v > (pool[w] ?: Double.NEGATIVE_INFINITY)) pool[w] = v
+        val poolBest = pool.values.maxOrNull() ?: Double.NEGATIVE_INFINITY
+        val ranked = pool.entries.filter { it.value >= poolBest - POOL_MARGIN && !it.key.startsWith("MACRO@") }
+            .sortedByDescending { it.value }.mapTo(ArrayList()) { it.key }
+        val front = ranked.toHashSet()
+        bestWordScores.entries.sortedByDescending { it.value }.forEach { if (it.key !in front) ranked.add(it.key) }
+        // 排第一的是學過的詞：沒選它時扣回一次（見 noteSkippedLearned）
+        val primaryKey = segmentationsToUse.first().joinToString("-").replace("ˉ", "")
+        val learnedTop = ranked.firstOrNull()?.takeIf { top ->
+            user.matches(toToneless(primaryKey), primaryKey, 24).any { it.word == top && timesChosen(it.count) > 0 } ||
+                (!prevWord.isNullOrBlank() && user.nextAll(prevWord).any { it.next == top && timesChosen(it.count) > 0 })
+        }
+        promotedCache.put(promotedKey(prevWord, primaryInput), setOfNotNull(learnedTop))
+        val textCandidates = ranked.map { ScoredCandidate(it, pool[it] ?: bestWordScores[it] ?: 0.0) }
 
         // 4. 查顏文字快捷 (Kaomoji)
         val kaomojis = mutableListOf<String>()
@@ -1556,9 +1595,10 @@ class ScorpioDictManager private constructor(private val context: Context) {
             }
         }
 
-        // 4b. 依候選詞語意關鍵字穿插顏文字（例如打「笑臉」→ 開心類顏文字）
+        // 4b. 依候選詞語意關鍵字穿插顏文字（例如打「笑臉」→ 開心類顏文字）；對照表在鍵盤設定（ImeConfig）
+        val kaomojiKeywords = ImeConfig.get(context).kaomojiKeywords
         for (w in (if (kaomojiEnabled) textCandidates.take(6) else emptyList()).map { it.word }) {
-            val cat = KAOMOJI_KEYWORDS[w] ?: continue
+            val cat = kaomojiKeywords[w] ?: continue
             for (km in d.kaomoji?.byCategory(cat, 4).orEmpty()) {
                 if (!kaomojis.contains(km)) kaomojis.add(km)
             }
@@ -1569,7 +1609,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
         val emojiCandidates = mutableListOf<String>()
         val emojiMore = LinkedHashSet<String>()
         for ((wi, w) in (if (emojiEnabled) textCandidates.take(8) else emptyList()).map { it.word }.withIndex()) {
-            for ((n, emo) in d.emoji?.byKeyword(w, 8).orEmpty().withIndex()) {
+            for ((n, emo) in d.emoji?.byKeyword(w, 8).orEmpty().filter { isEmojiRenderable(it) }.withIndex()) {
                 emojiMore.add(emo)
                 if (wi < 4 && n < 3 && !emojiCandidates.contains(emo)) emojiCandidates.add(emo)
             }
@@ -1581,10 +1621,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
             addCandidate(textCandidates[textIndex].word)
             textIndex++
         }
-        if (touchPoints != null && precomputedLattice == null && textCandidates.isNotEmpty()) {
-            val alternatives = neighborAlternatives(touchPoints, primaryInput.size)
-            for (w in alternatives) addCandidate(w)
-        }
+        if (!altsPooled) for ((w, _) in neighborAlts) addCandidate(w)
 
         for (emo in emojiCandidates) {
             addCandidate(emo)
@@ -1714,7 +1751,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
      * 把那一鍵換成鄰鍵，讀音仍然拼得起來、音節數不變，就列出那個讀音的常用詞（聲調要對得上）。
      * 越靠近鄰鍵的排越前面，最多 NEIGHBOR_ALT_WORDS 個；第一候選還是照實際按的鍵
      */
-    private fun neighborAlternatives(points: List<BopomofoComposer.TouchPoint>, syllableCount: Int): List<String> {
+    private fun neighborAlternatives(points: List<BopomofoComposer.TouchPoint>, syllableCount: Int): List<Pair<String, Double>> {
         val variants = ArrayList<Pair<List<String>, Double>>()
         for ((i, p) in points.withIndex()) {
             if (p.char == BopomofoComposer.FIRST_TONE) continue
@@ -1726,15 +1763,17 @@ class ScorpioDictManager private constructor(private val context: Context) {
                 variants.add(parsed.map { it.text } to pen)
             }
         }
-        val out = LinkedHashSet<String>()
-        for ((syls, _) in variants.sortedBy { it.second }) {
+        val out = LinkedHashMap<String, Double>()
+        for ((syls, pen) in variants.sortedBy { it.second }) {
             val tonelessKey = toToneless(syls.joinToString("-").replace("ˉ", ""))
             // 每個讀音最多兩個，讓不同方向的鄰鍵都看得到
             var taken = 0
             for (h in words.byToneless(tonelessKey, 6)) {
                 if (taken >= 2) break
                 // 只列漢字詞（單打一個聲母時字典裡也有符號本身，例如「ㄍ」）
-                if (toneMismatchCount(syls, h.reading) > 0 || !isHanWord(h.word) || !isRenderable(h.word) || !out.add(h.word)) continue
+                if (toneMismatchCount(syls, h.reading) > 0 || !isHanWord(h.word) || !isRenderable(h.word) || h.word in out) continue
+                // 跟網格同一個尺度：多字詞一樣加長度分
+                out[h.word] = h.score - pen * 1.8 + (hanLength(h.word) - 1) * 2.8
                 taken++
                 if (out.size >= NEIGHBOR_ALT_WORDS) return out.toList()
             }
@@ -1806,7 +1845,6 @@ class ScorpioDictManager private constructor(private val context: Context) {
         return found.values.sortedBy { it.penalty }.take(5)
     }
 
-    private fun topDictScore(tonelessKey: String): Double = words.maxScore(tonelessKey) ?: -20.0
 
     /**
      * 產生台灣注音常見混淆／實體按錯鍵之容錯讀音變體
@@ -1886,7 +1924,9 @@ class ScorpioDictManager private constructor(private val context: Context) {
         val dpWords: List<String>,
         val spanPrefixWords: List<String>,
         val alternatives: List<String> = emptyList(),
-        val bestScore: Double = Double.NEGATIVE_INFINITY
+        val bestScore: Double = Double.NEGATIVE_INFINITY,
+        /** 前幾名整句與分數（排序用的分數，同 bestScore 的尺度） */
+        val scored: List<Pair<String, Double>> = emptyList()
     )
 
     // ---------- 靜態 Bigram（詞與詞搭配機率，ln P(next | prev)） ----------
@@ -1918,9 +1958,18 @@ class ScorpioDictManager private constructor(private val context: Context) {
     private fun solveLatticeViterbi(
         syllables: List<String>,
         touchesPerSyllable: List<Map<Char, BopomofoComposer.TouchPoint>> = emptyList(),
-        prevWord: String? = null
+        prevWord: String? = null,
+        prevWord2: String? = null
+    ): LatticeResult = solveLatticeViterbiImpl(syllables, touchesPerSyllable, prevWord, prevWord2)
+
+    private fun solveLatticeViterbiImpl(
+        syllables: List<String>,
+        touchesPerSyllable: List<Map<Char, BopomofoComposer.TouchPoint>>,
+        prevWord: String?,
+        prevWord2: String?
     ): LatticeResult {
         val n = syllables.size
+        val now = System.currentTimeMillis()
         if (words.tables.isEmpty()) return LatticeResult("", emptyList(), emptyList())
 
         // corr：這條路徑上「把打的注音改成別的」的懲罰合計（見 SyllableVariant.corrective）
@@ -1949,104 +1998,58 @@ class ScorpioDictManager private constructor(private val context: Context) {
             for (len in 1..maxLen) {
                 val subCombos = combosByLen[len]
                 val spanTyped = syllables.subList(i, i + len)
-                val toneSig = spanTyped.joinToString("") { (typedToneOf(it) ?: '_').toString() }
 
                 val spanCands = HashMap<String, Double>()
                 val spanCorr = HashMap<String, Double>()
 
+                val spanTouches = if (touchesPerSyllable.size >= i + len) touchesPerSyllable.subList(i, i + len) else emptyList()
                 for (combo in subCombos) {
                     val key = combo.key()
                     val totalPenalty = combo.penalty
                     val corrPenalty = combo.corr
-                    val cacheKey2 = "$key|$toneSig"
-                    var top = subSyllableCache.get(cacheKey2)
-                    if (top == null) top = run {
-                        val list = ArrayList<Pair<String, Double>>()
-                        // 1. 個人學習庫與自選詞融入 Viterbi 網格：字數須與區間音節數一致
-                        val learned = LinkedHashMap<String, Pair<Int, String>>()
-                        for (u in user.matches(key, key, 3)) {
-                            val uw = u.word
-                            if (!isHanWord(uw) || hanLength(uw) != len) continue
-                            if (!learned.containsKey(uw)) learned[uw] = Pair(u.count, u.reading)
-                        }
+                    val top = spanLookup(key, spanTyped, spanTouches, len, if (len == n) FULL_SPAN_WORDS else 4, now)
 
-                        // 2. 查詢內建詞典
-                        // 聲調一致性：已輸入聲調的音節與字典讀音不符則扣分，讓打得明確的詞優先
-                        for (h in words.byToneless(key, 12)) {
-                            val cw = h.word
-                            if (cw.startsWith("MACRO@")) continue
-                            val tonePenalty = toneMismatchCount(spanTyped, h.reading) * 6.0
-                            var adj = h.score - tonePenalty
-                            // 字典裡已有的學習詞只在字典分數上小幅加分，避免選過幾次的單字（例如「排」）蓋過常用詞「不太」
-                            learned[cw]?.let { (cnt, _) ->
-                                adj = if (len == 1) {
-                                    val bonus = minOf(cnt * 0.3, 1.2)
-                                    // 字典裡很少見但常用的字（例如「屌」）至少給到一般常用字的水準
-                                    maxOf(adj, -4.5 - tonePenalty) + bonus
-                                } else {
-                                    adj + minOf(cnt * 0.6, 2.4)
-                                }
-                            }
-                            list.add(Pair(cw, adj))
-                        }
-                        // 字典沒有的自選詞（新詞、人名）：與字典同一 log 機率尺度給基礎分
-                        val dictWords = list.mapTo(HashSet()) { it.first }
-                        for ((uw, info) in learned) {
-                            if (uw in dictWords) continue
-                            list.add(Pair(uw, -3.0 + minOf(info.first * 0.5, 2.5) - toneConflictCount(spanTyped, info.second) * 6.0))
-                        }
-                        list.sortByDescending { it.second }
-                        list.distinctBy { it.first }.take(4).also { subSyllableCache.put(cacheKey2, it) }
-                    }
-
-                    for ((idx, pair) in top.withIndex()) {
-                        val adj = pair.second - (totalPenalty * 1.8)
-                        val cur = spanCands[pair.first]
+                    for ((idx, hit) in top.withIndex()) {
+                        val adj = hit.score - (totalPenalty * 1.8)
+                        val cur = spanCands[hit.word]
                         if (cur == null || adj > cur) {
-                            spanCands[pair.first] = adj
-                            spanCorr[pair.first] = corrPenalty
+                            spanCands[hit.word] = adj
+                            spanCorr[hit.word] = corrPenalty
                         }
-                        if (idx == 0 && i == 0 && len >= 2 && totalPenalty <= 1.2 && !spanWords.contains(pair.first)) {
-                            spanWords.add(pair.first)
+                        if (idx == 0 && i == 0 && len >= 2 && totalPenalty <= 1.2 && !spanWords.contains(hit.word)) {
+                            spanWords.add(hit.word)
                         }
                     }
                 }
 
                 // 區間「混合簡拼」查詢 (例如 ㄨㄛ-ㄐ-ㄉ -> 我覺得)
-                if (len >= 2) {
-                    val subSyls = spanTyped.map { toToneless(it) }
-                    val hasSingleInitial = subSyls.any { it.length == 1 && BopomofoComposer.INITIALS.contains(it[0]) }
-                    if (hasSingleInitial) {
-                        val initKey1 = subSyls.map { syl -> if (syl.isNotEmpty() && BopomofoComposer.INITIALS.contains(syl[0])) syl[0].toString() else "_" }.joinToString("-")
-                        val initKey2 = subSyls.map { syl -> if (syl.isNotEmpty() && BopomofoComposer.INITIALS.contains(syl[0])) syl[0].toString() else "" }.joinToString("-")
-                        val initKey3 = subSyls.mapNotNull { it.firstOrNull()?.toString() }.joinToString("-")
-                        val likePattern = subSyls.joinToString("-") { syl ->
-                            if (syl.length == 1 && BopomofoComposer.INITIALS.contains(syl[0])) "$syl%" else syl
+                // 簡拼的那個音節打了聲調（ㄗˇ）也要合：聲調不合一樣扣 tonePenalty
+                if (len >= 2 && spanTyped.any { toToneless(it).let { t -> t.length == 1 && BopomofoComposer.INITIALS.contains(t[0]) } }) {
+                    var first = true
+                    for (h in spanLookup(toToneless(spanTyped.joinToString("-")), spanTyped, spanTouches, len, 3, now)) {
+                        val w = h.word
+                        val initScore = h.score
+                        val cur = spanCands[w]
+                        if (cur == null || initScore > cur) {
+                            spanCands[w] = initScore
+                            spanCorr[w] = 0.0
                         }
-                        var first = true
-                        for (h in words.byInitialsLike(listOf(initKey1, initKey2, initKey3), likePattern, 3)) {
-                            val w = h.word
-                            if (w.startsWith("MACRO@")) continue
-                            val initScore = h.score - 1.5
-                            val cur = spanCands[w]
-                            if (cur == null || initScore > cur) {
-                                spanCands[w] = initScore
-                                spanCorr[w] = 0.0
-                            }
-                            if (first && i == 0 && !spanWords.contains(w)) spanWords.add(w)
-                            first = false
-                        }
+                        if (first && i == 0 && !spanWords.contains(w)) spanWords.add(w)
+                        first = false
                     }
                 }
 
                 if (spanCands.isEmpty()) continue
-                val bestCands = spanCands.entries.sortedByDescending { it.value }.take(4)
+                val bestCands = spanCands.entries.sortedByDescending { it.value }.take(if (len == n) FULL_SPAN_WORDS else 4)
                 val lengthBonus = (len - 1) * 2.8
                 val target = dp[i + len]
                 val targetIndex = dpIndex[i + len]
                 for (node in dp[i]) {
-                    for ((w, sc) in bestCands) {
-                        val bb = bigramBonus(node.last, w, sc)
+                    val bbs = contextBonuses(node.last, if (i == 0) prevWord2 else null, bestCands, now)
+                    for ((k, e) in bestCands.withIndex()) {
+                        val w = e.key
+                        val sc = e.value
+                        val bb = bbs[k]
                         val total = node.score + sc + lengthBonus + bb
                         val text = node.text + w
                         val corr = node.corr + (spanCorr[w] ?: 0.0)
@@ -2076,7 +2079,134 @@ class ScorpioDictManager private constructor(private val context: Context) {
             }
         }
 
-        return LatticeResult(full, dpWords, spanWords, alternatives, finals.firstOrNull()?.score ?: Double.NEGATIVE_INFINITY)
+        return LatticeResult(
+            full, dpWords, spanWords, alternatives, finals.firstOrNull()?.score ?: Double.NEGATIVE_INFINITY,
+            finals.take(FULL_SPAN_WORDS).map { it.text to ranked(it) }
+        )
+    }
+
+    class SpanHit(val word: String, val score: Double, val share: Double, val reading: String)
+
+    /**
+     * 一段讀音（toneless key，len 個音節）的候選詞與分數（log10）：
+     * 分數＝這個讀音的字頻總和 × 個人化後「這個讀音裡選這個詞」的比例，再扣聲調不合（見 tonePenalty）。
+     * 比例照你在這個讀音選過各詞的次數，跟字典的比例混合：(選過次數 + MU_READING × 字典比例) / (這讀音總共選過 + MU_READING)。
+     * 沒學過時就是字典分數；在 ㄏㄠˋ 選過一次「皓」，「皓」占三分之一，進前三；選兩次占一半，排第一。
+     * 只在同一個讀音裡互相比，「來」選得再多也不會影響 ㄌㄢˊ 的「欄」
+     */
+    private fun spanLookup(
+        key: String, typed: List<String>, touches: List<Map<Char, BopomofoComposer.TouchPoint>>, len: Int, limit: Int, now: Long
+    ): List<SpanHit> {
+        val base = spanCache.get(key) ?: spanBase(key, len, now).also { spanCache.put(key, it) }
+        val out = ArrayList<SpanHit>(base.size)
+        for (h in base) out.add(SpanHit(h.word, h.score - tonePenalty(typed, touches, h.reading), h.share, h.reading))
+        out.sortByDescending { it.score }
+        return if (out.size > limit) out.subList(0, limit) else out
+    }
+
+    /**
+     * 有音節只打聲母（簡拼，ㄋㄚ-ㄐ、ㄏ-ㄏ-ㄎ）時，同聲母開頭的詞也算這段讀音的字（字典分數少 ABBREV_COST），
+     * 學過的詞也照簡拼找（學的時候存的是完整讀音），個人比例才跟沒簡拼時一樣算得到
+     */
+    private fun spanBase(key: String, len: Int, now: Long): List<SpanHit> {
+        val syls = key.split("-")
+        val abbrev = len >= 2 && syls.any { it.length == 1 && BopomofoComposer.INITIALS.contains(it[0]) }
+        val like = if (abbrev) Like(abbrevPattern(syls)) else null
+        val dict = LinkedHashMap<String, WordHit>()
+        for (h in words.byToneless(key, 12)) if (!h.word.startsWith("MACRO@") && h.word !in dict) dict[h.word] = h
+        if (abbrev) for (h in abbrevHits(syls, 8)) if (h.word !in dict) dict[h.word] = WordHit(h.word, h.score - ABBREV_COST, h.reading)
+        val picks = HashMap<String, Double>()
+        val pickedReading = HashMap<String, String>()
+        var total = 0.0
+        val learned = if (abbrev) user.matches(key, key, 24) + user.initialsLike(getInitialsFromReading(key), abbrevPattern(syls), 24) else user.matches(key, key, 24)
+        for (u in learned) {
+            if (!isHanWord(u.word) || hanLength(u.word) != len || u.word in pickedReading) continue
+            val c = decayedCount(timesChosen(u.count), u.lastUsed, now)
+            if (c <= 0.0) continue
+            picks[u.word] = c
+            pickedReading[u.word] = u.reading
+            total += c
+        }
+        // 學過、但字典裡排不進前幾名的字（ㄏㄠˋ 的「皓」）：查它自己的字典分數
+        for (w in picks.keys) if (w !in dict) {
+            val h = words.byWord(w, 8).firstOrNull { toToneless(it.reading).let { r -> r == key || like?.matches(r) == true } } ?: continue
+            dict[w] = if (toToneless(h.reading) == key) h else WordHit(w, h.score - ABBREV_COST, h.reading)
+        }
+        var mass = 0.0
+        for (h in dict.values) mass += 10.0.pow(h.score)
+        if (mass <= 0.0) mass = USER_READING_MASS
+        val logMass = log10(mass)
+        val out = ArrayList<SpanHit>(dict.size + picks.size)
+        for (w in dict.keys + picks.keys.filter { it !in dict }) {
+            val pDict = dict[w]?.let { 10.0.pow(it.score) / mass } ?: 0.0
+            val share = if (total > 0.0) ((picks[w] ?: 0.0) + MU_READING * pDict) / (total + MU_READING) else pDict
+            if (share <= 0.0) continue
+            val logShare = log10(share)
+            val r = dict[w]?.reading ?: pickedReading[w] ?: continue
+            out.add(SpanHit(w, logMass + logShare, logShare, r))
+        }
+        return out
+    }
+
+    /**
+     * 打了聲調、但跟這個讀音的聲調不同：落點靠近對的聲調鍵（ˇ 按在靠 ˋ 的那一邊，鄰鍵懲罰 ≤ NEIGHBOR_ALT_MAX）照鄰鍵懲罰算，
+     * 按在聲調鍵中央或差很遠就扣 TONE_MISMATCH（一聲用空白鍵打，沒有落點可看）
+     */
+    private fun tonePenalty(typed: List<String>, touches: List<Map<Char, BopomofoComposer.TouchPoint>>, reading: String): Double {
+        val rs = reading.split("-")
+        if (rs.size != typed.size) return 0.0
+        var pen = 0.0
+        for (i in typed.indices) {
+            val t = typedToneOf(typed[i]) ?: continue
+            val d = dictToneOf(rs[i])
+            if (t == d) continue
+            val tap = touches.getOrNull(i)?.get(t)
+            val near = if (tap == null || t == BopomofoComposer.FIRST_TONE) null else neighborKeys(tap).firstOrNull { it.first == d }?.second
+            pen += if (near == null || near > NEIGHBOR_ALT_MAX) TONE_MISMATCH else near * 1.8
+        }
+        return pen
+    }
+
+    /**
+     * 同一段的候選詞（cands：詞 → 分數）各自的上文加分（log10）：字典的接續詞（bigramBonus），再照個人搭配調整。
+     * 個人搭配同 spanLookup：在 prev 後面、這幾個詞裡選各詞的次數，跟沒有個人搭配時的比例混合（MU_CONTEXT），
+     * 前兩個詞都一樣（三詞搭配）時再混一層。比例是整組一起算的：在「通知」後面選過「欄」，「欄」加分、「來」同時扣分
+     */
+    private fun contextBonuses(prev: String, prev2: String?, cands: List<Map.Entry<String, Double>>, now: Long): DoubleArray {
+        val n = cands.size
+        if (prev.isEmpty() || n == 0) return DoubleArray(n)
+        val static = DoubleArray(n) { bigramBonus(prev, cands[it].key, cands[it].value) }
+        val top = (0 until n).maxOf { cands[it].value + static[it] }
+        val prior = DoubleArray(n) { 10.0.pow(cands[it].value + static[it] - top) }
+        val z = prior.sum()
+        for (k in 0 until n) prior[k] /= z
+        fun mix(pairs: List<UserStore.Pair2>, p: DoubleArray, trigram: Boolean): DoubleArray {
+            val c = DoubleArray(n)
+            for (q in pairs) {
+                val k = cands.indexOfFirst { it.key == q.next }
+                if (k < 0) continue
+                c[k] += if (trigram) decayedCount(q.count, q.lastUsed, now) else decayedCount(timesChosen(q.count), q.lastUsed, now)
+            }
+            val all = c.sum()
+            return if (all <= 0.0) p else DoubleArray(n) { (c[it] + MU_CONTEXT * p[it]) / (all + MU_CONTEXT) }
+        }
+        var p = mix(user.nextAll(prev), prior, trigram = false)
+        if (!prev2.isNullOrEmpty()) p = mix(user.nextAfter(prev2, prev, 50), p, trigram = true)
+        return DoubleArray(n) { static[it] + log10(p[it] / prior[it]) }
+    }
+
+    /** 簡拼（有音節只打聲母，ㄨㄛ-ㄐ-ㄉ）查得到的詞；沒有單打聲母的音節就是空的 */
+    private fun abbrevHits(subSyls: List<String>, limit: Int): List<WordHit> {
+        if (subSyls.none { it.length == 1 && BopomofoComposer.INITIALS.contains(it[0]) }) return emptyList()
+        val initKey1 = subSyls.map { syl -> if (syl.isNotEmpty() && BopomofoComposer.INITIALS.contains(syl[0])) syl[0].toString() else "_" }.joinToString("-")
+        val initKey2 = subSyls.map { syl -> if (syl.isNotEmpty() && BopomofoComposer.INITIALS.contains(syl[0])) syl[0].toString() else "" }.joinToString("-")
+        val initKey3 = subSyls.mapNotNull { it.firstOrNull()?.toString() }.joinToString("-")
+        return words.byInitialsLike(listOf(initKey1, initKey2, initKey3), abbrevPattern(subSyls), limit).filter { !it.word.startsWith("MACRO@") }
+    }
+
+    /** 簡拼的比對樣式：單打聲母的音節比對該聲母開頭的任何音節（ㄐ → ㄐ%） */
+    private fun abbrevPattern(subSyls: List<String>) = subSyls.joinToString("-") { syl ->
+        if (syl.length == 1 && BopomofoComposer.INITIALS.contains(syl[0])) "$syl%" else syl
     }
 
 
@@ -2117,35 +2247,13 @@ class ScorpioDictManager private constructor(private val context: Context) {
             }
         }
 
-        // (C) 簡拼展開 (LAZY_SYLLABLES[s])
-        LAZY_SYLLABLES[s]?.forEachIndexed { index, exp ->
+        // (C) 簡拼展開（鍵盤設定的 lazySyllables）
+        ImeConfig.get(context).lazySyllables[s]?.forEachIndexed { index, exp ->
             putMin(exp, 0.45 + index * 0.05)
         }
 
-        // (D) 台灣常見模糊音互換
-        // 平捲舌互換（ㄕ<->ㄙ、ㄓ<->ㄗ、ㄔ<->ㄘ）：penalty = 0.6
-        if (s.contains('ㄕ')) putMin(s.replace('ㄕ', 'ㄙ'), 0.6, corr = true)
-        if (s.contains('ㄙ')) putMin(s.replace('ㄙ', 'ㄕ'), 0.6, corr = true)
-        if (s.contains('ㄓ')) putMin(s.replace('ㄓ', 'ㄗ'), 0.6, corr = true)
-        if (s.contains('ㄗ')) putMin(s.replace('ㄗ', 'ㄓ'), 0.6, corr = true)
-        if (s.contains('ㄔ')) putMin(s.replace('ㄔ', 'ㄘ'), 0.6, corr = true)
-        if (s.contains('ㄘ')) putMin(s.replace('ㄘ', 'ㄔ'), 0.6, corr = true)
-
-        // 前後鼻音互換（ㄣ<->ㄥ、ㄢ<->ㄤ）：penalty = 0.55
-        if (s.contains('ㄣ')) putMin(s.replace('ㄣ', 'ㄥ'), 0.55, corr = true)
-        if (s.contains('ㄥ')) putMin(s.replace('ㄥ', 'ㄣ'), 0.55, corr = true)
-        if (s.contains('ㄢ')) putMin(s.replace('ㄢ', 'ㄤ'), 0.55, corr = true)
-        if (s.contains('ㄤ')) putMin(s.replace('ㄤ', 'ㄢ'), 0.55, corr = true)
-
-        // 韻母近似音（ㄛ<->ㄜ、ㄛ->ㄡ、ㄜ->ㄝ）：penalty = 0.6
-        if (s.contains('ㄛ')) {
-            putMin(s.replace('ㄛ', 'ㄜ'), 0.6, corr = true)
-            putMin(s.replace('ㄛ', 'ㄡ'), 0.6, corr = true)
-        }
-        if (s.contains('ㄜ')) {
-            putMin(s.replace('ㄜ', 'ㄛ'), 0.6, corr = true)
-            putMin(s.replace('ㄜ', 'ㄝ'), 0.6, corr = true)
-        }
+        // (D) 讀音混用（前後鼻音、平捲舌、ㄛ／ㄜ）：懲罰照你自己選字的習慣（見 FuzzySounds）
+        for ((v, pen) in fuzzy.variants(s)) putMin(v, pen, corr = true)
 
         // (D2) 個人慣性打錯（以前打 s 卻選了 intended 讀音的字）
         for ((intended, cnt) in typoFixes(s)) putMin(intended, typoPenalty(cnt, isValidSyllable(s)), corr = true)
@@ -2322,6 +2430,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
             // 寫進 SQLite 之後，把這個詞的列讀回記憶體鏡像
             user.reloadWord(database, word)
             candidatesCache.evictAll()
+            spanCache.evictAll()
             userOnlyCache.evictAll()
             Log.i(TAG, "智慧學習新紀錄（${word.length} 字）")
         } catch (e: Exception) {
@@ -2356,6 +2465,87 @@ class ScorpioDictManager private constructor(private val context: Context) {
         }
         // 個人搭配變了：候選快取要重算
         candidatesCache.evictAll()
+        spanCache.evictAll()
+    }
+
+    /** 連續打的三個詞（prev2 prev1 next）：前兩個詞都一樣時，下一個詞照學過的往前排 */
+    suspend fun recordTrigram(prev2: String, prev1: String, next: String) = withContext(Dispatchers.IO) {
+        if (prev2.isBlank() || prev1.isBlank() || next.isBlank()) return@withContext
+        val database = db ?: return@withContext
+        try {
+            val now = System.currentTimeMillis()
+            database.execSQL(
+                "INSERT OR IGNORE INTO user_trigram (prev2, prev1, next_word, count, last_used) VALUES (?, ?, ?, 0, ?)",
+                arrayOf(prev2, prev1, next, now)
+            )
+            database.execSQL(
+                "UPDATE user_trigram SET count = count + 1, last_used = ? WHERE prev2 = ? AND prev1 = ? AND next_word = ?",
+                arrayOf(now, prev2, prev1, next)
+            )
+            user.reloadTrigrams(database, prev2, prev1)
+        } catch (e: Exception) {
+            Log.e(TAG, "更新 user_trigram 失敗", e)
+        }
+        candidatesCache.evictAll()
+        spanCache.evictAll()
+    }
+
+    // 每組輸入（上文＋讀音）被學習往前排的詞：使用者跳過它選了別的，就扣回學習次數
+    private val promotedCache = LruCache<String, Set<String>>(300)
+
+    private fun promotedKey(prevWord: String?, syllables: List<String>) = "${prevWord.orEmpty()}|" + toToneless(syllables.joinToString("-"))
+
+    /**
+     * 選字時排第一的是「因為學過才往前排」的詞，使用者卻選了同樣字數的別的詞：那個詞的學習次數（選字、搭配）各扣一次，
+     * 扣到 0 就刪掉。選錯一次、只用一次的人名不會一直擋在前面
+     */
+    suspend fun noteSkippedLearned(prevWord: String?, syllables: List<String>, top: String, chosen: String) = withContext(Dispatchers.IO) {
+        if (top == chosen || hanLength(top) != hanLength(chosen)) return@withContext
+        if (promotedCache.get(promotedKey(prevWord, syllables))?.contains(top) != true) return@withContext
+        unlearn(toToneless(syllables.joinToString("-")), top, prevWord)
+        Log.i(TAG, "跳過學過的詞，扣回一次學習")
+    }
+
+    /** 把一次選字的學習扣回來（選字次數、前一個詞接它的搭配各減一，扣到一次都沒選過就刪掉；count 的算法見 timesChosen） */
+    private fun unlearn(toneless: String, word: String, prevWord: String?) {
+        val database = db ?: return
+        try {
+            database.execSQL("UPDATE user_dict SET count = count - 1 WHERE toneless = ? AND word = ?", arrayOf(toneless, word))
+            database.execSQL("DELETE FROM user_dict WHERE toneless = ? AND word = ? AND count <= 1", arrayOf(toneless, word))
+            user.reloadWord(database, word)
+            if (!prevWord.isNullOrBlank()) {
+                database.execSQL("UPDATE user_bigram SET count = count - 1 WHERE prev_word = ? AND next_word = ?", arrayOf(prevWord, word))
+                database.execSQL("DELETE FROM user_bigram WHERE prev_word = ? AND next_word = ? AND count <= 1", arrayOf(prevWord, word))
+                user.reloadBigrams(database, prevWord)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "扣回學習失敗", e)
+        }
+        candidatesCache.evictAll()
+        spanCache.evictAll()
+        userOnlyCache.evictAll()
+    }
+
+    /**
+     * 送出一個詞之後整個刪掉、改打了另一個同樣字數的詞：
+     * 1. 刪掉的那次選字不算數（扣回選字與搭配的學習）
+     * 2. 注音不一樣時，拿刪掉那次的落點對新的詞學：只差一個注音、落點又靠近想打的鍵（按歪）的那一鍵才學進落點習慣，
+     *    其他的只記慣性打錯（同 recordTouchSamples 的規則）；注音一樣只是選錯字就不學落點
+     */
+    suspend fun learnCommitRetype(
+        oldWord: String,
+        oldSyllables: List<String>,
+        oldTouches: List<BopomofoComposer.TouchPoint>,
+        prevWord: String?,
+        newWord: String,
+        newSyllables: List<String>
+    ) {
+        if (oldWord == newWord || hanLength(oldWord) != hanLength(newWord)) return
+        withContext(Dispatchers.IO) { unlearn(toToneless(oldSyllables.joinToString("-")), oldWord, prevWord) }
+        if (toToneless(oldSyllables.joinToString("-")) != toToneless(newSyllables.joinToString("-")) && oldTouches.isNotEmpty()) {
+            recordTouchSamples(oldTouches, newWord)
+        }
+        Log.i(TAG, "送出後刪掉重打：扣回刪掉的那次學習")
     }
 
     /**
@@ -2368,14 +2558,15 @@ class ScorpioDictManager private constructor(private val context: Context) {
             try {
                 database.delete("user_dict", "word = ?", arrayOf(word))
                 database.delete("user_bigram", "prev_word = ? OR next_word = ?", arrayOf(word, word))
+                database.delete("user_trigram", "prev2 = ? OR prev1 = ? OR next_word = ?", arrayOf(word, word, word))
                 database.setTransactionSuccessful()
             } finally {
                 database.endTransaction()
             }
             user.forgetWord(word)
             candidatesCache.evictAll()
+            spanCache.evictAll()
             userOnlyCache.evictAll()
-            subSyllableCache.evictAll()
             Log.i(TAG, "已自個人學習庫刪除一個詞")
             true
         } catch (e: Exception) {
@@ -2447,11 +2638,10 @@ class ScorpioDictManager private constructor(private val context: Context) {
      */
     fun trimMemory(level: Int) {
         candidatesCache.evictAll()
-        subSyllableCache.trimToSize(subSyllableCache.maxSize() / 2)
+        spanCache.evictAll()
         SQLiteDatabase.releaseMemory()
         if (level != android.content.ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN) {
             data.words.clearCache()
-            subSyllableCache.evictAll()
             bigramCache.evictAll()
             userOnlyCache.evictAll()
         }
@@ -2463,10 +2653,13 @@ class ScorpioDictManager private constructor(private val context: Context) {
      */
     private fun packDefaultOn(id: String): Boolean = loaded[id]?.meta?.optBoolean("default", true) ?: false
 
+    /** 鍵盤設定換了新版（簡拼展開、顏文字對照、讀音混用預設）：清掉算好的候選 */
+    fun onConfigChanged() = invalidateCandidateCaches()
+
     private fun invalidateCandidateCaches() {
         candidatesCache.evictAll()
+        spanCache.evictAll()
         userOnlyCache.evictAll()
-        subSyllableCache.evictAll()
         syllableFreqCache = null
     }
 
@@ -2569,7 +2762,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
         }
         val local = packs().map { it.id }.toSet()
         for (m in available) {
-            if (m.id in local || m.group == "kaomoji" || m.group == "layout") continue
+            if (m.id in local || m.system || m.group == "kaomoji" || m.group == "layout") continue
             out.add(
                 DictionaryInfo(
                     m.id, m.name, m.description.ifEmpty { "線上詞庫" }, m.rows, enabled = false,
@@ -2847,16 +3040,18 @@ class ScorpioDictManager private constructor(private val context: Context) {
         try {
             database.beginTransaction()
             try {
-                for (t in listOf("user_dict", "user_bigram", "user_english", "user_typo")) database.delete(t, null, null)
+                for (t in listOf("user_dict", "user_bigram", "user_trigram", "user_english", "user_typo")) database.delete(t, null, null)
                 database.setTransactionSuccessful()
             } finally {
                 database.endTransaction()
             }
             user.clear()
             synchronized(typoMemory) { typoMemory.clear() }
+            fuzzy.restore(null)
+            spatialPrefs.edit().remove(PREF_FUZZY).apply()
             candidatesCache.evictAll()
+            spanCache.evictAll()
             userOnlyCache.evictAll()
-            subSyllableCache.evictAll()
             true
         } catch (e: Exception) {
             Log.e(TAG, "清除學習紀錄失敗", e)
@@ -2878,6 +3073,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
             for (k in spatialPrefs.all.keys) if (k.startsWith("$PREF_QWERTY_BIAS:")) remove(k)
         }.apply()
         candidatesCache.evictAll()
+        spanCache.evictAll()
     }
 
     private val glyphPaint = android.graphics.Paint().apply { textLocale = java.util.Locale.TAIWAN }
@@ -2902,13 +3098,26 @@ class ScorpioDictManager private constructor(private val context: Context) {
         return true
     }
 
-    suspend fun getNextWordPredictions(prevWord: String): List<String> = withContext(Dispatchers.IO) {
+    private val emojiGlyphCache = HashMap<String, Boolean>()
+
+    /** 手機字型畫得出來的 Emoji（太新的 Emoji，例如 17.0 的 🫪，舊手機會變方格，不列出來） */
+    fun isEmojiRenderable(emoji: String): Boolean =
+        synchronized(emojiGlyphCache) { emojiGlyphCache.getOrPut(emoji) { glyphPaint.hasGlyph(emoji) } }
+
+    suspend fun getNextWordPredictions(prevWord: String, prevWord2: String? = null): List<String> = withContext(Dispatchers.IO) {
         if (prevWord.isBlank()) return@withContext emptyList()
         val list = mutableListOf<String>()
 
-        // 1. 個人學習的接續詞（最優先）
+        // 1. 個人學習的接續詞（最優先）：前兩個詞都一樣時接過的在最前面，再來是前一個詞接過的；次數照時間淡出（約一個月減半）
         // 不預測跟上一個詞一樣的多字詞（連點兩下同一個候選留下的紀錄，會讓候選看起來按了沒消失）；單字疊字（哈→哈）照常
-        list.addAll(user.nextRecent(prevWord, 6) { it.next != it.prev || it.next.codePointCount(0, it.next.length) == 1 })
+        val now = System.currentTimeMillis()
+        fun ok(next: String) = next != prevWord || next.codePointCount(0, next.length) == 1
+        if (!prevWord2.isNullOrBlank()) {
+            for (p in user.nextAfter(prevWord2, prevWord, 3)) if (ok(p.next) && !list.contains(p.next)) list.add(p.next)
+        }
+        for (p in user.nextAll(prevWord).filter { ok(it.next) }.sortedByDescending { decayedCount(it.count, it.lastUsed, now) }.take(6)) {
+            if (!list.contains(p.next)) list.add(p.next)
+        }
 
         // 2. 靜態 Bigram 語料接續詞（依搭配機率排序）；整詞查不到時退回以最後一字查詢
         val tables = data.allBigrams
@@ -2939,7 +3148,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
     }
 
     suspend fun getEmojisByCategory(category: String): List<String> = withContext(Dispatchers.IO) {
-        data.emoji?.byCategory(category) ?: emptyList()
+        data.emoji?.byCategory(category)?.filter { isEmojiRenderable(it) } ?: emptyList()
     }
 
     suspend fun getKaomojiCategories(): List<String> = withContext(Dispatchers.IO) {
@@ -2958,6 +3167,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
         initUserDatabase()
         spatial.restore(spatialPrefs.getString(PREF_SPATIAL_BIAS, null))
         spatial.motion.restore(spatialPrefs.getString(PREF_MOTION, null))
+        fuzzy.restore(spatialPrefs.getString(PREF_FUZZY, null))
         qwerty.restore(spatialPrefs.getString(PREF_QWERTY_BIAS, null))
         // 背景預先載入按鍵當下要用的資料：第一個按鍵就有音節先驗
         Thread {
