@@ -303,10 +303,12 @@ object PackUpdater {
         return json
     }
 
-    /** 重新讀一次 manifest（設定頁打開時），回傳還沒安裝、App 版本夠新的資料包 */
+    /** 重新讀一次 manifest（設定頁打開時），回傳還沒安裝、App 版本夠新的資料包；讀到了也算一次「檢查更新」 */
     suspend fun refreshManifest(context: Context): List<ManifestPack> = withContext(Dispatchers.IO) {
         try {
-            parseManifest(fetchManifest(context))
+            parseManifest(fetchManifest(context)).also {
+                context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putLong(PREF_LAST_CHECK, System.currentTimeMillis()).apply()
+            }
         } catch (e: Exception) {
             cachedManifest(context)
         }.filter { it.minAppVersion <= appVersion(context) }

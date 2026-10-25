@@ -221,6 +221,8 @@ class SettingsActivity : AppCompatActivity() {
     private val cPrimary by lazy { themeColor(androidx.appcompat.R.attr.colorPrimary) }
     private val cOnPrimary by lazy { themeColor(com.google.android.material.R.attr.colorOnPrimary) }
     private val cError by lazy { themeColor(androidx.appcompat.R.attr.colorError) }
+    private val cSecondaryContainer by lazy { themeColor(com.google.android.material.R.attr.colorSecondaryContainer) }
+    private val cOnSecondaryContainer by lazy { themeColor(com.google.android.material.R.attr.colorOnSecondaryContainer) }
 
     private fun textAppearance(view: TextView, attr: Int) {
         val tv = android.util.TypedValue()
@@ -442,7 +444,7 @@ class SettingsActivity : AppCompatActivity() {
         })
     }
 
-    private fun texts(parent: LinearLayout, title: String, summary: String?) {
+    private fun texts(parent: LinearLayout, title: String, summary: CharSequence?) {
         parent.addView(TextView(this).apply {
             text = title
             textAppearance(this, com.google.android.material.R.attr.textAppearanceBodyLarge)
@@ -486,7 +488,7 @@ class SettingsActivity : AppCompatActivity() {
         row.addView(this, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
     }
 
-    private fun navRow(parent: LinearLayout, icon: Int?, title: String, summary: String?, onClick: () -> Unit): LinearLayout {
+    private fun navRow(parent: LinearLayout, icon: Int?, title: String, summary: CharSequence?, onClick: () -> Unit): LinearLayout {
         val row = row(parent, icon, clickable = true)
         texts(textColumn(row), title, summary)
         row.addView(ImageView(this).apply {
@@ -497,13 +499,13 @@ class SettingsActivity : AppCompatActivity() {
         return row
     }
 
-    private fun infoRow(parent: LinearLayout, title: String, summary: String?, icon: Int? = null): LinearLayout =
+    private fun infoRow(parent: LinearLayout, title: String, summary: CharSequence?, icon: Int? = null): LinearLayout =
         row(parent, icon, clickable = false).also { texts(textColumn(it), title, summary) }
 
     /** 列的第二行字（說明） */
     private fun summaryOf(row: LinearLayout) = (row.getChildAt(0) as LinearLayout).getChildAt(1) as TextView
 
-    /** 接在 anchor 這列底下、靠右的文字按鈕（更新到新版、刪除詞庫） */
+    /** 接在 anchor 這列底下、靠右的文字按鈕（刪除詞庫） */
     private fun rowAction(list: LinearLayout, anchor: View, text: String, color: Int, onClick: (TextView) -> Unit): LinearLayout {
         val rr = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -522,9 +524,13 @@ class SettingsActivity : AppCompatActivity() {
     }
 
     /** 下載一個資料包到最新版：進度條放在 anchor 這列底下、進度寫在 sub；回傳成功與否 */
-    private suspend fun downloadPack(list: LinearLayout, anchor: View, sub: TextView, id: String): Boolean {
+    private suspend fun downloadPack(list: LinearLayout, anchor: View, sub: TextView, id: String): Boolean =
+        withProgress(list, anchor, sub) { com.p3dro.scorpio.ime.engine.PackUpdater.ensureLatest(this, id, it) }
+
+    /** 跑 work 時，第一次回報進度才在 anchor 這列底下放進度條：下載顯示百分比，回報 < 0（套用中）轉成不確定進度 */
+    private suspend fun withProgress(list: LinearLayout, anchor: View, sub: TextView, work: suspend ((Float) -> Unit) -> Boolean): Boolean {
         var bar: com.google.android.material.progressindicator.LinearProgressIndicator? = null
-        val ok = com.p3dro.scorpio.ime.engine.PackUpdater.ensureLatest(this, id) { f ->
+        val ok = work { f ->
             runOnUiThread {
                 val b = bar ?: com.google.android.material.progressindicator.LinearProgressIndicator(this).apply {
                     max = 100
@@ -551,11 +557,41 @@ class SettingsActivity : AppCompatActivity() {
         return ok
     }
 
+    /** 放在列尾端的 Material 3 tonal 按鈕（例如「更新」） */
+    private fun tonalButton(row: LinearLayout, text: String, onClick: (MaterialButton) -> Unit): MaterialButton {
+        val disabled = intArrayOf(-android.R.attr.state_enabled)
+        fun alpha(c: Int, a: Float) = androidx.core.graphics.ColorUtils.setAlphaComponent(c, (a * 255).toInt())
+        val b = MaterialButton(this).apply {
+            this.text = text
+            isAllCaps = false
+            insetTop = 0
+            insetBottom = 0
+            minHeight = dp(40)
+            minimumHeight = dp(40)
+            backgroundTintList = android.content.res.ColorStateList(arrayOf(disabled, intArrayOf()), intArrayOf(alpha(cOnSurface, 0.12f), cSecondaryContainer))
+            setTextColor(android.content.res.ColorStateList(arrayOf(disabled, intArrayOf()), intArrayOf(alpha(cOnSurface, 0.38f), cOnSecondaryContainer)))
+            setOnClickListener { onClick(this) }
+        }
+        row.addView(b, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(40)).apply { marginStart = dp(16) })
+        return b
+    }
+
+    /** 放在列尾端的文字按鈕（例如「檢查更新」） */
+    private fun textButton(row: LinearLayout, text: String, onClick: (MaterialButton) -> Unit): MaterialButton {
+        val b = MaterialButton(this, null, androidx.appcompat.R.attr.borderlessButtonStyle).apply {
+            this.text = text
+            isAllCaps = false
+            setOnClickListener { onClick(this) }
+        }
+        row.addView(b, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = dp(8) })
+        return b
+    }
+
     private fun sizeText(bytes: Long) = if (bytes >= 1048576) "%.1f MB".format(bytes / 1048576.0) else "${(bytes + 1023) / 1024} KB"
 
     /** onRowClick 有給時，點列本身做那件事（例如看詞庫內容），只有開關切換開關 */
     private fun switchRow(
-        parent: LinearLayout, title: String, summary: String, checked: Boolean,
+        parent: LinearLayout, title: String, summary: CharSequence, checked: Boolean,
         onRowClick: (() -> Unit)? = null, onChange: (Boolean) -> Unit
     ): Pair<LinearLayout, com.google.android.material.materialswitch.MaterialSwitch> {
         val row = row(parent, null, clickable = true)
@@ -1078,6 +1114,25 @@ class SettingsActivity : AppCompatActivity() {
     }
 
     private fun buildDictionary() {
+        // 線上更新放最上面（跟 Play 商店的「可用的更新」一樣）：有新版的集中列出，每列各自「更新」，標題列「全部更新」
+        sectionTitle("線上更新")
+        val up = card()
+        val updates = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        up.addView(updates)
+        loadingText(updates)
+        val updatePrefs = getSharedPreferences(com.p3dro.scorpio.ime.engine.PackUpdater.PREFS, Context.MODE_PRIVATE)
+        switchRow(
+            up, "自動更新", "每天在 Wi-Fi 下檢查一次，開著的詞庫、Emoji、英文、倉頡碼表與鍵盤設定有新版就自動下載。",
+            updatePrefs.getBoolean(com.p3dro.scorpio.ime.engine.PackUpdater.PREF_AUTO, true)
+        ) { on ->
+            updatePrefs.edit().putBoolean(com.p3dro.scorpio.ime.engine.PackUpdater.PREF_AUTO, on).apply()
+            com.p3dro.scorpio.ime.engine.PackUpdater.schedule(this)
+        }
+        fun lastCheckText(): String {
+            val t = updatePrefs.getLong(com.p3dro.scorpio.ime.engine.PackUpdater.PREF_LAST_CHECK, 0)
+            return if (t == 0L) "還沒檢查過" else "上次檢查：" + java.text.SimpleDateFormat("M/d HH:mm", java.util.Locale.TAIWAN).format(java.util.Date(t))
+        }
+
         sectionTitle("學習統計")
         val s = card()
         val loading = loadingText(s)
@@ -1104,53 +1159,6 @@ class SettingsActivity : AppCompatActivity() {
                 lifecycleScope.launch {
                     dict.clearLearning()
                     render()
-                }
-            }
-        }
-
-        sectionTitle("線上更新")
-        val up = card()
-        val updatePrefs = getSharedPreferences(com.p3dro.scorpio.ime.engine.PackUpdater.PREFS, Context.MODE_PRIVATE)
-        switchRow(
-            up, "自動更新詞庫", "每天在 Wi-Fi 下檢查一次，開著的詞庫、Emoji、英文、倉頡碼表與鍵盤設定有新版就自動下載。",
-            updatePrefs.getBoolean(com.p3dro.scorpio.ime.engine.PackUpdater.PREF_AUTO, true)
-        ) { on ->
-            updatePrefs.edit().putBoolean(com.p3dro.scorpio.ime.engine.PackUpdater.PREF_AUTO, on).apply()
-            com.p3dro.scorpio.ime.engine.PackUpdater.schedule(this)
-        }
-        fun lastCheckText(): String {
-            val t = updatePrefs.getLong(com.p3dro.scorpio.ime.engine.PackUpdater.PREF_LAST_CHECK, 0)
-            return if (t == 0L) "還沒檢查過" else "上次檢查：" + java.text.SimpleDateFormat("M/d HH:mm", java.util.Locale.TAIWAN).format(java.util.Date(t))
-        }
-        val checkButton = button(up, "全部檢查並更新", filled = false) {}
-        val status = TextView(this).apply {
-            text = lastCheckText()
-            textAppearance(this, com.google.android.material.R.attr.textAppearanceBodySmall)
-            setTextColor(cOnSurfaceVariant)
-            gravity = Gravity.CENTER
-            setPadding(dp(16), 0, dp(16), dp(12))
-        }
-        up.addView(status)
-        // 不在詞庫清單上的內建資料：版本與單獨更新（讀到線上清單後補上）
-        val builtins = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        up.addView(builtins)
-        checkButton.setOnClickListener {
-            checkButton.isEnabled = false
-            checkButton.text = "檢查中…"
-            lifecycleScope.launch {
-                val r = com.p3dro.scorpio.ime.engine.PackUpdater.checkAndUpdate(this@SettingsActivity)
-                val msg = when {
-                    r.error != null -> r.error
-                    r.updated.isEmpty() && r.failed.isEmpty() -> "目前已經是最新版"
-                    else -> (if (r.updated.isNotEmpty()) "已更新：" + r.updated.joinToString("、") { "${it.first} ${it.second}" } else "") +
-                        (if (r.failed.isNotEmpty()) "（${r.failed.joinToString("、")} 更新失敗）" else "")
-                }
-                android.widget.Toast.makeText(this@SettingsActivity, msg, android.widget.Toast.LENGTH_LONG).show()
-                if (stack.lastOrNull() != Page.DICTIONARY) return@launch
-                if (r.updated.isNotEmpty()) render() else {
-                    checkButton.isEnabled = true
-                    checkButton.text = "全部檢查並更新"
-                    status.text = lastCheckText()
                 }
             }
         }
@@ -1182,6 +1190,19 @@ class SettingsActivity : AppCompatActivity() {
             cards[key] = c
             loadings[key] = loadingText(c)
         }
+
+        // 線上有新版的一項：install 下載套用（回報進度），done 把詞庫清單上那一列改成新版本
+        class Update(val id: String, val name: String, val from: String, val to: String, val size: Long,
+                     val install: suspend ((Float) -> Unit) -> Boolean, val done: () -> Unit)
+        val pending = ArrayList<Update>()
+        lateinit var showUpdates: () -> Unit
+        // 詞庫清單的說明最後一行：線上有新版時用主色標出來（更新按鈕在最上面）
+        fun withNewer(text: String, newer: String?): CharSequence =
+            if (newer == null) text else android.text.SpannableStringBuilder(text).append("\n")
+                .append("有新版 $newer", android.text.style.ForegroundColorSpan(cPrimary), 0)
+        fun newerOf(online: String?, have: String) =
+            online?.takeIf { have.isNotEmpty() && com.p3dro.scorpio.ime.engine.PackVersion.compare(it, have) > 0 }
+
         lifecycleScope.launch {
             val available = com.p3dro.scorpio.ime.engine.PackUpdater.refreshManifest(this@SettingsActivity)
             val manifest = available.associateBy { it.id }
@@ -1189,45 +1210,6 @@ class SettingsActivity : AppCompatActivity() {
             val dicts = dict.dictionaries(available)
             if (stack.lastOrNull() != Page.DICTIONARY) return@launch
             for ((key, c) in cards) c.removeView(loadings[key])
-            for ((id, name) in listOf("en" to "英文詞庫", "cangjie" to "倉頡／速成碼表")) {
-                val have = dict.installedPackVersion(id, "")
-                if (have.isEmpty()) continue
-                val r = infoRow(builtins, name, "版本 $have")
-                val m = manifest[id] ?: continue
-                if (com.p3dro.scorpio.ime.engine.PackVersion.compare(m.version, have) <= 0) continue
-                lateinit var action: LinearLayout
-                action = rowAction(builtins, r, "更新到 ${m.version}（${sizeText(m.size)}）", cPrimary) { btn ->
-                    btn.isEnabled = false
-                    lifecycleScope.launch {
-                        val sub = summaryOf(r)
-                        if (downloadPack(builtins, r, sub, id)) {
-                            sub.text = "版本 ${m.version}"
-                            builtins.removeView(action)
-                        } else {
-                            sub.text = "版本 $have"
-                            btn.isEnabled = true
-                            android.widget.Toast.makeText(this@SettingsActivity, "下載失敗，確認網路後再試一次", android.widget.Toast.LENGTH_SHORT).show()
-                        }
-                    }
-                }
-            }
-            val configRow = infoRow(builtins, "鍵盤設定", "簡拼展開、顏文字對照、讀音混用預設、符號鍵盤・版本 " +
-                com.p3dro.scorpio.ime.engine.ImeConfig.installedVersion(this@SettingsActivity))
-            com.p3dro.scorpio.ime.engine.PackUpdater.pendingConfig(this@SettingsActivity)?.let { c ->
-                lateinit var action: LinearLayout
-                action = rowAction(builtins, configRow, "更新到 ${c.version}（${sizeText(c.size)}）", cPrimary) { btn ->
-                    btn.isEnabled = false
-                    lifecycleScope.launch {
-                        if (com.p3dro.scorpio.ime.engine.PackUpdater.installConfig(this@SettingsActivity, c)) {
-                            summaryOf(configRow).text = "簡拼展開、顏文字對照、讀音混用預設、符號鍵盤・版本 ${c.version}"
-                            builtins.removeView(action)
-                        } else {
-                            btn.isEnabled = true
-                            android.widget.Toast.makeText(this@SettingsActivity, "下載失敗，確認網路後再試一次", android.widget.Toast.LENGTH_SHORT).show()
-                        }
-                    }
-                }
-            }
             fun groupOf(d: ScorpioDictManager.DictionaryInfo) = manifest[d.id]?.category?.takeIf { it in groups } ?: when {
                 d.group == "bigram" -> "bigram"
                 d.removable -> "import"
@@ -1244,11 +1226,17 @@ class SettingsActivity : AppCompatActivity() {
             for (d in dicts) {
                 val list = cards.getValue(groupOf(d))
                 val bigram = d.group == "bigram"
-                fun summary(installed: Boolean, count: Int, version: String?) =
+                val online = manifest[d.id]
+                fun summary(installed: Boolean, count: Int, version: String?, newer: String? = null) = withNewer(
                     "${d.description}・${"%,d".format(count)} ${if (bigram) "組" else "個"}" +
                         (if (!installed) "・尚未下載（約 ${"%.1f".format(d.downloadSize / 1048576.0)} MB）" else "") +
-                        (d.source?.let { "\n來源：$it" } ?: "") + (version?.let { "\n版本 $it" } ?: "")
+                        (d.source?.let { "\n來源：$it" } ?: "") + (version?.let { "\n版本 $it" } ?: ""),
+                    newer
+                )
                 var installed = d.installed
+                // 內建資料一律可以更新；可開關的要開著才列
+                val newer = newerOf(online?.version, d.version.orEmpty())
+                    ?.takeIf { installed && (online!!.system || d.enabled || !d.toggleable) }
                 val openDetail = {
                     if (installed) {
                         detailDict = d
@@ -1257,40 +1245,22 @@ class SettingsActivity : AppCompatActivity() {
                         android.widget.Toast.makeText(this@SettingsActivity, "打開開關下載後就能看內容", android.widget.Toast.LENGTH_SHORT).show()
                     }
                 }
-                // 線上有新版：這列底下出現「更新到…」，可以只更新這一個（內建資料一律可更新；可開關的要開著）
-                val online = manifest[d.id]
-                var updateAction: LinearLayout? = null
-                fun offerUpdate(anchor: LinearLayout) {
-                    if (online == null || !installed || !(online.system || d.enabled || !d.toggleable)) return
-                    if (com.p3dro.scorpio.ime.engine.PackVersion.compare(online.version, d.version.orEmpty()) <= 0) return
-                    updateAction = rowAction(list, anchor, "更新到 ${online.version}（${sizeText(online.size)}）", cPrimary) { btn ->
-                        btn.isEnabled = false
-                        val sub = summaryOf(anchor)
-                        val before = sub.text
-                        lifecycleScope.launch {
-                            if (downloadPack(list, anchor, sub, d.id)) {
-                                sub.text = summary(true, online.rows.takeIf { it > 0 } ?: d.count, online.version)
-                                updateAction?.let { list.removeView(it) }
-                                updateAction = null
-                                android.widget.Toast.makeText(this@SettingsActivity, "已更新「${d.name}」到 ${online.version}", android.widget.Toast.LENGTH_SHORT).show()
-                            } else {
-                                sub.text = before
-                                btn.isEnabled = true
-                                android.widget.Toast.makeText(this@SettingsActivity, "下載失敗，確認網路後再試一次", android.widget.Toast.LENGTH_SHORT).show()
-                            }
-                        }
-                    }
+                fun offerUpdate(r: LinearLayout) {
+                    if (newer == null) return
+                    pending.add(Update(d.id, d.name, d.version.orEmpty(), newer, online!!.size,
+                        { p -> com.p3dro.scorpio.ime.engine.PackUpdater.ensureLatest(this@SettingsActivity, d.id, p) },
+                        { summaryOf(r).text = summary(true, online.rows.takeIf { it > 0 } ?: d.count, newer) }))
                 }
                 if (!d.toggleable) {
-                    offerUpdate(navRow(list, null, d.name, summary(true, d.count, d.version)) { openDetail() })
+                    offerUpdate(navRow(list, null, d.name, summary(true, d.count, d.version, newer)) { openDetail() })
                     continue
                 }
                 var ignore = false
                 lateinit var sw: com.google.android.material.materialswitch.MaterialSwitch
                 lateinit var r: LinearLayout
-                val pair = switchRow(list, d.name, summary(installed, d.count, d.version), d.enabled, onRowClick = openDetail) { on ->
+                val pair = switchRow(list, d.name, summary(installed, d.count, d.version, newer), d.enabled, onRowClick = openDetail) { on ->
                     if (ignore) return@switchRow
-                    val sub = (r.getChildAt(0) as LinearLayout).getChildAt(1) as TextView
+                    val sub = summaryOf(r)
                     lifecycleScope.launch {
                         if (!on && d.id in onlineOnly) {
                             // 只能線上安裝的：關掉就整個移除，回到「尚未下載」
@@ -1306,13 +1276,12 @@ class SettingsActivity : AppCompatActivity() {
                         sw.isEnabled = false
                         val ok = downloadPack(list, r, sub, d.id)
                         sw.isEnabled = true
-                        val m = manifest[d.id]
+                        val mp = manifest[d.id]
                         when {
                             ok -> {
                                 installed = true
-                                updateAction?.let { list.removeView(it) }
-                                updateAction = null
-                                sub.text = summary(true, m?.rows ?: d.count, m?.version ?: d.version)
+                                if (pending.removeAll { it.id == d.id }) showUpdates()
+                                sub.text = summary(true, mp?.rows ?: d.count, mp?.version ?: d.version)
                                 android.widget.Toast.makeText(this@SettingsActivity,
                                     if (d.installed) "已更新「${d.name}」到最新版" else "已安裝「${d.name}」", android.widget.Toast.LENGTH_SHORT).show()
                             }
@@ -1342,6 +1311,95 @@ class SettingsActivity : AppCompatActivity() {
                     }
                 }
             }
+
+            // 不在詞庫清單上的內建資料：列在「基本」，有新版一樣收進最上面
+            val basic = cards.getValue("basic")
+            for ((id, name) in listOf("en" to "英文詞庫", "cangjie" to "倉頡／速成碼表")) {
+                val have = dict.installedPackVersion(id, "")
+                if (have.isEmpty()) continue
+                val online = manifest[id]
+                val newer = newerOf(online?.version, have)
+                val r = infoRow(basic, name, withNewer("版本 $have", newer))
+                if (newer != null) pending.add(Update(id, name, have, newer, online!!.size,
+                    { p -> com.p3dro.scorpio.ime.engine.PackUpdater.ensureLatest(this@SettingsActivity, id, p) },
+                    { summaryOf(r).text = "版本 $newer" }))
+            }
+            val configDesc = "簡拼展開、顏文字對照、讀音混用預設、符號鍵盤"
+            val configHave = com.p3dro.scorpio.ime.engine.ImeConfig.installedVersion(this@SettingsActivity)
+            val config = com.p3dro.scorpio.ime.engine.PackUpdater.pendingConfig(this@SettingsActivity)
+            val configRow = infoRow(basic, "鍵盤設定", withNewer("$configDesc\n版本 $configHave", config?.version))
+            if (config != null) pending.add(Update(config.id, "鍵盤設定", configHave, config.version, config.size,
+                { p -> p(0f); com.p3dro.scorpio.ime.engine.PackUpdater.installConfig(this@SettingsActivity, config) },
+                { summaryOf(configRow).text = "$configDesc\n版本 ${config.version}" }))
+
+            // ---- 最上面的「可用的更新」 ----
+            var headTitle: TextView? = null
+            val buttons = HashMap<Update, MaterialButton>()
+            suspend fun runUpdate(u: Update, r: LinearLayout): Boolean {
+                val btn = buttons[u]
+                btn?.isEnabled = false
+                val sub = summaryOf(r)
+                val before = sub.text
+                val ok = withProgress(updates, r, sub, u.install)
+                if (stack.lastOrNull() != Page.DICTIONARY) return ok
+                if (ok) {
+                    pending.remove(u)
+                    buttons.remove(u)
+                    u.done()
+                    updates.removeView(r)
+                    if (pending.isEmpty()) showUpdates() else headTitle?.text = "${pending.size} 項可以更新"
+                } else {
+                    sub.text = before
+                    btn?.isEnabled = true
+                }
+                return ok
+            }
+            showUpdates = {
+                updates.removeAllViews()
+                buttons.clear()
+                if (pending.isEmpty()) {
+                    val r = row(updates, null, clickable = false)
+                    texts(textColumn(r), "都是最新版", lastCheckText())
+                    textButton(r, "檢查更新") { b ->
+                        b.isEnabled = false
+                        b.text = "檢查中…"
+                        render()
+                    }
+                } else {
+                    val head = row(updates, null, clickable = false)
+                    texts(textColumn(head), "${pending.size} 項可以更新", lastCheckText())
+                    headTitle = (head.getChildAt(0) as LinearLayout).getChildAt(0) as TextView
+                    val rows = HashMap<Update, LinearLayout>()
+                    tonalButton(head, "全部更新") { all ->
+                        all.isEnabled = false
+                        for (b in buttons.values) b.isEnabled = false
+                        lifecycleScope.launch {
+                            var failed = 0
+                            for (u in pending.toList()) if (!runUpdate(u, rows.getValue(u))) failed++
+                            if (stack.lastOrNull() != Page.DICTIONARY) return@launch
+                            all.isEnabled = true
+                            for (b in buttons.values) b.isEnabled = true
+                            android.widget.Toast.makeText(this@SettingsActivity,
+                                if (failed == 0) "已全部更新" else "$failed 項更新失敗，確認網路後再試一次", android.widget.Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                    for (u in pending) {
+                        val r = row(updates, null, clickable = false)
+                        texts(textColumn(r), u.name, "新版 ${u.to}・${sizeText(u.size)}\n目前 ${u.from}")
+                        rows[u] = r
+                        buttons[u] = tonalButton(r, "更新") {
+                            lifecycleScope.launch {
+                                if (!runUpdate(u, r) && stack.lastOrNull() == Page.DICTIONARY) {
+                                    android.widget.Toast.makeText(this@SettingsActivity, "下載失敗，確認網路後再試一次", android.widget.Toast.LENGTH_SHORT).show()
+                                } else if (stack.lastOrNull() == Page.DICTIONARY) {
+                                    android.widget.Toast.makeText(this@SettingsActivity, "已更新「${u.name}」到 ${u.to}", android.widget.Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            showUpdates()
         }
     }
 
