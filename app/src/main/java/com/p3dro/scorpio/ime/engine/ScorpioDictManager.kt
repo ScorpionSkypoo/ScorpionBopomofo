@@ -84,6 +84,8 @@ class ScorpioDictManager private constructor(private val context: Context) {
         private const val POOL_MARGIN = 5.0
         // 簡拼（只打聲母）查到的詞比打完整讀音的少多少分（log10）
         private const val ABBREV_COST = 1.5
+        // 字典接續詞（bigram 資料包）存 ln P(next | prev)，乘這個換成 log10（1 / ln 10）
+        private const val LN_TO_LOG10 = 0.4342944819032518
         // 注音組合依懲罰排不進前幾名、但拼得成詞的另外留幾個：懲罰上限（約兩個鄰鍵／慣性打錯）、最多幾個
         private const val WORD_KEEP_MAX_PENALTY = 2.0
         private const val WORD_KEEP_EXTRA = 8
@@ -2141,6 +2143,8 @@ class ScorpioDictManager private constructor(private val context: Context) {
      * 詞間轉移加權：前詞 prev 之後接 w 的條件機率 b 若比 w 自身單詞分數 s 高，代表搭配性強
      * 例如「載具」→「發票」：即使「在劇」「災區」單詞分數相近，也會因搭配而置頂
      * 搭配性弱的組合（「位置」→「不」、「不」→「排」）不加分，否則拆成單字反而能吃到較多轉移加分
+     * 資料包存的是 ln，詞的分數是 log10：先換成 log10 再比。
+     * s 要傳沒扣落點、聲調、簡拼懲罰的分數：傳扣過的，b - s 會把懲罰加回去（加分沒被夾住時總分就只剩 b + 1）
      */
     private fun bigramBonus(prev: String, w: String, s: Double): Double {
         if (prev.isEmpty()) return 0.0
@@ -2148,8 +2152,8 @@ class ScorpioDictManager private constructor(private val context: Context) {
         return contextBonus(b, s)
     }
 
-    /** 接續的條件機率 b（ln）比詞本身的分數 s 高多少（見 bigramBonus） */
-    private fun contextBonus(b: Double, s: Double) = (b - s + 1.0).coerceIn(0.0, 8.0)
+    /** 接續的條件機率 b（ln）比詞本身的分數 s（log10）高多少（見 bigramBonus） */
+    private fun contextBonus(b: Double, s: Double) = (b * LN_TO_LOG10 - s + 1.0).coerceIn(0.0, 8.0)
 
 
 
@@ -2200,6 +2204,8 @@ class ScorpioDictManager private constructor(private val context: Context) {
 
                 val spanCands = HashMap<String, Double>()
                 val spanCorr = HashMap<String, Double>()
+                // 沒扣落點、聲調、簡拼懲罰的分數：上文加分拿它跟接續機率比（見 contextBonuses）
+                val spanUnpenalized = HashMap<String, Double>()
 
                 val spanTouches = if (touchesPerSyllable.size >= i + len) touchesPerSyllable.subList(i, i + len) else emptyList()
                 for (combo in subCombos) {
@@ -2214,6 +2220,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
                         if (cur == null || adj > cur) {
                             spanCands[hit.word] = adj
                             spanCorr[hit.word] = corrPenalty
+                            spanUnpenalized[hit.word] = hit.base
                         }
                         if (idx == 0 && i == 0 && len >= 2 && totalPenalty <= 1.2 && !spanWords.contains(hit.word)) {
                             spanWords.add(hit.word)
@@ -2232,6 +2239,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
                         if (cur == null || initScore > cur) {
                             spanCands[w] = initScore
                             spanCorr[w] = 0.0
+                            spanUnpenalized[w] = h.base
                         }
                         if (first && i == 0 && !spanWords.contains(w)) spanWords.add(w)
                         first = false
@@ -2243,7 +2251,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
                 val target = dp[i + len]
                 val targetIndex = dpIndex[i + len]
                 for (node in dp[i]) {
-                    val bbs = contextBonuses(node.last, node.last2, bestCands, now)
+                    val bbs = contextBonuses(node.last, node.last2, bestCands, spanUnpenalized, now)
                     for ((k, e) in bestCands.withIndex()) {
                         val w = e.key
                         val sc = e.value
@@ -2284,7 +2292,8 @@ class ScorpioDictManager private constructor(private val context: Context) {
         )
     }
 
-    class SpanHit(val word: String, val score: Double, val share: Double, val reading: String)
+    /** base：沒扣聲調不合、簡拼（ABBREV_COST）的分數，給上文加分當這個詞自己的字頻（見 contextBonuses） */
+    class SpanHit(val word: String, val score: Double, val share: Double, val reading: String, val base: Double = score)
 
     /**
      * 一段讀音（toneless key，len 個音節）的候選詞與分數（log10）：
@@ -2298,7 +2307,11 @@ class ScorpioDictManager private constructor(private val context: Context) {
     ): List<SpanHit> {
         val base = spanCache.get(key) ?: spanBase(key, len, now).also { spanCache.put(key, it) }
         val out = ArrayList<SpanHit>(base.size)
-        for (h in base) out.add(SpanHit(h.word, h.score - tonePenalty(typed, touches, h.reading), h.share, h.reading))
+        for (h in base) {
+            // 簡拼查到的詞（讀音跟 key 不同）在 spanBase 扣過 ABBREV_COST，這裡加回來當沒扣懲罰的分數
+            val abbrevCost = if (toToneless(h.reading) != key) ABBREV_COST else 0.0
+            out.add(SpanHit(h.word, h.score - tonePenalty(typed, touches, h.reading), h.share, h.reading, h.score + abbrevCost))
+        }
         out.sortByDescending { it.score }
         return if (out.size > limit) out.subList(0, limit) else out
     }
@@ -2370,8 +2383,11 @@ class ScorpioDictManager private constructor(private val context: Context) {
      * 同一段的候選詞（cands：詞 → 分數）各自的上文加分（log10）：字典的接續詞（bigramBonus），再照個人搭配調整。
      * 個人搭配同 spanLookup：在 prev 後面、這幾個詞裡選各詞的次數，跟沒有個人搭配時的比例混合（MU_CONTEXT），
      * 前兩個詞都一樣（三詞搭配）時再混一層。比例是整組一起算的：在「通知」後面選過「欄」，「欄」加分、「來」同時扣分
+     * unpenalized：各詞沒扣懲罰的分數（見 SpanHit.base），字典接續詞拿它當詞自己的字頻；沒有就用 cands 的分數
      */
-    private fun contextBonuses(prev: String, prev2: String?, cands: List<Map.Entry<String, Double>>, now: Long): DoubleArray {
+    private fun contextBonuses(
+        prev: String, prev2: String?, cands: List<Map.Entry<String, Double>>, unpenalized: Map<String, Double>, now: Long
+    ): DoubleArray {
         val n = cands.size
         if (prev.isEmpty() || n == 0) return DoubleArray(n)
         // 字典的接續詞：有「前兩個詞」的搭配（三詞資料包）就用它，沒有才看前一個詞；
@@ -2382,10 +2398,11 @@ class ScorpioDictManager private constructor(private val context: Context) {
         val tri = if (prevWord2.isNotEmpty() && prevWord.isNotEmpty()) bigramsFor(prevWord2 + TRIGRAM_SEP + prevWord) else emptyMap()
         val static = DoubleArray(n) {
             val w = cands[it].key
+            val s = unpenalized[w] ?: cands[it].value
             when {
                 chunkParts(w) != null -> 0.0
-                tri[w] != null -> contextBonus(tri.getValue(w), cands[it].value)
-                else -> bigramBonus(prevWord, w, cands[it].value)
+                tri[w] != null -> contextBonus(tri.getValue(w), s)
+                else -> bigramBonus(prevWord, w, s)
             }
         }
         val top = (0 until n).maxOf { cands[it].value + static[it] }
