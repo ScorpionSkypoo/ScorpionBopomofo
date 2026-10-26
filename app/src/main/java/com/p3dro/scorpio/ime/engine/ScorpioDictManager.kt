@@ -55,6 +55,11 @@ class ScorpioDictManager private constructor(private val context: Context) {
         const val EXTRA_KEY_PENALTY = 2.0
         // 候選列前面先放幾個詞，才接 Emoji、顏文字。重播比過：2 → 3，前三命中 91.2% → 92.2%（4 一樣）
         private const val INLINE_TEXT_FIRST = 3
+        // 多音節輸入時，首音節的單字從第幾個候選（0 起算）開始穿插、放幾個，見 getCandidateGroups；0 個＝排在所有詞後面。
+        // 打字記錄 1,959 次選字重播：從第 4 個放 4 個，第一 81.6%、前三 93.1% 都不變，只選首字的那幾次從第 9～27 個提前到第 4～7 個；
+        // 從第 3 個放（跟 Gboard 一樣）前三掉到 91.9%（整句的第三名被擠下去 23 次，只多 6 次首字進前三）
+        const val PARTIAL_SINGLE_AT = 3
+        const val PARTIAL_SINGLE_COUNT = 4
         // 「前兩個詞」的搭配存在接續詞表裡，prev 是兩個詞用這個字元串起來（資料 repo 的 build_trigram_pack.py）
         const val TRIGRAM_SEP = '\u0001'
         // 慣性打錯至少選過這麼多次（而且反方向很少）才算穩定的個人習慣，見 isTypoHabit
@@ -1606,6 +1611,8 @@ class ScorpioDictManager private constructor(private val context: Context) {
         // 3e. 多音節輸入時，務必在多字詞組後完整列出首音節（及雙字前綴）的所有單獨候選字！
         // 解決使用者反饋：「打 ㄏㄠㄏㄠㄎㄢ 或 ㄏㄠㄉㄚ 後面沒有單獨字可選，無法逐字選字」
         val primarySyllables = segmentationsToUse.firstOrNull() ?: emptyList()
+        // 首音節的單字（下面 1～3 列出的），穿插到前面用（見「首音節的單字穿插」）
+        val firstSingles = HashSet<String>()
         if (primarySyllables.size > 1) {
             val firstSyllable = primarySyllables.first()
             val tonelessFirst = toToneless(firstSyllable)
@@ -1616,12 +1623,14 @@ class ScorpioDictManager private constructor(private val context: Context) {
             for (u in user.matches(tonelessFirst, firstReading, 5, singleChar = true)) {
                 if (!isHanWord(u.word)) continue
                 addScoredWord(u.word, 78.0 + minOf(decayedCount(u.count, u.lastUsed, now) * 1.5, 12.0))
+                firstSingles.add(u.word)
             }
 
             // 2. 精確聲調單字 (若首音節有標聲調，如 ㄏㄠˇ 出 好、郝)
             if (firstHasTone) {
                 for (h in words.byReading(firstReading, 20, singleChar = true)) {
                     addScoredWord(h.word, h.score + 75.0)
+                    firstSingles.add(h.word)
                 }
             }
 
@@ -1629,6 +1638,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
             for (h in words.byToneless(tonelessFirst, 30, singleChar = true)) {
                 val boost = if (firstHasTone) 65.0 else 70.0
                 addScoredWord(h.word, h.score + boost)
+                firstSingles.add(h.word)
             }
 
             // 4. 若輸入 3 音節以上（例如 ㄏㄠ-ㄏㄠ-ㄎㄢ），額外補上前 2 音節的雙字前綴詞（例如「好好」）
@@ -1653,6 +1663,20 @@ class ScorpioDictManager private constructor(private val context: Context) {
             .sortedByDescending { it.value }.mapTo(ArrayList()) { it.key }
         val front = ranked.toHashSet()
         bestWordScores.entries.sortedByDescending { it.value }.forEach { if (it.key !in front) ranked.add(it.key) }
+        // 首音節的單字穿插：比照 Gboard，打 ㄓㄣㄉㄜ 是「真的、真得、真、禎…」，想先選「真」不用翻過所有雙字詞
+        // （原本單字排在所有詞後面，連「砧刀、站得、徵得」這種冷門、鄰鍵修正的詞都在「真」前面）。
+        // 整串都是單打聲母（ㄒㄒ＝謝謝）是一個簡拼詞，不拆
+        if (partialSingleCount > 0 && primaryInput.size >= 2 && firstSingles.isNotEmpty() &&
+            !primaryInput.all { toToneless(it).let { t -> t.length == 1 && t[0] in BopomofoComposer.INITIALS } }
+        ) {
+            val singles = ranked.filter { it in firstSingles }.take(partialSingleCount)
+            val at = minOf(partialSingleAt, ranked.size - singles.size)
+            if (singles.isNotEmpty() && ranked.indexOf(singles.last()) > at + singles.size - 1) {
+                ranked.removeAll(singles.toSet())
+                ranked.addAll(minOf(at, ranked.size), singles)
+                trace?.add("首音節的單字穿插：${singles.joinToString("")} 從第 ${at + 1} 個開始")
+            }
+        }
         // 句尾只打了一個聲母（ㄓ、ㄅ）：可能是簡拼的字（之、吧），也可能是下一個詞剛開始打。整句照樣排第一，
         // 「前面那句」排第二：打字途中隨時可以先選前面，句尾的聲母留著繼續打、繼續選。
         // 重播比過：第一候選不變，前三命中 90.0% → 89.4%（第三名被擠到第四）；放第一會從 77.7% 掉到 66～73%（送出時句尾多半就是簡拼的字）
