@@ -500,6 +500,8 @@ class ScorpioImeService : InputMethodService() {
         // 依輸入框類型開對的鍵盤：數字、電話、日期時間開數字鍵盤；密碼、Email、網址開英文鍵盤；其他照常開中文
         fieldKind = fieldKindOf(info)
         numpadFromUser = false
+        // 換輸入框：Shift 回到小寫（上一個輸入框按了 Shift 沒打字、或開著大寫鎖定，不帶過來）
+        resetShift()
         setKeyboardMode(
             when (fieldKind) {
                 FieldKind.NUMBER, FieldKind.PHONE, FieldKind.DATETIME -> KeyboardMode.NUMPAD
@@ -720,8 +722,11 @@ class ScorpioImeService : InputMethodService() {
         ) {
             previousMode = currentMode
         }
+        val from = currentMode
         currentMode = mode
         keyPreview?.hideAll()
+        // 跟 Gboard 一樣：切到別的鍵盤再回來，Shift（含大寫鎖定）回到小寫；展開候選字再收回不算切換
+        if (mode != from && from != KeyboardMode.EXPANDED) resetShift()
         // 每次進符號鍵盤都回第 1 頁，並依來源（注音／英文）重建全形或半形標點
         if (mode == KeyboardMode.SYMBOLS) {
             symbolsPage = 0
@@ -1371,6 +1376,11 @@ class ScorpioImeService : InputMethodService() {
             candidateAdapter?.submitList(emptyList())
             updateBarVisibility()
         }
+    }
+
+    private fun resetShift() {
+        shiftState = ShiftState.OFF
+        updateShiftVisuals()
     }
 
     private fun updateShiftVisuals() {
