@@ -4,6 +4,8 @@
 
     <!-- 下載詞庫更新、擴充功能、App 更新，以及手寫辨識第一次下載 ML Kit 模型；打字內容不會上傳 -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- 按鍵震動：直接走 Vibrator，避免 Android 13+ 系統關閉觸覺回饋時把 performHapticFeedback 擋掉 -->
+    <uses-permission android:name="android.permission.VIBRATE" />
     <!-- 檢查 App 更新：下載 GitHub Releases 的 APK 後交給系統安裝 -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 

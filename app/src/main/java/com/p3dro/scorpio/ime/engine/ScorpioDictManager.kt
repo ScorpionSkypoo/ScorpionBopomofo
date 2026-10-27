@@ -1701,17 +1701,16 @@ class ScorpioDictManager private constructor(private val context: Context) {
         // 首音節的單字穿插：比照 Gboard，打 ㄓㄣㄉㄜ 是「真的、真得、真、禎…」，想先選「真」不用翻過所有雙字詞
         // （原本單字排在所有詞後面，連「砧刀、站得、徵得」這種冷門、鄰鍵修正的詞都在「真」前面）。
         // 整串都是單打聲母（ㄒㄒ＝謝謝）是一個簡拼詞，不拆
-        if (partialSingleCount > 0 && primaryInput.size >= 2 && (firstSingles.isNotEmpty() || learnedSingles.isNotEmpty()) &&
+        if (PARTIAL_SINGLE_COUNT > 0 && primaryInput.size >= 2 && (firstSingles.isNotEmpty() || learnedSingles.isNotEmpty()) &&
             !primaryInput.all { toToneless(it).let { t -> t.length == 1 && t[0] in BopomofoComposer.INITIALS } }
         ) {
             val topDict = firstSingles.values.maxOrNull() ?: Double.NEGATIVE_INFINITY
-            val singles = ranked.filter { w -> w in learnedSingles || firstSingles[w]?.let { it >= topDict - PARTIAL_SINGLE_RANGE } == true }.take(partialSingleCount)
-            val strong = if (partialSingleMargin > 0) ranked.indexOfFirst { (pool[it] ?: Double.NEGATIVE_INFINITY) < poolBest - partialSingleMargin }.let { if (it < 0) ranked.size else it } else partialSingleAt
-            val at = minOf(strong.coerceIn(1, partialSingleAt), ranked.size - singles.size)
+            val singles = ranked.filter { w -> w in learnedSingles || firstSingles[w]?.let { it >= topDict - PARTIAL_SINGLE_RANGE } == true }.take(PARTIAL_SINGLE_COUNT)
+            val strong = ranked.indexOfFirst { (pool[it] ?: Double.NEGATIVE_INFINITY) < poolBest - PARTIAL_SINGLE_MARGIN }.let { if (it < 0) ranked.size else it }
+            val at = minOf(strong.coerceIn(1, PARTIAL_SINGLE_AT), ranked.size - singles.size)
             if (singles.isNotEmpty() && ranked.indexOf(singles.last()) > at + singles.size - 1) {
                 ranked.removeAll(singles.toSet())
                 ranked.addAll(minOf(at, ranked.size), singles)
-                trace?.add("首音節的單字穿插：${singles.joinToString("")} 從第 ${at + 1} 個開始")
             }
         }
         // 句尾只打了一個聲母（ㄓ、ㄅ）：可能是簡拼的字（之、吧），也可能是下一個詞剛開始打。整句照樣排第一，
@@ -1725,7 +1724,6 @@ class ScorpioDictManager private constructor(private val context: Context) {
             if (head.isNotEmpty() && head != ranked.first()) {
                 ranked.remove(head)
                 ranked.add(minOf(TRAIL_HEAD_POSITION, ranked.size), head)
-                trace?.add("句尾單打聲母：前面那句「$head」排第 ${minOf(TRAIL_HEAD_POSITION, ranked.size - 1) + 1} 個")
             }
         }
         // 中間多按了一個鍵：完整的音節後面夾了一個單打聲母（ㄅㄨㄟ-ㄅㄨ-ㄘ-ㄉ 的 ㄘ），而它單獨也是字（次），不會被當成拼不起來修掉。
@@ -1743,7 +1741,6 @@ class ScorpioDictManager private constructor(private val context: Context) {
             }
             val first = pool[ranked[0]] ?: Double.NEGATIVE_INFINITY
             drop?.let { (text, v) ->
-                trace?.add("多按一個鍵：刪掉後「$text」%.2f（第一名 %.2f）".format(v, first))
                 if (v > first - EXTRA_KEY_PENALTY && text !in ranked.take(2)) {
                     ranked.remove(text)
                     ranked.add(minOf(2, ranked.size), text)

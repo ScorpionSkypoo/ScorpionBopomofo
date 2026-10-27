@@ -10,6 +10,9 @@ import android.graphics.Typeface
 import android.inputmethodservice.InputMethodService
 import android.inputmethodservice.InputMethodService.Insets
 import android.os.Build
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
 import android.view.ContextThemeWrapper
 import android.view.Gravity
 import android.view.HapticFeedbackConstants
@@ -133,6 +136,8 @@ class ScorpioImeService : InputMethodService() {
     // 倉頡／速成每一碼的落點（QWERTY 落點學習用）
     private val codeTouches = mutableListOf<BopomofoComposer.TouchPoint>()
     private var isVibrationEnabled = false
+    private var vibrator: Vibrator? = null
+    private var clickVibrationEffect: VibrationEffect? = null
     private var lastNightMode = Configuration.UI_MODE_NIGHT_UNDEFINED
     private var keyboardRootView: View? = null
 
@@ -216,6 +221,21 @@ class ScorpioImeService : InputMethodService() {
         // App 更新：每天在背景問一次 GitHub 有沒有新版（設定可關）
         com.p3dro.scorpio.ime.engine.AppUpdater.schedule(this)
         isVibrationEnabled = prefs.getBoolean("vibrate_on_keypress", false)
+        val vib = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            getSystemService(VibratorManager::class.java)?.defaultVibrator
+        } else {
+            @Suppress("DEPRECATION")
+            getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+        }
+        vibrator = vib?.takeIf { it.hasVibrator() }
+        clickVibrationEffect = if (
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
+            vibrator?.areAllEffectsSupported(VibrationEffect.EFFECT_CLICK) == Vibrator.VIBRATION_EFFECT_SUPPORT_YES
+        ) {
+            VibrationEffect.createPredefined(VibrationEffect.EFFECT_CLICK)
+        } else {
+            VibrationEffect.createOneShot(20L, VibrationEffect.DEFAULT_AMPLITUDE)
+        }
         ui = buildThemedContext()
     }
 
@@ -691,7 +711,12 @@ class ScorpioImeService : InputMethodService() {
     }
 
     private fun triggerHaptic(view: View) {
-        if (isVibrationEnabled) {
+        if (!isVibrationEnabled) return
+        val vib = vibrator
+        val effect = clickVibrationEffect
+        if (vib != null && effect != null) {
+            vib.vibrate(effect)
+        } else {
             view.isHapticFeedbackEnabled = true
             view.performHapticFeedback(
                 HapticFeedbackConstants.KEYBOARD_TAP,

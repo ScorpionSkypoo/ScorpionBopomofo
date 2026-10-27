@@ -42,9 +42,9 @@ class QwertyModel(val layout: KeyboardLayout = KeyboardLayout.QWERTY) {
     private fun bias(key: Char): Pair<Double, Double> {
         val general = habits.effectiveBias(key)
         val ph = postureHabits.getOrNull(posture - 1) ?: return general
-        val (pgx, pgy) = ph.globalEffective()
-        val (gx, gy) = habits.globalEffective()
-        return ph.biasToward(key, (general.first + pgx - gx) to (general.second + pgy - gy))
+        val g = habits.globalEffective()
+        val (pgx, pgy) = ph.globalToward(g)
+        return ph.biasToward(key, (general.first + pgx - g.first) to (general.second + pgy - g.second))
     }
 
     /** 落點的鍵盤座標；不是字母鍵（數字、符號）回傳 null */

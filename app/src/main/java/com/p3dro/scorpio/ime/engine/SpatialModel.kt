@@ -172,9 +172,9 @@ class SpatialModel {
     fun effectiveBias(key: Char, posture: Int): Pair<Double, Double> {
         val general = habits.effectiveBias(key)
         val ph = postureHabits.getOrNull(posture - 1) ?: return general
-        val (pgx, pgy) = ph.globalEffective()
-        val (gx, gy) = habits.globalEffective()
-        return ph.biasToward(key, (general.first + pgx - gx) to (general.second + pgy - gy))
+        val g = habits.globalEffective()
+        val (pgx, pgy) = ph.globalToward(g)
+        return ph.biasToward(key, (general.first + pgx - g.first) to (general.second + pgy - g.second))
     }
 
     /** 從 from 移到 key 時，移動造成的偏差（沒有上一下時是 0） */
