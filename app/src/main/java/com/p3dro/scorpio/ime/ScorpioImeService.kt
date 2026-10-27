@@ -2480,10 +2480,13 @@ class ScorpioImeService : InputMethodService() {
                 (info.inputType and EditorInfo.TYPE_TEXT_FLAG_MULTI_LINE) != 0
             val noEnterAction = (imeOptions and EditorInfo.IME_FLAG_NO_ENTER_ACTION) != 0
             when {
-                // 多行輸入框（聊天、備忘錄）一律換行；直接送出換行字元，避免 App 把 Enter 按鍵事件當成送出
-                multiLine || noEnterAction -> currentInputConnection?.commitText("\n", 1)
+                // App 說 Enter 不做動作（一般多行輸入框：聊天、備忘錄，系統的 TextView 會自動加這個旗標）就換行；
+                // 直接送出換行字元，避免 App 把 Enter 按鍵事件當成送出
+                noEnterAction -> currentInputConnection?.commitText("\n", 1)
+                // 有指定動作就照做，多行也一樣（比照 Gboard：Google App 的搜尋框是多行、動作是搜尋，按 Enter 要搜尋）
                 action != EditorInfo.IME_ACTION_NONE && action != EditorInfo.IME_ACTION_UNSPECIFIED ->
                     currentInputConnection?.performEditorAction(action)
+                multiLine -> currentInputConnection?.commitText("\n", 1)
                 else -> sendKeyChar('\n')
             }
         }
