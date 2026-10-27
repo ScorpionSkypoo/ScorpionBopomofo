@@ -50,4 +50,38 @@ class ChineseMethodTest {
         assertNull(ChineseMethod.parse(dvorak.replace("pyfgcrl", "pyfgcrlー")))
         assertNull(ChineseMethod.parse(dvorak.replace("\"columns\":", "").replace("{\"numberRow\"", "{\"columns\":20,\"numberRow\"")))
     }
+
+    // 資料 repo 的 layouts/dachen_samsung.json：大千注音、三星鍵盤的鍵位
+    private val samsung = """{"schema":2,"id":"dachen_samsung","name":"注音（大千・三星鍵位）","spaceLabel":"注音·三星","engine":"dachen","minAppVersion":174,"sort":5,"keys":{"columns":11,"rows":["ㄅㄉˇˋㄓˊ˙ㄚㄞㄢㄦ","ㄆㄊㄍㄐㄔㄗㄧㄛㄟㄣ","ㄇㄋㄎㄑㄕㄘㄨㄜㄠㄤ",["ㄈㄌㄏㄒㄖㄙㄩㄝㄡㄥ",{"special":"backspace"}]]}}"""
+
+    @Test
+    fun dachenWithDeclaredKeys() {
+        val m = ChineseMethod.parse(samsung)!!
+        assertEquals(ChineseMethod.Engine.DACHEN, m.engine)
+        assertEquals(false, m.usesQwerty)
+        assertNull(m.decoderKind)
+        val l = m.zhuyinLayout
+        assertEquals(11, l.columns)
+        assertEquals(41, l.centers.size)
+        // 第 1 排 11 鍵貼滿、ㄦ 在右上角；第 2、3 排錯開半鍵；第 4 排 10 鍵加刪除鍵
+        assertEquals(10.0 to 0.0, l.centers['ㄦ'])
+        assertEquals(0.5 to 1.0, l.centers['ㄆ'])
+        assertEquals(6.5 to 2.0, l.centers['ㄨ'])
+        assertEquals(0.0 to 3.0, l.centers['ㄈ'])
+        assertEquals(KeyboardLayout.Type.BACKSPACE, l.rows[3].last().type)
+        // 內建的大千沒有宣告，用內建 10×4
+        assertEquals(KeyboardLayout.DACHEN, ChineseMethod.DACHEN.zhuyinLayout)
+    }
+
+    @Test
+    fun rejectsBadDachenLayouts() {
+        // 大千一定要宣告字鍵排；字鍵要剛好是 41 個注音符號與聲調；不能有 Shift；id 不能是內建的 dachen
+        assertNull(ChineseMethod.parse("""{"id":"x","name":"x","engine":"dachen"}"""))
+        assertNull(ChineseMethod.parse(samsung.replace("ㄞㄢㄦ", "ㄞㄢ")))
+        assertNull(ChineseMethod.parse(samsung.replace("ㄞㄢㄦ", "ㄞㄢㄦa")))
+        assertNull(ChineseMethod.parse(samsung.replace("[\"ㄈ", "[{\"special\":\"shift\"},\"ㄈ")))
+        assertNull(ChineseMethod.parse(samsung.replace("dachen_samsung", "dachen")))
+        // 26 鍵的引擎不能用注音字鍵
+        assertNull(ChineseMethod.parse(samsung.replace("\"engine\":\"dachen\"", "\"engine\":\"pinyin\"")))
+    }
 }

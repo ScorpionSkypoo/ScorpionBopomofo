@@ -17,6 +17,7 @@ import kotlin.math.hypot
  * 2. 整個網格 100% 空間無縫映射：即便手指落在 2.5dp 間隙或排距中，亦由 2D Voronoi 座標定位至最近按鍵
  * 3. 採集即時相對中心位移 (offsetX, offsetY)，精確驅動高斯分佈與鄰鍵動態權重
  * 4. 支援多點觸控（雙手拇指極速輪流敲擊不衝突、不吞鍵）
+ * 5. 排裡不是注音鍵的鍵（宣告的版面把刪除鍵放在字鍵區，例如三星的鍵位）不參與定位，按在它上面時觸控交還給它自己（長按連刪等）
  */
 class ZhuyinGridLayout @JvmOverloads constructor(
     context: Context,
@@ -53,16 +54,38 @@ class ZhuyinGridLayout @JvmOverloads constructor(
         isFocusable = true
     }
 
+    /** 這一串觸控是從注音鍵以外的鍵（刪除鍵）開始的：整串交給那個鍵 */
+    private var passThrough = false
+
     override fun onInterceptTouchEvent(ev: MotionEvent): Boolean {
-        // 完全攔截網格內觸控，由空間座標定位系統統籌處理
-        return true
+        // 按在刪除鍵這類功能鍵上：交給它自己；其餘完全攔截，由空間座標定位系統統籌處理
+        when (ev.actionMasked) {
+            MotionEvent.ACTION_DOWN -> passThrough = isOnOtherKey(ev.x, ev.y)
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> if (passThrough) {
+                passThrough = false
+                return false
+            }
+        }
+        return !passThrough
+    }
+
+    private fun isOnOtherKey(x: Float, y: Float): Boolean {
+        for (row in rowViews) for (j in 0 until row.childCount) {
+            val v = row.getChildAt(j)
+            if (v is ZhuyinKeyView || v.visibility != View.VISIBLE) continue
+            val left = row.left + v.left
+            val top = row.top + v.top
+            if (x >= left && x < left + v.width && y >= top && y < top + v.height) return true
+        }
+        return false
     }
 
     override fun onLayout(changed: Boolean, l: Int, t: Int, r: Int, b: Int) {
         super.onLayout(changed, l, t, r, b)
         rebuildKeyGrid()
         val row = keyGrid.firstOrNull()
-        if (changed && row != null && row.size >= 2 && rowViews.size >= 2 && row[0].width > 0 && row[0].height > 0) {
+        // 每次排版都量（換版面時網格大小不變、但鍵寬變了，例如 10 欄換成 11 欄）
+        if (row != null && row.size >= 2 && rowViews.size >= 2 && row[0].width > 0 && row[0].height > 0) {
             val rx = (row[1].left - row[0].left) / (row[0].width / 2.0)
             val ry = (rowViews[1].top - rowViews[0].top) / (row[0].height / 2.0)
             onPitchMeasured?.invoke(rx, ry)

@@ -31,13 +31,16 @@ data class ChineseMethod(
     /** 語言（BCP 47）與顯示名稱：設定頁「新增輸入法」先選語言再選版面 */
     val language: String = "zh-TW",
     val languageName: String = "中文（台灣）",
-    /** QWERTY 面板的字鍵排（schema 2）；null 是內建 QWERTY */
+    /** 字鍵排（schema 2）：QWERTY 面板的，或大千注音鍵盤的（例如三星的鍵位）；null 是內建的 QWERTY／大千 */
     val keys: KeyboardLayout? = null
 ) {
 
     enum class Engine(val id: String) { DACHEN("dachen"), ZHUYIN26("zhuyin26"), PINYIN("pinyin"), CANGJIE("cangjie"), QUICK("quick") }
 
     val usesQwerty: Boolean get() = engine != Engine.DACHEN
+
+    /** 大千注音鍵盤的字鍵排：有宣告就照宣告（ㄦ、刪除鍵在字鍵區，最下排跟英文一樣），沒有就是內建的 10×4 */
+    val zhuyinLayout: KeyboardLayout get() = if (engine == Engine.DACHEN) keys ?: KeyboardLayout.DACHEN else KeyboardLayout.DACHEN
     val isPinyin: Boolean get() = engine == Engine.PINYIN
 
     /** 倉頡、速成：查碼表，不經注音 */
@@ -69,14 +72,16 @@ data class ChineseMethod(
         /** 解析版面 JSON；格式不對、或是這版 App 不認得的打字方式回傳 null（新版面在舊 App 上不會出錯） */
         fun parse(json: String): ChineseMethod? = try {
             val o = JSONObject(json)
-            val engine = Engine.entries.firstOrNull { it.id == o.optString("engine") && it != Engine.DACHEN }
+            val engine = Engine.entries.firstOrNull { it.id == o.optString("engine") }
             val id = o.getString("id")
             val keymap = o.optString("keymap").ifEmpty { null }
             val keys = o.optJSONObject("keys")?.let { KeyboardLayout.parse(it) ?: return null }
             when {
                 o.optInt("schema", 1) > SCHEMA || engine == null || !ID.matches(id) || id == DACHEN.id -> null
                 engine == Engine.ZHUYIN26 && (keymap == null || !LetterDecoder.isValidKeymap(keymap)) -> null
-                keys != null && keys.centers.keys != LETTERS -> null
+                // 大千：一定要宣告字鍵排（內建的 10×4 就是 dachen 本身），字鍵是 41 個注音符號與聲調、不能有 Shift
+                engine == Engine.DACHEN && (keys == null || !keys.isZhuyin) -> null
+                engine != Engine.DACHEN && keys != null && keys.centers.keys != LETTERS -> null
                 else -> ChineseMethod(
                     id, o.getString("name"), o.optString("spaceLabel").ifEmpty { o.getString("name") }, o.optString("description", ""),
                     engine, keymap, o.optString("version", ""),

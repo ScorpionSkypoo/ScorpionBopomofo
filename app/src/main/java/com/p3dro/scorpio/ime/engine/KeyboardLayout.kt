@@ -37,6 +37,9 @@ class KeyboardLayout private constructor(
         }
     }
 
+    /** 大千注音的字鍵排：字鍵剛好是 41 個注音符號與聲調（含 ㄦ），沒有 Shift（宣告的大千版面，例如三星的鍵位） */
+    val isZhuyin: Boolean get() = centers.keys == ZHUYIN_KEYS && rows.none { r -> r.any { it.type == Type.SHIFT } }
+
     /** 字鍵寬度（欄）：觸控偏移以半個鍵寬為 1，寬的鍵換算成鍵距要乘上寬度 */
     val widths: Map<Char, Double> by lazy {
         buildMap { for (row in rows) for (k in row) if (k.char != null) put(k.char, k.width) }
@@ -159,6 +162,9 @@ class KeyboardLayout private constructor(
                 r.mapIndexed { i, c -> Key(Type.CHAR, c, i.toDouble(), 1.0) }
             }
         )
+
+        /** 宣告的大千版面要有的字鍵：內建 10×4 的 40 個鍵加上 ㄦ（內建的 ㄦ 在最下排） */
+        val ZHUYIN_KEYS: Set<Char> = DACHEN.centers.keys + 'ㄦ'
 
         /** 英文 QWERTY（數字列＋三排，第 3 排 Shift 1.4、刪除 1.6，跟原本的版面檔一樣） */
         val QWERTY: KeyboardLayout = builtIn(

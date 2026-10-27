@@ -38,6 +38,12 @@ class KeyRowLayout @JvmOverloads constructor(
         requestLayout()
     }
 
+    /** 回到一般 LinearLayout 的排法（內建大千 10×4 用權重平分，像素跟原本完全一樣） */
+    fun clearColumnSpans() {
+        columnSpans = null
+        requestLayout()
+    }
+
     /** 按鍵左右各 2.5dp，跟版面檔一樣四捨五入 */
     private val keyMargin = (2.5f * resources.displayMetrics.density + 0.5f).toInt()
 

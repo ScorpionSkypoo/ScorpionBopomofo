@@ -227,7 +227,7 @@
             android:orientation="vertical">
 
             <!-- 第 1 排 (44dp) -->
-            <LinearLayout
+            <com.p3dro.scorpio.ime.ui.KeyRowLayout
                 android:id="@+id/row_1"
                 android:layout_width="match_parent"
                 android:layout_height="44dp"
@@ -235,7 +235,7 @@
                 android:weightSum="10" />
 
             <!-- 第 2 排 (44dp) -->
-            <LinearLayout
+            <com.p3dro.scorpio.ime.ui.KeyRowLayout
                 android:id="@+id/row_2"
                 android:layout_width="match_parent"
                 android:layout_height="44dp"
@@ -244,7 +244,7 @@
                 android:weightSum="10" />
 
             <!-- 第 3 排 (44dp) -->
-            <LinearLayout
+            <com.p3dro.scorpio.ime.ui.KeyRowLayout
                 android:id="@+id/row_3"
                 android:layout_width="match_parent"
                 android:layout_height="44dp"
@@ -253,7 +253,7 @@
                 android:weightSum="10" />
 
             <!-- 第 4 排 (44dp) -->
-            <LinearLayout
+            <com.p3dro.scorpio.ime.ui.KeyRowLayout
                 android:id="@+id/row_4"
                 android:layout_width="match_parent"
                 android:layout_height="44dp"

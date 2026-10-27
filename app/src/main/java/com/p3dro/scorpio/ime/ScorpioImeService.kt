@@ -411,11 +411,8 @@ class ScorpioImeService : InputMethodService() {
             }
         }
 
-        // 建置注音鍵盤：照版面宣告（KeyboardLayout.DACHEN）的四排
-        val zhuyinRows = listOf(R.id.row_1, R.id.row_2, R.id.row_3, R.id.row_4)
-        for ((i, row) in com.p3dro.scorpio.ime.engine.KeyboardLayout.DACHEN.rows.withIndex()) {
-            setupRow(root.findViewById(zhuyinRows[i]), row.mapNotNull { it.char })
-        }
+        // 注音鍵盤的四排照版面宣告排（setKeyboardMode 時依目前的輸入法換：內建 10×4，或宣告的版面，例如三星的鍵位）
+        renderedZhuyinLayout = null
 
         val gridZhuyin = root.findViewById<com.p3dro.scorpio.ime.ui.ZhuyinGridLayout>(R.id.grid_zhuyin)
         gridZhuyin.rebuildKeyGrid()
@@ -748,6 +745,7 @@ class ScorpioImeService : InputMethodService() {
         }
 
         val qwertyChinese = mode == KeyboardMode.ZHUYIN && chineseMethod.usesQwerty
+        if (mode == KeyboardMode.ZHUYIN && !qwertyChinese) applyZhuyinLayout(chineseMethod.zhuyinLayout)
         panelZhuyin?.visibility = if (mode == KeyboardMode.ZHUYIN && !qwertyChinese) View.VISIBLE else View.GONE
         panelEnglish?.visibility = if (mode == KeyboardMode.ENGLISH || qwertyChinese) View.VISIBLE else View.GONE
         if (mode == KeyboardMode.ENGLISH || qwertyChinese) applyQwertyLayout(currentQwertyLayout())
@@ -775,6 +773,73 @@ class ScorpioImeService : InputMethodService() {
         }
         updateBarVisibility()
         arrangeIdleBar()
+    }
+
+    /** 大千鍵盤目前畫的版面（null 是還沒畫） */
+    private var renderedZhuyinLayout: com.p3dro.scorpio.ime.engine.KeyboardLayout? = null
+
+    /** 大千鍵盤的最下排是英文那種排法（宣告的版面把 ㄦ、刪除鍵放在字鍵區）：空白鍵右邊是句號，符號鍵盤也照英文的排 */
+    private val zhuyinBottomLikeQwerty: Boolean get() = renderedZhuyinLayout.let { it != null && it != com.p3dro.scorpio.ime.engine.KeyboardLayout.DACHEN }
+
+    /**
+     * 依版面宣告畫大千鍵盤的四排：內建 10×4 照原本的權重平分（像素跟原本一樣），ㄦ、刪除鍵在最下排；
+     * 宣告的版面（三星的鍵位：第 1 排 11 鍵含 ㄦ、第 2、3 排錯開半鍵、刪除鍵在第 4 排最右邊）每個鍵照欄位精確排，
+     * 刪除鍵搬到宣告的位置，最下排改成跟英文一樣（ㄦ 那一鍵改成句號）。
+     * 落點模型（dictManager.spatial）同時換成這個版面的鍵位與那一組的習慣
+     */
+    private fun applyZhuyinLayout(layout: com.p3dro.scorpio.ime.engine.KeyboardLayout) {
+        dictManager.useZhuyinLayout(layout)
+        if (renderedZhuyinLayout == layout) return
+        val root = keyboardRootView ?: return
+        renderedZhuyinLayout = layout
+        lastZhuyinTap = null
+        val builtIn = layout == com.p3dro.scorpio.ime.engine.KeyboardLayout.DACHEN
+        val backspace = root.findViewById<View>(R.id.btn_backspace) ?: return
+        val bottom = root.findViewById<com.p3dro.scorpio.ime.ui.KeyRowLayout>(R.id.row_5) ?: return
+        (backspace.parent as? ViewGroup)?.removeView(backspace)
+        zhuyinKeyViews.clear()
+        val rowIds = listOf(R.id.row_1, R.id.row_2, R.id.row_3, R.id.row_4)
+        for ((r, id) in rowIds.withIndex()) {
+            val row = root.findViewById<com.p3dro.scorpio.ime.ui.KeyRowLayout>(id)
+            val keys = layout.rows.getOrNull(r).orEmpty()
+            setupRow(row, keys.mapNotNull { it.char })
+            if (builtIn) {
+                row.clearColumnSpans()
+                continue
+            }
+            val at = keys.indexOfFirst { it.type == com.p3dro.scorpio.ime.engine.KeyboardLayout.Type.BACKSPACE }
+            if (at >= 0) row.addView(backspace, at)
+            row.setColumnSpans(layout.columns, keys.map { it.start to it.width })
+        }
+        // 內建版面：刪除鍵回到最下排 ㄦ 的右邊
+        if (builtIn) bottom.addView(backspace, bottom.indexOfChild(root.findViewById(R.id.btn_er)) + 1)
+        bottom.segments = if (builtIn) com.p3dro.scorpio.ime.ui.KeyRowLayout.ZHUYIN else com.p3dro.scorpio.ime.ui.KeyRowLayout.QWERTY
+        bindErKey(root, asPeriod = !builtIn)
+        root.findViewById<com.p3dro.scorpio.ime.ui.ZhuyinGridLayout>(R.id.grid_zhuyin)?.rebuildKeyGrid()
+    }
+
+    /** 最下排 ㄦ 那一鍵：內建版面是 ㄦ（點一下是注音，長按直接輸入「ㄦ」這個符號）；ㄦ 在字鍵區的版面改成句號 */
+    private fun bindErKey(root: View, asPeriod: Boolean) {
+        val er = root.findViewById<ViewGroup>(R.id.btn_er) ?: return
+        (er.getChildAt(0) as? TextView)?.text = if (asPeriod) "。" else "ㄦ"
+        if (asPeriod) {
+            er.setOnTouchListener(null)
+            er.setOnClickListener {
+                triggerHaptic(it)
+                commitChinesePunctuation("。")
+            }
+            return
+        }
+        er.setOnTouchListener(longPressKeyTouchListener("ㄦ", onTap = {
+            val (ox, oy) = erTouchOffset(er, root.findViewById(R.id.grid_zhuyin))
+            onZhuyinKeyPressed('ㄦ', ox, oy)
+        }, onLong = {
+            if (composer.isComposing) {
+                clearComposer(discardComposingText = true)
+            }
+            currentInputConnection?.commitText("ㄦ", 1)
+            updateBarVisibility()
+        }))
     }
 
     private fun setupRow(rowLayout: LinearLayout, keys: List<Char>) {
@@ -914,18 +979,8 @@ class ScorpioImeService : InputMethodService() {
             }
         }
 
-        // ㄦ：點一下是注音，長按（放開時）直接輸入「ㄦ」這個符號
-        val erKey = root.findViewById<View>(R.id.btn_er)
-        erKey.setOnTouchListener(longPressKeyTouchListener("ㄦ", onTap = {
-            val (ox, oy) = erTouchOffset(erKey, root.findViewById(R.id.grid_zhuyin))
-            onZhuyinKeyPressed('ㄦ', ox, oy)
-        }, onLong = {
-            if (composer.isComposing) {
-                clearComposer(discardComposingText = true)
-            }
-            currentInputConnection?.commitText("ㄦ", 1)
-            updateBarVisibility()
-        }))
+        // ㄦ：點一下是注音，長按（放開時）直接輸入「ㄦ」這個符號（ㄦ 在字鍵區的版面改成句號，見 applyZhuyinLayout）
+        bindErKey(root, asPeriod = false)
 
         root.findViewById<View>(R.id.btn_backspace).setOnTouchListener(RepeatTouchListener {
             triggerHaptic(root)
@@ -3297,6 +3352,8 @@ class ScorpioImeService : InputMethodService() {
 
         // 版面照切過來的那個鍵盤：大千注音鍵盤（底排有 ㄦ 與刪除鍵）或 QWERTY（英文、26 鍵注音、拼音）
         val fromZhuyinPanel = chinese && !chineseMethod.usesQwerty
+        // 最下排照切過來的鍵盤：大千注音（底排有 ㄦ 與刪除鍵）；ㄦ、刪除鍵在字鍵區的大千版面（三星的鍵位）最下排跟英文一樣
+        val bottomLikeZhuyin = fromZhuyinPanel && !zhuyinBottomLikeQwerty
 
         // 整個符號鍵盤跟「切過來的那個鍵盤」同高（實際量到的高度；尚未量到時用另一個，再沒有用 5 排的設計值），切換時畫面不跳動。
         // 按鍵跟來源鍵盤一樣高（少一排多出來的高度平均分給排距，按鍵不加高）；除不盡的像素給最後一個排距，最下排跟來源鍵盤的最下排對齊
@@ -3388,7 +3445,7 @@ class ScorpioImeService : InputMethodService() {
         // 第 4 排（比照 Gboard）：返回、逗號（第 2 頁是 <）、數字鍵盤 1234、空白、句號（第 2 頁是 >）、Enter，
         // 跟注音／英文鍵盤最下排同一組鍵位（KeyRowLayout）：英文／QWERTY 一鍵對一鍵；從大千注音來的空白鍵蓋住空白＋ㄦ、句號在刪除鍵的位置
         val bottomRow = newRow(3, 10.4f, com.p3dro.scorpio.ime.ui.KeyRowLayout(ui).apply {
-            segments = if (fromZhuyinPanel) com.p3dro.scorpio.ime.ui.KeyRowLayout.SYMBOLS_FROM_ZHUYIN else com.p3dro.scorpio.ime.ui.KeyRowLayout.QWERTY
+            segments = if (bottomLikeZhuyin) com.p3dro.scorpio.ime.ui.KeyRowLayout.SYMBOLS_FROM_ZHUYIN else com.p3dro.scorpio.ime.ui.KeyRowLayout.QWERTY
         })
         bottomRow.addView(functionKey(1.4f, R.attr.imeKeyFunctionDrawable).apply {
             addView(bottomRowLabel(if (chinese) "返回" else "ABC", 14f))
@@ -3423,7 +3480,7 @@ class ScorpioImeService : InputMethodService() {
                 setKeyboardMode(KeyboardMode.NUMPAD)
             }
         })
-        bottomRow.addView(functionKey(if (fromZhuyinPanel) 4.2f else 4.7f, R.attr.imeKeyDrawable).apply {
+        bottomRow.addView(functionKey(if (bottomLikeZhuyin) 4.2f else 4.7f, R.attr.imeKeyDrawable).apply {
             // 空白鍵的字跟切過來的鍵盤一樣（注音／English…）
             addView(bottomRowLabel(if (chinese) chineseMethod.spaceLabel else "English", 13f, R.color.ime_text_secondary))
             setOnClickListener {
@@ -3431,7 +3488,7 @@ class ScorpioImeService : InputMethodService() {
                 currentInputConnection?.commitText(" ", 1)
             }
         })
-        bottomRow.addView(bottomSymbolKey(right, if (fromZhuyinPanel) 1.5f else 1.0f))
+        bottomRow.addView(bottomSymbolKey(right, if (bottomLikeZhuyin) 1.5f else 1.0f))
         bottomRow.addView(functionKey(1.5f, R.attr.imeKeyActionDrawable).apply {
             addView(bottomRowIcon(R.drawable.ic_ime_enter, tint = false))
             setOnClickListener {

@@ -239,4 +239,61 @@ class SpatialModelTest {
         assertEquals(general.first, two.first, 1e-9)
         assertEquals(general.second, two.second, 1e-9)
     }
+
+    private val samsungLayout = ChineseMethod.parse(
+        """{"schema":2,"id":"dachen_samsung","name":"注音（大千・三星鍵位）","spaceLabel":"注音·三星","engine":"dachen","minAppVersion":174,"sort":5,"keys":{"columns":11,"rows":["ㄅㄉˇˋㄓˊ˙ㄚㄞㄢㄦ","ㄆㄊㄍㄐㄔㄗㄧㄛㄟㄣ","ㄇㄋㄎㄑㄕㄘㄨㄜㄠㄤ",["ㄈㄌㄏㄒㄖㄙㄩㄝㄡㄥ",{"special":"backspace"}]]}}"""
+    )!!.zhuyinLayout
+
+    @Test
+    fun builtInNeighboursAreTheOriginalGrid() {
+        // 內建 10×4：鄰鍵跟原本寫死的格子八方向一樣（順序也一樣：上一排、同一排、下一排，各由左到右；第 4 排 ㄙㄩㄝ 下面多最底排的 ㄦ）
+        val grid = listOf("ㄅㄉˇˋㄓˊ˙ㄚㄞㄢ", "ㄆㄊㄍㄐㄔㄗㄧㄛㄟㄣ", "ㄇㄋㄎㄑㄕㄘㄨㄜㄠㄤ", "ㄈㄌㄏㄒㄖㄙㄩㄝㄡㄥ")
+        val m = model()
+        for (r in grid.indices) for (c in grid[r].indices) {
+            val expected = ArrayList<Char>()
+            for (dr in -1..1) for (dc in -1..1) {
+                if (dr == 0 && dc == 0) continue
+                grid.getOrNull(r + dr)?.getOrNull(c + dc)?.let { expected.add(it) }
+            }
+            if (r == 3 && c in 5..7) expected.add('ㄦ')
+            assertEquals(expected, m.neighborPenalties(TouchPoint(grid[r][c])).map { it.first })
+        }
+    }
+
+    @Test
+    fun samsungRowsAreStaggered() {
+        val m = model()
+        assertTrue(m.useLayout(samsungLayout, null))
+        assertEquals(false, m.useLayout(samsungLayout, null))
+        // ㄧ（第 2 排，錯開半鍵）：上面是 ˙ 和 ㄚ，下面是 ㄘ ㄨ ㄜ（第 3 排跟第 2 排對齊）
+        val p = m.neighborPenalties(TouchPoint('ㄧ'))
+        assertEquals(listOf('˙', 'ㄚ', 'ㄗ', 'ㄛ', 'ㄘ', 'ㄨ', 'ㄜ'), p.map { it.first })
+        // 斜上方差半鍵，比內建 10×4 的斜角便宜
+        assertTrue(p.penaltyOf('ㄚ') < 2.2)
+        assertEquals(p.penaltyOf('˙'), p.penaltyOf('ㄚ'), 1e-9)
+        // ㄦ 在字鍵區，有落點、鄰鍵
+        assertEquals(listOf('ㄢ', 'ㄣ'), m.neighborPenalties(TouchPoint('ㄦ')).map { it.first })
+        // 第 4 排：ㄩ 上面是 ㄘ 和 ㄨ
+        assertTrue(m.neighborPenalties(TouchPoint('ㄩ')).map { it.first }.containsAll(listOf('ㄘ', 'ㄨ')))
+        // 偏向右上就判成 ㄚ
+        assertEquals('ㄚ', m.neighborPenalties(TouchPoint('ㄧ', 0.6f, -1.0f)).minByOrNull { it.second }!!.first)
+    }
+
+    @Test
+    fun switchingLayoutMovesHabitsByPosition() {
+        val m = model()
+        repeat(30) { m.learn('ㄨ', TouchPoint('ㄨ', 0f, 0.5f)) }
+        val before = m.effectiveBias('ㄨ').second
+        assertTrue(before > 0.1)
+        // 第一次用三星鍵位：ㄨ 搬到同一個字的新位置（最近的舊鍵），樣本減半但偏移一樣
+        m.useLayout(samsungLayout, null)
+        assertEquals(before, m.effectiveBias('ㄨ').second, 0.05)
+        val samsungData = m.serialize()
+        // 切回內建：用內建那一組存的資料（這裡模擬沒學過）
+        m.useLayout(KeyboardLayout.DACHEN, "")
+        assertEquals(0.0, m.effectiveBias('ㄨ').second, 1e-9)
+        // 再切到三星：用三星那一組存的
+        m.useLayout(samsungLayout, samsungData)
+        assertEquals(before, m.effectiveBias('ㄨ').second, 0.05)
+    }
 }

@@ -13,11 +13,13 @@ import kotlin.math.abs
  *    且落點本來就靠近兩鍵交界，就改判為旁邊的鍵；落點在鍵中央時尊重實際按下的鍵
  *
  * 觸控偏移單位沿用 ZhuyinGridLayout：相對「實際按下鍵」中心、以半個鍵寬／鍵高為 1
+ *
+ * 鍵的位置照目前大千鍵盤的版面宣告（useLayout）：內建的 10×4，或宣告的版面（三星的鍵位：第 1 排 11 鍵、第 2、3 排錯開半鍵）
  */
 class SpatialModel {
 
     companion object {
-        // 大千注音 10x4 按鍵位置：來自版面宣告（KeyboardLayout.DACHEN），鍵盤畫面也照它排
+        // 內建大千 10×4 的按鍵排列（KeyboardLayout.DACHEN）；目前用哪個版面看 layout
         val GRID: List<List<Char>> = KeyboardLayout.DACHEN.rows.map { row -> row.mapNotNull { it.char } }
 
         // 半鍵單位 → 鍵距單位（鍵寬含左右 2.5dp 間距，約 2.3 個半鍵；鍵高含排距約 2.2 個半鍵）
@@ -44,30 +46,62 @@ class SpatialModel {
         private const val P_NEW_AFTER_PARTIAL = 0.1
 
         /**
-         * ㄦ 在最底排（符號、逗號、地球、空白之後）：欄位比例照 KeyRowLayout.SLOTS（總和 10.4，跟上面 10 個注音鍵同寬），
+         * 內建版面的 ㄦ 在最底排（符號、逗號、地球、空白之後）：欄位比例照 KeyRowLayout.SLOTS（總和 10.4，跟上面 10 個注音鍵同寬），
          * 換成注音鍵的欄（ㄩ 的正下方偏右一點）
          */
         private const val ER_COLUMN = (1.4 + 0.9 + 0.9 + 3.3 + 0.9 / 2) / 10.4 * 10 - 0.5
 
-        /** 每個鍵的中心（列, 欄），鍵距單位：大千 4 排加上最底排的 ㄦ */
-        private val POS: Map<Char, Pair<Double, Double>> = buildMap {
-            for (r in GRID.indices) for (c in GRID[r].indices) put(GRID[r][c], r.toDouble() to c.toDouble())
-            put('ㄦ', GRID.size.toDouble() to ER_COLUMN)
-        }
-
-        /** 設定頁畫落點圖用：每個鍵的中心（欄, 列） */
-        val KEY_CENTERS: Map<Char, Pair<Double, Double>> = POS.mapValues { (_, rc) -> rc.second to rc.first }
-
-        /** 鍵盤有幾排（含最底排） */
-        val ROWS = GRID.size + 1
-
-        /** 每個鍵四周（上下左右與斜角，不到一個半鍵距）的鍵，照列、欄排 */
-        private val NEIGHBORS: Map<Char, List<Char>> = POS.mapValues { (k, rc) ->
-            POS.filter { (o, p) -> o != k && abs(p.first - rc.first) < 1.5 && abs(p.second - rc.second) < 1.5 }
-                .entries.sortedWith(compareBy({ it.value.first }, { it.value.second })).map { it.key }
-        }
-
         fun isTone(c: Char) = BopomofoComposer.TONES.contains(c)
+    }
+
+    /**
+     * 鍵位：字 → 中心（鍵距單位，x 以第一欄的鍵為 0、y 是第幾排）、鍵寬（欄），與鄰鍵。
+     * 鄰鍵是上下一排以內、左右一個鍵距以內的鍵，依排、再依左右排序：內建 10×4 就是原本格子的八方向（加上最底排的 ㄦ）；
+     * 錯開半鍵的排（三星）上下各兩個
+     */
+    private class Geometry(val layout: KeyboardLayout) {
+        val pos: Map<Char, Pair<Double, Double>> =
+            if ('ㄦ' in layout.centers) layout.centers else layout.centers + ('ㄦ' to (ER_COLUMN to layout.rows.size.toDouble()))
+        val rows: Int = if ('ㄦ' in layout.centers) layout.rows.size else layout.rows.size + 1
+        val widths: Map<Char, Double> = layout.widths
+        val neighbors: Map<Char, List<Char>> = pos.mapValues { (k, p) ->
+            pos.entries.filter { (c, q) ->
+                val maxDx = if ('ㄦ' !in layout.centers && (k == 'ㄦ' || c == 'ㄦ')) 1.5 else 1 + 1e-9
+                c != k && abs(q.second - p.second) <= 1 + 1e-9 && abs(q.first - p.first) <= maxDx
+            }.sortedWith(compareBy({ it.value.second }, { it.value.first })).map { it.key }
+        }
+    }
+
+    @Volatile
+    private var geo = Geometry(KeyboardLayout.DACHEN)
+
+    /** 目前的大千鍵盤版面 */
+    val layout: KeyboardLayout get() = geo.layout
+
+    /** 各鍵中心（鍵距單位）：設定頁畫落點分佈圖用 */
+    val positions: Map<Char, Pair<Double, Double>> get() = geo.pos
+
+    /** 鍵盤有幾排（內建版面含最底排的 ㄦ） */
+    val rows: Int get() = geo.rows
+
+    /**
+     * 換大千鍵盤的版面（鍵位不同時才換）。habitsData 是新版面那一組存過的習慣（serialize 的內容）；
+     * 沒有（第一次用這個鍵位）就從目前的習慣依位置搬過去（KeyHabits.migrateFrom，分握法的不搬、重新學）。
+     * 回傳 true 表示換了
+     */
+    @Synchronized
+    fun useLayout(newLayout: KeyboardLayout, habitsData: String?): Boolean {
+        val old = geo
+        if (old.layout.sameGeometry(newLayout)) return false
+        val g = Geometry(newLayout)
+        if (habitsData != null) {
+            restore(habitsData)
+        } else {
+            habits.migrateFrom(KeyHabits().apply { restore(habits.serialize()) }, old.pos, g.pos)
+            for (h in postureHabits) h.restore(null)
+        }
+        geo = g
+        return true
     }
 
     // 半鍵單位 → 鍵距單位的換算（依實際版面更新；按鍵高度可在設定調整）
@@ -122,8 +156,10 @@ class SpatialModel {
 
     /** 落點的實體座標（鍵距單位，原點為左上角鍵中心）；null 表示不是注音鍵 */
     fun physicalPoint(touch: BopomofoComposer.TouchPoint): Pair<Double, Double>? {
-        val (r, c) = POS[touch.rawChar] ?: return null
-        return Pair(c + touch.offsetX / pitchX, r + touch.offsetY / pitchY)
+        val g = geo
+        val (x, y) = g.pos[touch.rawChar] ?: return null
+        val w = g.widths[touch.rawChar] ?: 1.0
+        return Pair(x + touch.offsetX * w / pitchX, y + touch.offsetY / pitchY)
     }
 
     /** 個人化偏移（鍵距單位）：樣本少的鍵以全體平均為準 */
@@ -144,7 +180,7 @@ class SpatialModel {
     /** 從 from 移到 key 時，移動造成的偏差（沒有上一下時是 0） */
     private fun motionShift(key: Char, from: Pair<Double, Double>?): Pair<Double, Double> {
         if (from == null) return 0.0 to 0.0
-        val (r, c) = POS[key] ?: return 0.0 to 0.0
+        val (c, r) = geo.pos[key] ?: return 0.0 to 0.0
         return motion.shift(c - from.first, r - from.second)
     }
 
@@ -153,7 +189,7 @@ class SpatialModel {
      * 不加常態分佈的正規化項：這裡的高斯寬度是調過的懲罰尺度（比手指實際的散佈寬很多）
      */
     private fun cost(point: Pair<Double, Double>, key: Char, from: Pair<Double, Double>? = null, useMotion: Boolean = true, posture: Int = 0): Double {
-        val (r, c) = POS[key] ?: return Double.MAX_VALUE
+        val (c, r) = geo.pos[key] ?: return Double.MAX_VALUE
         val (bx, by) = effectiveBias(key, posture)
         val (mx, my) = if (useMotion) motionShift(key, from) else 0.0 to 0.0
         val dx = point.first - (c + bx + mx)
@@ -161,7 +197,7 @@ class SpatialModel {
         return 0.5 * (dx * dx / VAR_X + dy * dy / VAR_Y)
     }
 
-    private fun gridNeighbors(key: Char): List<Char> = NEIGHBORS[key].orEmpty()
+    private fun gridNeighbors(key: Char): List<Char> = geo.neighbors[key].orEmpty()
 
     // ---------- 解碼器：鄰鍵懲罰 ----------
 
@@ -170,13 +206,14 @@ class SpatialModel {
      * 落點偏向哪邊、或使用者習慣偏向哪邊，那邊的鍵就越便宜
      */
     fun neighborPenalties(touch: BopomofoComposer.TouchPoint): List<Pair<Char, Double>> {
-        if (!POS.containsKey(touch.char)) return emptyList()
+        val pos = geo.pos
+        if (!pos.containsKey(touch.char)) return emptyList()
         val point = physicalPoint(touch) ?: return emptyList()
         val from = touch.from
         val base = cost(point, touch.char, from, posture = touch.posture)
         val keys = LinkedHashSet(gridNeighbors(touch.char))
         // 被改判過的鍵，原本按到的鍵一定要列為候選
-        if (touch.rawChar != touch.char && POS.containsKey(touch.rawChar)) keys.add(touch.rawChar)
+        if (touch.rawChar != touch.char && pos.containsKey(touch.rawChar)) keys.add(touch.rawChar)
         return keys.map { k -> k to (cost(point, k, from, posture = touch.posture) - base).coerceIn(MIN_PENALTY, MAX_PENALTY) }
     }
 
@@ -207,7 +244,7 @@ class SpatialModel {
             fromX = from?.first?.toFloat() ?: Float.NaN, fromY = from?.second?.toFloat() ?: Float.NaN,
             time = time, posture = posture
         )
-        if (!POS.containsKey(rawChar)) return raw
+        if (!geo.pos.containsKey(rawChar)) return raw
         val point = physicalPoint(raw) ?: return raw
 
         val options = listOf(rawChar) + gridNeighbors(rawChar).filter { !isTone(it) }
@@ -287,7 +324,7 @@ class SpatialModel {
      * 連續打字（有上一下的落點）時拆成兩部分學：扣掉移動偏差的部分學進這個鍵的習慣偏移，扣掉這個鍵習慣偏移的部分學進移動偏差
      */
     fun learn(intended: Char, touch: BopomofoComposer.TouchPoint) {
-        val (r, c) = POS[intended] ?: return
+        val (c, r) = geo.pos[intended] ?: return
         val point = physicalPoint(touch) ?: return
         val dx = point.first - c
         val dy = point.second - r

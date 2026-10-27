@@ -91,6 +91,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
         private const val WORD_KEEP_EXTRA = 8
         private const val NEIGHBOR_ALT_WORDS = 4
         private const val PREF_USER_DICT_CANONICAL = "user_dict_canonical_v1"
+        // 大千鍵盤的落點習慣：內建 10×4 是「spatial_bias_v1」，宣告的版面（三星的鍵位）依鍵位分組存「spatial_bias_v1:<geometryId>」
         private const val PREF_SPATIAL_BIAS = "spatial_bias_v1"
         // v2：判對統計改成比「有／沒有移動偏差」（v1 比的是散佈，已拿掉）
         private const val PREF_TAP_STATS = "tap_stats_v2"
@@ -218,9 +219,6 @@ class ScorpioDictManager private constructor(private val context: Context) {
                 syl.firstOrNull()?.toString()
             }.joinToString("-")
         }
-
-        // 大千注音 10x4 實體按鍵二維空間矩陣（用於 (X, Y) 觸控座標高斯分佈鄰鍵解算）
-        val BOPOMOFO_GRID = SpatialModel.GRID
 
         // 英文按下當下判定：落點高斯（QwertyModel）與字母先驗的權重、上限（同注音 SpatialModel）
         private const val EN_PRIOR_WEIGHT = 0.12
@@ -854,7 +852,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
         if (added > 0) {
             spatialDirty += added
             if (spatialDirty >= 8) {
-                spatialPrefs.edit().putString(PREF_SPATIAL_BIAS, spatial.serialize())
+                spatialPrefs.edit().putString(spatialPrefKey(spatial.layout), spatial.serialize())
                     .putString(PREF_MOTION, spatial.motion.serialize())
                     .putString(PREF_TAP_STATS, tapStats.joinToString(",")).apply()
                 spatialDirty = 0
@@ -876,7 +874,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
         if (SpatialModel.isTone(intended) || SpatialModel.isTone(wrong.rawChar)) return
         spatial.learn(intended, wrong)
         if (++spatialDirty >= 8) {
-            spatialPrefs.edit().putString(PREF_SPATIAL_BIAS, spatial.serialize())
+            spatialPrefs.edit().putString(spatialPrefKey(spatial.layout), spatial.serialize())
                 .putString(PREF_MOTION, spatial.motion.serialize()).apply()
             spatialDirty = 0
         }
@@ -921,6 +919,31 @@ class ScorpioDictManager private constructor(private val context: Context) {
         spatialPrefs.edit().putString(qwertyPrefKey(qwerty.layout.geometryId), qwerty.serialize())
             .putString(PREF_QWERTY_STATS, qwertyStats.joinToString(",")).apply()
         qwertyDirty = 0
+    }
+
+    private fun spatialPrefKey(layout: KeyboardLayout) =
+        if (layout.sameGeometry(KeyboardLayout.DACHEN)) PREF_SPATIAL_BIAS else "$PREF_SPATIAL_BIAS:${layout.geometryId}"
+
+    /**
+     * 大千鍵盤換了版面（切到宣告了字鍵排的大千輸入法，例如三星的鍵位，或切回內建的）：落點模型換成那個版面的鍵位與那一組的習慣。
+     * 先把目前這一組存起來；新的一組還沒有資料時，從目前的習慣依位置搬過去，並馬上存成新的一組
+     */
+    @Synchronized
+    fun useZhuyinLayout(layout: KeyboardLayout) {
+        if (spatial.layout.sameGeometry(layout)) return
+        val edit = spatialPrefs.edit().putString(spatialPrefKey(spatial.layout), spatial.serialize())
+            .putString(PREF_MOTION, spatial.motion.serialize())
+        spatialDirty = 0
+        val key = spatialPrefKey(layout)
+        val saved = spatialPrefs.getString(key, null)
+        spatial.useLayout(layout, saved)
+        if (saved == null) {
+            edit.putString(key, spatial.serialize())
+            Log.i(TAG, "大千鍵盤換了鍵位：落點習慣依位置搬到新的一組")
+        }
+        edit.apply()
+        candidatesCache.evictAll()
+        spanCache.evictAll()
     }
 
     private fun qwertyPrefKey(group: String) =
@@ -3302,7 +3325,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
         }
         spatialPrefs.edit().apply {
             remove(PREF_SPATIAL_BIAS).remove(PREF_MOTION).remove(PREF_QWERTY_BIAS)
-            for (k in spatialPrefs.all.keys) if (k.startsWith("$PREF_QWERTY_BIAS:")) remove(k)
+            for (k in spatialPrefs.all.keys) if (k.startsWith("$PREF_QWERTY_BIAS:") || k.startsWith("$PREF_SPATIAL_BIAS:")) remove(k)
         }.apply()
         candidatesCache.evictAll()
         spanCache.evictAll()
