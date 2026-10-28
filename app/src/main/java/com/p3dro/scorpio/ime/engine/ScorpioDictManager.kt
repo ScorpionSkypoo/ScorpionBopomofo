@@ -1428,7 +1428,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
                 val scored = repairs.map { r ->
                     val lattice = solveLatticeViterbi(r.syllables, r.touches, prevWord, prevWord2 = prevWord2, job = job)
                     Triple(r, lattice, lattice.bestScore - r.penalty * 1.8)
-                }.sortedByDescending { it.third }
+                }.sortedWith(compareByDescending<Triple<RepairedParse, LatticeResult, Double>> { it.third }.thenBy { it.first.syllables.joinToString("-") })
                 for ((r, lattice, _) in scored.take(REPAIRS_POOLED)) poolLattice(lattice, r.penalty * 1.8)
                 val best = scored.first()
                 primaryTouches = best.first.touches
@@ -1454,7 +1454,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
                     val scored = repairs.map { r ->
                         val lattice = solveLatticeViterbi(r.syllables, r.touches, prevWord, prevWord2 = prevWord2, job = job)
                         Triple(r, lattice, lattice.bestScore - r.penalty * 1.8)
-                    }.sortedByDescending { it.third }
+                    }.sortedWith(compareByDescending<Triple<RepairedParse, LatticeResult, Double>> { it.third }.thenBy { it.first.syllables.joinToString("-") })
                     val best = scored.first()
                     val split = solveLatticeViterbi(primaryInput, primaryTouches, prevWord, prevWord2 = prevWord2, job = job)
                     poolLattice(split, 0.0)
@@ -1732,9 +1732,12 @@ class ScorpioDictManager private constructor(private val context: Context) {
         if (altsPooled) for ((w, v) in neighborAlts) if (v > (pool[w] ?: Double.NEGATIVE_INFINITY)) pool[w] = v
         val poolBest = pool.values.maxOrNull() ?: Double.NEGATIVE_INFINITY
         val ranked = pool.entries.filter { it.value >= poolBest - POOL_MARGIN && !it.key.startsWith("MACRO@") }
-            .sortedByDescending { it.value }.mapTo(ArrayList()) { it.key }
+            .sortedWith(compareByDescending<Map.Entry<String, Double>> { it.value }.thenBy { it.key })
+            .mapTo(ArrayList()) { it.key }
         val front = ranked.toHashSet()
-        bestWordScores.entries.sortedByDescending { it.value }.forEach { if (it.key !in front) ranked.add(it.key) }
+        bestWordScores.entries
+            .sortedWith(compareByDescending<Map.Entry<String, Double>> { it.value }.thenBy { it.key })
+            .forEach { if (it.key !in front) ranked.add(it.key) }
         // 首音節的單字穿插：比照 Gboard，打 ㄓㄣㄉㄜ 是「真的、真得、真、禎…」，想先選「真」不用翻過所有雙字詞
         // （原本單字排在所有詞後面，連「砧刀、站得、徵得」這種冷門、鄰鍵修正的詞都在「真」前面）。
         // 整串都是單打聲母（ㄒㄒ＝謝謝）是一個簡拼詞，不拆
@@ -1973,7 +1976,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
             }
         }
         val out = LinkedHashMap<String, Double>()
-        for ((syls, pen) in variants.sortedBy { it.second }) {
+        for ((syls, pen) in variants.sortedWith(compareBy<Pair<List<String>, Double>> { it.second }.thenBy { it.first.joinToString("-") })) {
             val tonelessKey = toToneless(syls.joinToString("-").replace("ˉ", ""))
             // 每個讀音最多兩個，讓不同方向的鄰鍵都看得到
             var taken = 0
@@ -2051,7 +2054,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
             dropped.removeAt(i)
             consider(dropped, 1.4)
         }
-        return found.values.sortedBy { it.penalty }.take(5)
+        return found.values.sortedWith(compareBy<RepairedParse> { it.penalty }.thenBy { it.syllables.joinToString("-") }).take(5)
     }
 
 
@@ -2257,7 +2260,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
             job?.ensureActive()
             if (dp[i].isEmpty()) continue
             if (dp[i].size > beam) {
-                val top = dp[i].sortedByDescending { it.score }.take(beam)
+                val top = dp[i].sortedWith(compareByDescending<Node> { it.score }.thenBy { it.text }).take(beam)
                 dp[i].clear()
                 dp[i].addAll(top)
             }
@@ -2297,7 +2300,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
                 // spanBase 遇到單打聲母的音節會連簡拼一起查，聲調不合一樣扣 tonePenalty
 
                 if (spanCands.isEmpty()) continue
-                val bestCands = spanCands.entries.sortedByDescending { it.value }.take(if (len == n) FULL_SPAN_WORDS else 4)
+                val bestCands = spanCands.entries.sortedWith(compareByDescending<Map.Entry<String, Double>> { it.value }.thenBy { it.key }).take(if (len == n) FULL_SPAN_WORDS else 4)
                 val target = dp[i + len]
                 val targetIndex = dpIndex[i + len]
                 for (node in dp[i]) {
@@ -2325,7 +2328,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
         // 打對的注音優先：把打的注音改成別的（按錯鄰鍵、慣性打錯、模糊音）才拼出來的整句，
         // 要比照打的整句高出 LITERAL_MARGIN 才排前面；落點壓在兩鍵交界（改注音懲罰很小）照原本的分數比
         fun ranked(nd: Node) = nd.score - if (nd.corr >= STRONG_CORRECTION) LITERAL_MARGIN else 0.0
-        val finals = dp[n].sortedByDescending { ranked(it) }
+        val finals = dp[n].sortedWith(compareByDescending<Node> { ranked(it) }.thenBy { it.text })
         val full = finals.firstOrNull()?.text ?: ""
         val alternatives = finals.drop(1).take(2).map { it.text }.filter { it != full }
         val dpWords = mutableListOf<String>()
@@ -2552,14 +2555,17 @@ class ScorpioDictManager private constructor(private val context: Context) {
             }
         }
 
-        return map.entries.sortedBy { it.value }.take(14).map { SyllableVariant(it.key, it.value, it.key in corrective) }
+        return map.entries.sortedWith(compareBy<Map.Entry<String, Double>> { it.value }.thenBy { it.key }).take(14).map { SyllableVariant(it.key, it.value, it.key in corrective) }
     }
 
     /**
      * Viterbi 一個區間的注音組合：penalty＝變體懲罰合計、corr＝改注音懲罰合計；
      * 讀音（以 - 串起來）由前一段＋這一段的音節組成，排進前幾名、真的要查詞庫時才組字串
      */
-    private val SPAN_BY_PENALTY = Comparator<SpanCombo> { a, b -> a.penalty.compareTo(b.penalty) }
+    private val SPAN_BY_PENALTY = Comparator<SpanCombo> { a, b ->
+        val cmp = a.penalty.compareTo(b.penalty)
+        if (cmp != 0) cmp else a.key().compareTo(b.key())
+    }
 
     private class SpanCombo(val parent: SpanCombo?, private val text: String, val penalty: Double, val corr: Double) {
         private var keyCache: String? = null
@@ -3391,7 +3397,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
         if (!prevWord2.isNullOrBlank()) {
             for (p in user.nextAfter(prevWord2, prevWord, 3)) if (ok(p.next) && !list.contains(p.next)) list.add(p.next)
         }
-        for (p in user.nextAll(prevWord).filter { ok(it.next) }.sortedByDescending { decayedCount(it.count, it.lastUsed, now) }.take(6)) {
+        for (p in user.nextAll(prevWord).filter { ok(it.next) }.sortedWith(compareByDescending<UserStore.Pair2> { decayedCount(it.count, it.lastUsed, now) }.thenBy { it.next }).take(6)) {
             if (!list.contains(p.next)) list.add(p.next)
         }
 
