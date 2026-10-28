@@ -62,7 +62,8 @@ class FuzzySounds(private val priors: () -> Map<String, Double>) {
                 if (rule[0] != typed[i]) continue
                 val key = ruleKey(typed, i, rule[1])
                 if (key != rule) continue
-                for (c in counts.values) { c[0] *= DECAY; c[1] *= DECAY }
+                // 一個音節只衰減一次（符合好幾種混用時也是），遺忘速度才是照音節數算
+                if (!changed) for (c in counts.values) { c[0] *= DECAY; c[1] *= DECAY }
                 val c = counts.getOrPut(key) { DoubleArray(2) }
                 c[1] += 1.0
                 if (intended[i] == rule[1]) c[0] += 1.0

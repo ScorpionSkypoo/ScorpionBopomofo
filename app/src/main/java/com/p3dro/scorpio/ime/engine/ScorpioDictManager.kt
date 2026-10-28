@@ -19,6 +19,8 @@ import com.p3dro.scorpio.ime.engine.scd.WordTable
 import com.p3dro.scorpio.ime.engine.scd.WordHit
 import com.p3dro.scorpio.ime.engine.scd.compareUtf8
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import java.io.File
 import kotlin.math.log10
@@ -278,6 +280,15 @@ class ScorpioDictManager private constructor(private val context: Context) {
     private val spanCache = LruCache<String, List<SpanHit>>(2000)
     /** 片段 → 拆成的詞庫詞（不是片段存空的），見 chunkParts */
     private val chunkCache = LruCache<String, List<String>>(4000)
+    // 清快取時 +1：計算途中快取被清掉（學習、校正）時，算完不把用舊資料算的結果存回去
+    private val cacheGen = java.util.concurrent.atomic.AtomicInteger()
+
+    /** 學習資料、落點習慣或設定變了：清掉算好的候選（spans＝連網格每段讀音的個人化分數一起清） */
+    private fun evictCandidateCaches(spans: Boolean = true) {
+        cacheGen.incrementAndGet()
+        candidatesCache.evictAll()
+        if (spans) spanCache.evictAll()
+    }
 
     // ---------- 詞庫檔（SCD） ----------
 
@@ -670,8 +681,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
                 val m = typoMemory.getOrPut(typed) { HashMap() }
                 m[intended] = (m[intended] ?: 0) + 1
             }
-            candidatesCache.evictAll()
-            spanCache.evictAll()
+            evictCandidateCaches()
             Log.i(TAG, "記住一筆慣性打錯")
         } catch (e: Exception) {
             Log.e(TAG, "更新 user_typo 失敗", e)
@@ -844,7 +854,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
                 }
             }
         }
-        if (fuzzyDirty > 0) candidatesCache.evictAll()
+        if (fuzzyDirty > 0) evictCandidateCaches(spans = false)
         if (fuzzyDirty >= 8) {
             spatialPrefs.edit().putString(PREF_FUZZY, fuzzy.serialize()).apply()
             fuzzyDirty = 0
@@ -942,8 +952,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
             Log.i(TAG, "大千鍵盤換了鍵位：落點習慣依位置搬到新的一組")
         }
         edit.apply()
-        candidatesCache.evictAll()
-        spanCache.evictAll()
+        evictCandidateCaches()
     }
 
     private fun qwertyPrefKey(group: String) =
@@ -962,8 +971,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
             flushQwerty()
             qwertyGroups[qwerty.layout.geometryId] = qwerty
             qwerty = qwertyGroups.getOrPut(group) { loadQwertyGroup(layout, lastGroup) }
-            candidatesCache.evictAll()
-            spanCache.evictAll()
+            evictCandidateCaches()
         }
         val saveGroup = lastKey != null && lastGroup != group
         val saveCenters = group != KeyboardLayout.QWERTY_GEOMETRY && !spatialPrefs.contains("$PREF_QWERTY_CENTERS:$group")
@@ -1350,6 +1358,9 @@ class ScorpioDictManager private constructor(private val context: Context) {
         val words = d.words
         if (words.tables.isEmpty()) return@withContext CandidateGroups.EMPTY
         val startNs = System.nanoTime()
+        // 打下一鍵時這次的工作會被取消：網格是一般函式，自己檢查（不檢查的話舊的計算會跑完、跟新的搶 CPU）
+        val job = coroutineContext[Job]
+        val gen = cacheGen.get()
 
         // 每個音節各自的觸控點（同一符號重複出現時不互相覆蓋）
         val primaryInput = allSegmentations.first()
@@ -1390,7 +1401,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
             if (repairs.isNotEmpty()) {
                 // 同樣懲罰的修正可能有好幾種（ㄐ→ㄍ／ㄔ／聲調鍵），每種都走網格（單一音節也是），扣掉修正的懲罰後一起排
                 val scored = repairs.map { r ->
-                    val lattice = solveLatticeViterbi(r.syllables, r.touches, prevWord, prevWord2 = prevWord2)
+                    val lattice = solveLatticeViterbi(r.syllables, r.touches, prevWord, prevWord2 = prevWord2, job = job)
                     Triple(r, lattice, lattice.bestScore - r.penalty * 1.8)
                 }.sortedByDescending { it.third }
                 for ((r, lattice, _) in scored.take(REPAIRS_POOLED)) poolLattice(lattice, r.penalty * 1.8)
@@ -1416,11 +1427,11 @@ class ScorpioDictManager private constructor(private val context: Context) {
                 val repairs = repairByNeighborKeys(touchPoints, mergedParse.size, merged = true)
                 if (repairs.isNotEmpty()) {
                     val scored = repairs.map { r ->
-                        val lattice = solveLatticeViterbi(r.syllables, r.touches, prevWord, prevWord2 = prevWord2)
+                        val lattice = solveLatticeViterbi(r.syllables, r.touches, prevWord, prevWord2 = prevWord2, job = job)
                         Triple(r, lattice, lattice.bestScore - r.penalty * 1.8)
                     }.sortedByDescending { it.third }
                     val best = scored.first()
-                    val split = solveLatticeViterbi(primaryInput, primaryTouches, prevWord, prevWord2 = prevWord2)
+                    val split = solveLatticeViterbi(primaryInput, primaryTouches, prevWord, prevWord2 = prevWord2, job = job)
                     poolLattice(split, 0.0)
                     for ((r, lattice, _) in scored.take(REPAIRS_POOLED)) poolLattice(lattice, r.penalty * 1.8)
                     if (best.third > split.bestScore) {
@@ -1516,6 +1527,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
         }
 
         for ((segIndex, syllables) in augmentedSegmentations.withIndex()) {
+            job?.ensureActive()
             if (syllables.isEmpty()) continue
             val fullRawKey = syllables.joinToString("-").replace("ˉ", "")
             val fullTonelessKey = toToneless(fullRawKey)
@@ -1526,11 +1538,11 @@ class ScorpioDictManager private constructor(private val context: Context) {
 
             // Step 0: 單一音節也走網格，結果放進統一分數（鄰鍵修正過的已經在修正那邊放了）
             if (isPrimary && syllables.size == 1 && pool.isEmpty()) {
-                poolLattice(solveLatticeViterbi(syllables, primaryTouches, prevWord, prevWord2 = prevWord2), 0.0)
+                poolLattice(solveLatticeViterbi(syllables, primaryTouches, prevWord, prevWord2 = prevWord2, job = job), 0.0)
             }
             // Step 1: 多音節時，Lattice Viterbi 網格全句最佳組合（只在主要切分計算一次）
             if (isPrimary && syllables.size > 1) {
-                val lattice = precomputedLattice ?: solveLatticeViterbi(syllables, primaryTouches, prevWord, prevWord2 = prevWord2).also { if (pool.isEmpty()) poolLattice(it, 0.0) }
+                val lattice = precomputedLattice ?: solveLatticeViterbi(syllables, primaryTouches, prevWord, prevWord2 = prevWord2, job = job).also { if (pool.isEmpty()) poolLattice(it, 0.0) }
                 if (lattice.fullSentence.isNotEmpty()) {
                     addScoredWord(lattice.fullSentence, 115.0) // 全句最佳路徑置頂 (例如：好像還可以、我覺得、為什麼、沒問題)
                 }
@@ -1622,7 +1634,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
 
             // Step 3c: 前綴預測匹配（例如輸入 ㄏㄠ-ㄏㄠ-ㄒ 補全「好好笑」；同字數 90.0，長詞 68.0）
             for (h in words.byTonelessPrefix(fullTonelessKey, 15)) {
-                val boost = if (h.word.length == syllables.size) 90.0 else 68.0
+                val boost = if (hanLength(h.word) == syllables.size) 90.0 else 68.0
                 addScoredWord(h.word, h.score + boost)
             }
 
@@ -1631,7 +1643,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
                 val fuzzyKeys = generateFuzzyVariants(fullTonelessKey)
                 if (fuzzyKeys.isNotEmpty()) {
                     for (h in words.byTonelessIn(fuzzyKeys, 10)) {
-                        val boost = if (h.word.length >= 2) 84.0 else 50.0
+                        val boost = if (hanLength(h.word) >= 2) 84.0 else 50.0
                         addScoredWord(h.word, h.score + boost)
                     }
                 }
@@ -1720,7 +1732,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
         // 整串都是單打聲母（ㄒㄒ＝謝謝、ㄏㄏㄎ＝好好看）是一個簡拼詞，不拆
         val allInitials = primaryInput.all { toToneless(it).let { t -> t.length == 1 && t[0] in BopomofoComposer.INITIALS } }
         if (primaryInput.size >= 2 && !allInitials && lastTyped.length == 1 && lastTyped[0] in BopomofoComposer.INITIALS && ranked.isNotEmpty()) {
-            val head = solveLatticeViterbi(primaryInput.dropLast(1), primaryTouches.take(primaryInput.size - 1), prevWord, prevWord2 = prevWord2).fullSentence
+            val head = solveLatticeViterbi(primaryInput.dropLast(1), primaryTouches.take(primaryInput.size - 1), prevWord, prevWord2 = prevWord2, job = job).fullSentence
             if (head.isNotEmpty() && head != ranked.first()) {
                 ranked.remove(head)
                 ranked.add(minOf(TRAIL_HEAD_POSITION, ranked.size), head)
@@ -1736,7 +1748,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
                 if (t.length != 1 || t[0] !in BopomofoComposer.INITIALS || toToneless(primaryInput[i - 1]).length < 2) continue
                 val syl = primaryInput.filterIndexed { k, _ -> k != i }
                 val tch = if (primaryTouches.size == primaryInput.size) primaryTouches.filterIndexed { k, _ -> k != i } else emptyList()
-                val best = solveLatticeViterbi(syl, tch, prevWord, prevWord2 = prevWord2).scored.firstOrNull() ?: continue
+                val best = solveLatticeViterbi(syl, tch, prevWord, prevWord2 = prevWord2, job = job).scored.firstOrNull() ?: continue
                 if (best.first.isNotEmpty() && best.second > (drop?.second ?: Double.NEGATIVE_INFINITY)) drop = best
             }
             val first = pool[ranked[0]] ?: Double.NEGATIVE_INFINITY
@@ -1811,7 +1823,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
         val wordItems = result.filter { it !in kaomojiSet && !isSymbolOnly(it) }
         val emojiGroup = (result.filter { it !in kaomojiSet && isSymbolOnly(it) } + emojiMore).distinct()
         val groups = CandidateGroups(result.toList(), wordItems, emojiGroup, kaomojis.toList())
-        candidatesCache.put(cacheKey, groups)
+        if (cacheGen.get() == gen) candidatesCache.put(cacheKey, groups)
         Log.d(TAG, "選字耗時 ${(System.nanoTime() - startNs) / 1_000_000}ms（${allSegmentations.first().size} 個音節）")
         return@withContext groups
     }
@@ -1836,21 +1848,23 @@ class ScorpioDictManager private constructor(private val context: Context) {
     private fun neighborKeys(touch: BopomofoComposer.TouchPoint): List<Pair<Char, Double>> =
         spatial.neighborPenalties(touch)
 
-    // 字典中出現過的所有單音節（無聲調），用來判斷輸入是否「拼不起來」
+    // 字典中出現過的所有單音節（無聲調），用來判斷輸入是否「拼不起來」；記下是哪一份詞庫算的，
+    // 算到一半詞庫換掉（安裝、開關資料包）時，用舊詞庫算的不會被當成新詞庫的
     @Volatile
-    private var validSyllableSet: Set<String>? = null
+    private var validSyllableSet: Pair<WordStore, Set<String>>? = null
 
     private fun validSyllables(): Set<String> {
-        validSyllableSet?.let { return it }
+        val store = words
+        validSyllableSet?.let { (s, set) -> if (s === store) return set }
         val set = HashSet<String>(1600)
         // SELECT DISTINCT toneless FROM dict WHERE instr(toneless, '-') = 0
-        for (w in words.tables) {
+        for (w in store.tables) {
             for (k in 0 until w.tlIx.size) {
                 val sid = w.tlIx.keySid(k)
                 if ((0 until w.f.strLength(sid)).none { w.f.charAt(sid, it) == '-' }) set.add(w.f.str(sid))
             }
         }
-        if (words.tables.isNotEmpty()) validSyllableSet = set
+        if (store.tables.isNotEmpty()) validSyllableSet = store to set
         return set
     }
 
@@ -2073,17 +2087,19 @@ class ScorpioDictManager private constructor(private val context: Context) {
         if (tonelessKey.contains('ㄑ')) variants.add(tonelessKey.replace('ㄑ', 'ㄐ'))
 
         // 2. 大千注音鍵盤實體物理鄰近按鍵容錯（首鍵、各音節首字母或各鍵手滑按錯）
+        // 鄰鍵自己算名額：長讀音時上面的混淆規則就有十幾個，共用名額的話鄰鍵一個都放不進去
         val chars = tonelessKey.toCharArray()
+        var nearAdded = 0
         for (i in chars.indices) {
             val c = chars[i]
             val neighbors = NEAR_KEYS[c] ?: continue
             for (neighbor in neighbors) {
                 val copy = chars.clone()
                 copy[i] = neighbor
-                variants.add(String(copy))
-                if (variants.size >= 24) break
+                if (variants.add(String(copy))) nearAdded++
+                if (nearAdded >= 24) break
             }
-            if (variants.size >= 24) break
+            if (nearAdded >= 24) break
         }
 
         return variants.toList()
@@ -2181,14 +2197,17 @@ class ScorpioDictManager private constructor(private val context: Context) {
         syllables: List<String>,
         touchesPerSyllable: List<Map<Char, BopomofoComposer.TouchPoint>> = emptyList(),
         prevWord: String? = null,
-        prevWord2: String? = null
-    ): LatticeResult = solveLatticeViterbiImpl(syllables, touchesPerSyllable, prevWord, prevWord2)
+        prevWord2: String? = null,
+        /** 選字工作被取消時中途停下（丟 CancellationException） */
+        job: Job? = null
+    ): LatticeResult = solveLatticeViterbiImpl(syllables, touchesPerSyllable, prevWord, prevWord2, job)
 
     private fun solveLatticeViterbiImpl(
         syllables: List<String>,
         touchesPerSyllable: List<Map<Char, BopomofoComposer.TouchPoint>>,
         prevWord: String?,
-        prevWord2: String?
+        prevWord2: String?,
+        job: Job?
     ): LatticeResult {
         val n = syllables.size
         val now = System.currentTimeMillis()
@@ -2210,6 +2229,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
         val spanWords = mutableListOf<String>()
 
         for (i in 0 until n) {
+            job?.ensureActive()
             if (dp[i].isEmpty()) continue
             if (dp[i].size > beam) {
                 val top = dp[i].sortedByDescending { it.score }.take(beam)
@@ -2248,23 +2268,8 @@ class ScorpioDictManager private constructor(private val context: Context) {
                     }
                 }
 
-                // 區間「混合簡拼」查詢 (例如 ㄨㄛ-ㄐ-ㄉ -> 我覺得)
-                // 簡拼的那個音節打了聲調（ㄗˇ）也要合：聲調不合一樣扣 tonePenalty
-                if (len >= 2 && spanTyped.any { toToneless(it).let { t -> t.length == 1 && BopomofoComposer.INITIALS.contains(t[0]) } }) {
-                    var first = true
-                    for (h in spanLookup(toToneless(spanTyped.joinToString("-")), spanTyped, spanTouches, len, 3, now)) {
-                        val w = h.word
-                        val initScore = h.score
-                        val cur = spanCands[w]
-                        if (cur == null || initScore > cur) {
-                            spanCands[w] = initScore
-                            spanCorr[w] = 0.0
-                            spanUnpenalized[w] = h.base
-                        }
-                        if (first && i == 0 && !spanWords.contains(w)) spanWords.add(w)
-                        first = false
-                    }
-                }
+                // 區間「混合簡拼」(例如 ㄨㄛ-ㄐ-ㄉ -> 我覺得) 不必另外查：原樣的組合（懲罰 0，排第一）讀音就是打的讀音，
+                // spanBase 遇到單打聲母的音節會連簡拼一起查，聲調不合一樣扣 tonePenalty
 
                 if (spanCands.isEmpty()) continue
                 val bestCands = spanCands.entries.sortedByDescending { it.value }.take(if (len == n) FULL_SPAN_WORDS else 4)
@@ -2325,7 +2330,10 @@ class ScorpioDictManager private constructor(private val context: Context) {
     private fun spanLookup(
         key: String, typed: List<String>, touches: List<Map<Char, BopomofoComposer.TouchPoint>>, len: Int, limit: Int, now: Long
     ): List<SpanHit> {
-        val base = spanCache.get(key) ?: spanBase(key, len, now).also { spanCache.put(key, it) }
+        val base = spanCache.get(key) ?: run {
+            val gen = cacheGen.get()
+            spanBase(key, len, now).also { if (cacheGen.get() == gen) spanCache.put(key, it) }
+        }
         val out = ArrayList<SpanHit>(base.size)
         for (h in base) {
             // 簡拼查到的詞（讀音跟 key 不同）在 spanBase 扣過 ABBREV_COST，這裡加回來當沒扣懲罰的分數
@@ -2680,8 +2688,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
             )
             // 寫進 SQLite 之後，把這個詞的列讀回記憶體鏡像
             user.reloadWord(database, word)
-            candidatesCache.evictAll()
-            spanCache.evictAll()
+            evictCandidateCaches()
             userOnlyCache.evictAll()
             Log.i(TAG, "智慧學習新紀錄（${word.length} 字）")
         } catch (e: Exception) {
@@ -2715,8 +2722,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
             Log.e(TAG, "更新 user_bigram 失敗", e)
         }
         // 個人搭配變了：候選快取要重算
-        candidatesCache.evictAll()
-        spanCache.evictAll()
+        evictCandidateCaches()
     }
 
     /** 連續打的三個詞（prev2 prev1 next）：前兩個詞都一樣時，下一個詞照學過的往前排 */
@@ -2737,8 +2743,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
         } catch (e: Exception) {
             Log.e(TAG, "更新 user_trigram 失敗", e)
         }
-        candidatesCache.evictAll()
-        spanCache.evictAll()
+        evictCandidateCaches()
     }
 
     // 每組輸入（上文＋讀音）被學習往前排的詞：使用者跳過它選了別的，就扣回學習次數
@@ -2772,8 +2777,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
         } catch (e: Exception) {
             Log.e(TAG, "扣回學習失敗", e)
         }
-        candidatesCache.evictAll()
-        spanCache.evictAll()
+        evictCandidateCaches()
         userOnlyCache.evictAll()
     }
 
@@ -2815,8 +2819,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
                 database.endTransaction()
             }
             user.forgetWord(word)
-            candidatesCache.evictAll()
-            spanCache.evictAll()
+            evictCandidateCaches()
             userOnlyCache.evictAll()
             Log.i(TAG, "已自個人學習庫刪除一個詞")
             true
@@ -2888,8 +2891,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
      * （詞庫是 mmap 的唯讀檔案頁，系統自己會丟，不必處理）
      */
     fun trimMemory(level: Int) {
-        candidatesCache.evictAll()
-        spanCache.evictAll()
+        evictCandidateCaches()
         SQLiteDatabase.releaseMemory()
         if (level != android.content.ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN) {
             data.words.clearCache()
@@ -2908,8 +2910,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
     fun onConfigChanged() = invalidateCandidateCaches()
 
     private fun invalidateCandidateCaches() {
-        candidatesCache.evictAll()
-        spanCache.evictAll()
+        evictCandidateCaches()
         chunkCache.evictAll()
         userOnlyCache.evictAll()
         syllableFreqCache = null
@@ -3301,8 +3302,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
             synchronized(typoMemory) { typoMemory.clear() }
             fuzzy.restore(null)
             spatialPrefs.edit().remove(PREF_FUZZY).apply()
-            candidatesCache.evictAll()
-            spanCache.evictAll()
+            evictCandidateCaches()
             userOnlyCache.evictAll()
             true
         } catch (e: Exception) {
@@ -3324,8 +3324,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
             remove(PREF_SPATIAL_BIAS).remove(PREF_MOTION).remove(PREF_QWERTY_BIAS)
             for (k in spatialPrefs.all.keys) if (k.startsWith("$PREF_QWERTY_BIAS:") || k.startsWith("$PREF_SPATIAL_BIAS:")) remove(k)
         }.apply()
-        candidatesCache.evictAll()
-        spanCache.evictAll()
+        evictCandidateCaches()
     }
 
     private val glyphPaint = android.graphics.Paint().apply { textLocale = java.util.Locale.TAIWAN }

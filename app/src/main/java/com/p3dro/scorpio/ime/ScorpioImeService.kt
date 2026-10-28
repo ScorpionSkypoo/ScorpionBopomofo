@@ -3205,7 +3205,7 @@ class ScorpioImeService : InputMethodService() {
                 showExpandedWords(rvGrid, candidateAdapter?.currentList ?: emptyList())
                 return@launch
             }
-            val groups = dictManager.getCandidateGroups(composer.getAllSegmentations(), composer.hasExplicitTone(), contextWord, zhuyinTouches())
+            val groups = dictManager.getCandidateGroups(composer.getAllSegmentations(), composer.hasExplicitTone(), contextWord, zhuyinTouches(), prevWord2 = contextWord2)
             if (inlineSymbols || (groups.emoji.isEmpty() && groups.kaomoji.isEmpty())) {
                 layoutExpandedHeader?.visibility = View.GONE
                 showExpandedWords(rvGrid, segmentCandidates(if (inlineSymbols) groups.inline else groups.words, syllables.size))
