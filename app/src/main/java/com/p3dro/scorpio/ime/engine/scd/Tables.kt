@@ -449,10 +449,20 @@ class EnglishTable(val f: ScdFile) {
     private val score = f.ints("e.score")!!
     private val ebNext = f.ints("eb.next")!!
     private val eb = f.index("eb.pv")!!
+    // 顯示的寫法（iPhone、YouTube、Dior）；舊版的英文詞庫沒有這段
+    private val disp = f.ints("e.disp")
     val size: Int get() = score.limit()
 
     fun word(i: Int) = f.str(word.get(i))
     fun score(i: Int) = score.get(i)
+    fun display(i: Int): String = if (disp == null) word(i) else f.str(disp.get(i))
+
+    /** 字典裡這個（小寫的）字的顯示寫法；沒有這個字就是它本身 */
+    fun display(word: String): String {
+        if (disp == null) return word
+        val r = range(word)
+        return if (!r.isEmpty() && f.compare(this.word.get(r.first), word) == 0) f.str(disp.get(r.first)) else word
+    }
 
     /** 前綴區間 [from, to)（同舊版記憶體索引的 range：String 比較） */
     fun range(prefix: String): IntRange {
