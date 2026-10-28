@@ -145,6 +145,10 @@ class ScorpioImeService : InputMethodService() {
     private var lastDownX = 0f
     private var lastDownY = 0f
     private var keyPreview: com.p3dro.scorpio.ime.ui.KeyPreview? = null
+    // 長按副鍵的選單
+    private var keyAlternates: com.p3dro.scorpio.ime.ui.KeyAlternates? = null
+    // 英文、中文 QWERTY 字鍵右上角的副鍵提示
+    private val englishHintViews = HashMap<Char, TextView>()
     private var lastCommittedWord: String? = null
 
     /**
@@ -378,6 +382,7 @@ class ScorpioImeService : InputMethodService() {
         keyPreview = com.p3dro.scorpio.ime.ui.KeyPreview(container).apply {
             enabled = prefs.getBoolean("key_preview", true)
         }
+        keyAlternates = com.p3dro.scorpio.ime.ui.KeyAlternates(container)
 
         rvCandidates = root.findViewById(R.id.rv_candidates)
         layoutIdleBar = root.findViewById(R.id.layout_idle_bar)
@@ -455,12 +460,22 @@ class ScorpioImeService : InputMethodService() {
             if (panel != null && w > 0) dictManager.noteKeyboardTap((x - panel.left - panel.paddingLeft).toDouble() / w * 10 - 0.5, time)
         }
         dictManager.postureFromKeyboard = true
-        gridZhuyin.onKeyLongPressListener = { char ->
-            if (composer.isComposing) {
-                clearComposer(discardComposingText = true)
+        // 長按：副鍵（數字、英文字母、標點）在前，注音符號本身放最後，選單左右滑選
+        gridZhuyin.keyAlternates = keyAlternates
+        gridZhuyin.alternatesFor = { char ->
+            chineseMethod.longPress[char]?.let { it + char.toString() }.orEmpty()
+        }
+        gridZhuyin.onKeyLongPressListener = { char, option ->
+            if (option == char.toString()) {
+                // 注音符號本身：直接輸入這個符號（打到一半的注音不要）
+                if (composer.isComposing) {
+                    clearComposer(discardComposingText = true)
+                }
+                currentInputConnection?.commitText(option, 1)
+                updateBarVisibility()
+            } else {
+                commitKeyAlternate(option)
             }
-            currentInputConnection?.commitText(char.toString(), 1)
-            updateBarVisibility()
         }
 
         setupZhuyinFunctionKeys(root)
@@ -537,6 +552,7 @@ class ScorpioImeService : InputMethodService() {
         super.onFinishInputView(finishingInput)
         finishEnglishWord(learn = false)
         keyPreview?.hideAll()
+        keyAlternates?.dismissAll()
         // 工具列直接露出過有紅點的「更新」：鍵盤收起就算看過了
         updateDotShownTag?.let { com.p3dro.scorpio.ime.engine.AppUpdater.markSeen(this, it) }
         updateDotShownTag = null
@@ -657,6 +673,7 @@ class ScorpioImeService : InputMethodService() {
     override fun onWindowHidden() {
         super.onWindowHidden()
         keyPreview?.hideAll()
+        keyAlternates?.dismissAll()
         dismissDeleteConfirmation()
     }
 
@@ -747,6 +764,7 @@ class ScorpioImeService : InputMethodService() {
         val from = currentMode
         currentMode = mode
         keyPreview?.hideAll()
+        keyAlternates?.dismissAll()
         // 跟 Gboard 一樣：切到別的鍵盤再回來，Shift（含大寫鎖定）回到小寫；展開候選字再收回不算切換
         if (mode != from && from != KeyboardMode.EXPANDED) resetShift()
         // 每次進符號鍵盤都回第 1 頁，並依來源（注音／英文）重建全形或半形標點
@@ -802,6 +820,8 @@ class ScorpioImeService : InputMethodService() {
 
     /** 大千鍵盤目前畫的版面（null 是還沒畫） */
     private var renderedZhuyinLayout: com.p3dro.scorpio.ime.engine.KeyboardLayout? = null
+    // 畫的時候用的副鍵（鍵上的提示）
+    private var renderedZhuyinLong: Map<Char, List<String>>? = null
 
     /** 大千鍵盤的最下排是英文那種排法（宣告的版面把 ㄦ、刪除鍵放在字鍵區）：空白鍵右邊是句號，符號鍵盤也照英文的排 */
     private val zhuyinBottomLikeQwerty: Boolean get() = renderedZhuyinLayout.let { it != null && it != com.p3dro.scorpio.ime.engine.KeyboardLayout.DACHEN }
@@ -814,9 +834,10 @@ class ScorpioImeService : InputMethodService() {
      */
     private fun applyZhuyinLayout(layout: com.p3dro.scorpio.ime.engine.KeyboardLayout) {
         dictManager.useZhuyinLayout(layout)
-        if (renderedZhuyinLayout == layout) return
+        if (renderedZhuyinLayout == layout && renderedZhuyinLong == chineseMethod.longPress) return
         val root = keyboardRootView ?: return
         renderedZhuyinLayout = layout
+        renderedZhuyinLong = chineseMethod.longPress
         lastZhuyinTap = null
         val builtIn = layout == com.p3dro.scorpio.ime.engine.KeyboardLayout.DACHEN
         val backspace = root.findViewById<View>(R.id.btn_backspace) ?: return
@@ -871,8 +892,8 @@ class ScorpioImeService : InputMethodService() {
         rowLayout.removeAllViews()
         for (zhuyin in keys) {
             val keyView = ZhuyinKeyView(ui).apply {
-                // 不顯示實體鍵盤對應的英文字母與數字（這個鍵盤打不出來，只會干擾）
-                setKey(zhuyin, "")
+                // 右上角是長按的第一個副鍵（數字、英文字母、標點）
+                setKey(zhuyin, chineseMethod.longPress[zhuyin]?.firstOrNull().orEmpty())
                 // 恢復原版 2.5dp 完美間距與按鍵尺寸，全域觸控由父層 ZhuyinGridLayout 空間座標定位模式接管
                 layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f).apply {
                     setMargins(dpToPx(2.5f), 0, dpToPx(2.5f), 0)
@@ -1139,6 +1160,9 @@ class ScorpioImeService : InputMethodService() {
         spatial.previewLabel = { c ->
             if (isChineseQwerty && !c.isDigit()) qwertyLabel(c) else (if (shiftState != ShiftState.OFF) c.uppercaseChar() else c).toString()
         }
+        spatial.keyAlternates = keyAlternates
+        spatial.alternatesFor = { char -> qwertyLongPress()[char].orEmpty() }
+        spatial.onKeyLongPressListener = { _, option -> commitKeyAlternate(option) }
         spatial.onKeyTapListener = { char, offsetX, offsetY ->
             when {
                 char.isDigit() && isChineseQwerty -> {
@@ -1260,6 +1284,7 @@ class ScorpioImeService : InputMethodService() {
         val spatial = root.findViewById<com.p3dro.scorpio.ime.ui.SpatialKeyLayout>(R.id.panel_english) ?: return
         renderedQwertyLayout = layout
         englishKeyViews.clear()
+        englishHintViews.clear()
         spatial.clearKeys()
 
         val shift = enShiftKey ?: return
@@ -1358,6 +1383,21 @@ class ScorpioImeService : InputMethodService() {
         }
         tv.tag = char
         englishKeyViews.add(tv)
+        // 右上角的長按副鍵提示（applyQwertyLabels 依目前的輸入法填）
+        val hint = TextView(ui).apply {
+            textSize = 9.5f
+            setTextColor(ui.getColor(R.color.ime_text_secondary))
+            includeFontPadding = false
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                android.view.Gravity.TOP or android.view.Gravity.END
+            ).apply {
+                topMargin = dpToPx(2)
+                marginEnd = dpToPx(4)
+            }
+        }
+        englishHintViews[char] = hint
 
         return FrameLayout(ui).apply {
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, weight).apply {
@@ -1366,6 +1406,7 @@ class ScorpioImeService : InputMethodService() {
             background = keyDrawable(R.attr.imeKeyDrawable)
             isClickable = true
             isFocusable = true
+            addView(hint)
             addView(tv)
             setOnClickListener {
                 triggerHaptic(it)
@@ -1941,6 +1982,42 @@ class ScorpioImeService : InputMethodService() {
     }
 
     /** QWERTY 鍵盤在中文輸入法時鍵上顯示的符號（拼音為字母、26 鍵注音為該鍵的注音） */
+    /** QWERTY 面板字鍵的長按副鍵：中文 QWERTY 輸入法用它版面的（全形標點），英文用英文的 */
+    private fun qwertyLongPress(): Map<Char, List<String>> =
+        if (isChineseQwerty) chineseMethod.longPress else com.p3dro.scorpio.ime.engine.LongPressKeys.QWERTY
+
+    /**
+     * 長按選好的副鍵：中文鍵盤先把打到一半的字送出再輸入它（同標點）；
+     * 英文的數字、符號先結束目前的字，字母（é）接在打的字後面
+     */
+    private fun commitKeyAlternate(text: String) {
+        if (currentMode != KeyboardMode.ENGLISH) {
+            commitChinesePunctuation(text)
+            return
+        }
+        val c = text.singleOrNull()
+        when {
+            c != null && c.isDigit() -> onEnglishNumberInput(c)
+            c != null && c.isLetter() && !isRawKeyEditor() -> {
+                val out = if (shiftState != ShiftState.OFF) c.uppercaseChar() else c
+                englishWordBuffer.append(out)
+                englishTouches.add(BopomofoComposer.TouchPoint(out))
+                currentInputConnection?.setComposingText(englishWordBuffer, 1)
+                updateEnglishCandidates()
+                if (shiftState == ShiftState.ONCE) {
+                    shiftState = ShiftState.OFF
+                    updateShiftVisuals()
+                }
+            }
+            else -> {
+                finishEnglishWord()
+                endEnglishPhrase()
+                currentInputConnection?.commitText(text, 1)
+                updateBarVisibility()
+            }
+        }
+    }
+
     private fun qwertyLabel(c: Char): String {
         if (chineseMethod.isCodeTable) return com.p3dro.scorpio.ime.engine.ChineseMethod.CANGJIE_RADICALS[c]?.toString() ?: c.toString()
         val keymap = chineseMethod.keymap ?: return c.toString()
@@ -1962,6 +2039,8 @@ class ScorpioImeService : InputMethodService() {
             }
             tv.textSize = if (zhuyinLabels) (if (tv.text.length > 1) 15f else 19f) else 23f
         }
+        val long = qwertyLongPress()
+        for ((c, hint) in englishHintViews) hint.text = long[c]?.firstOrNull().orEmpty()
         keyboardRootView?.findViewById<TextView>(R.id.tv_en_space_label)?.text = if (chinese) chineseMethod.spaceLabel else "English"
         // Email 欄的逗號鍵換成 @、網址欄換成 /
         (keyboardRootView?.findViewById<ViewGroup>(R.id.btn_en_comma)?.getChildAt(0) as? TextView)?.text = if (chinese) "，" else englishCommaKey()

@@ -25,7 +25,11 @@ class ZhuyinGridLayout @JvmOverloads constructor(
 ) : LinearLayout(context, attrs) {
 
     var onKeyTapListener: ((char: Char, offsetX: Float, offsetY: Float) -> Unit)? = null
-    var onKeyLongPressListener: ((char: Char) -> Unit)? = null
+    /** 長按放開：option 是選中的副鍵（沒有副鍵的鍵就是注音符號本身） */
+    var onKeyLongPressListener: ((char: Char, option: String) -> Unit)? = null
+    /** 鍵的長按選項（副鍵在前、注音符號本身最後）；空的就只有符號本身 */
+    var alternatesFor: ((Char) -> List<String>)? = null
+    var keyAlternates: KeyAlternates? = null
     var onKeyHapticListener: ((view: View) -> Unit)? = null
     /** 版面量好後回報「鍵距 ÷ 半鍵寬／高」，供空間模型換算落點 */
     var onPitchMeasured: ((halfKeysPerPitchX: Double, halfKeysPerPitchY: Double) -> Unit)? = null
@@ -40,12 +44,16 @@ class ZhuyinGridLayout @JvmOverloads constructor(
         var currentOffsetX: Float,
         var currentOffsetY: Float,
         var isLongPressTriggered: Boolean = false,
+        // 長按成立時：只有一個選項就是它（泡泡變色），好幾個就跳出選單（usesAlternates）
+        var longOption: String? = null,
+        var usesAlternates: Boolean = false,
         // 長按成立後手指滑離該鍵：取消，放開時什麼都不送
         var isCancelled: Boolean = false,
         var longPressRunnable: Runnable? = null
     )
 
     private val activeSessions = mutableMapOf<Int, PointerSession>()
+    private val winLoc = IntArray(2)
     private val keyGrid = ArrayList<ArrayList<ZhuyinKeyView>>()
     private val rowViews = ArrayList<LinearLayout>()
 
@@ -143,11 +151,19 @@ class ZhuyinGridLayout @JvmOverloads constructor(
                     currentOffsetY = hit.offsetY
                 )
 
-                // 長按只標記為選中（泡泡變色），手指放開才送出
+                // 長按只標記為選中（泡泡變色，或跳出副鍵選單），手指放開才送出
                 val runnable = Runnable {
+                    val target = session.targetKey
                     session.isLongPressTriggered = true
-                    onKeyHapticListener?.invoke(key)
-                    keyPreview?.select(session)
+                    onKeyHapticListener?.invoke(target)
+                    val options = alternatesFor?.invoke(target.primaryChar).orEmpty().ifEmpty { listOf(target.primaryChar.toString()) }
+                    if (options.size > 1 && keyAlternates?.show(session, target, options) == true) {
+                        session.usesAlternates = true
+                        keyPreview?.hide(session)
+                    } else {
+                        session.longOption = options[0]
+                        keyPreview?.select(session, options[0])
+                    }
                 }
                 session.longPressRunnable = runnable
                 postDelayed(runnable, 400L)
@@ -164,6 +180,22 @@ class ZhuyinGridLayout @JvmOverloads constructor(
                     val x = event.getX(i)
                     val y = event.getY(i)
                     if (session.isCancelled) continue
+
+                    if (session.usesAlternates) {
+                        // 副鍵選單：左右滑選；往下滑離按鍵一個鍵高以上就取消
+                        val key = session.targetKey
+                        val parentRow = key.parent as? View
+                        val keyBottom = (parentRow?.top ?: 0) + key.bottom
+                        if (y > keyBottom + key.height) {
+                            session.isCancelled = true
+                            session.targetKey.isPressed = false
+                            keyAlternates?.dismiss(session)
+                        } else {
+                            getLocationInWindow(winLoc)
+                            keyAlternates?.track(session, winLoc[0] + x)
+                        }
+                        continue
+                    }
 
                     if (session.isLongPressTriggered) {
                         // 長按後滑離原本的鍵就取消
@@ -213,6 +245,7 @@ class ZhuyinGridLayout @JvmOverloads constructor(
                     session.longPressRunnable?.let { removeCallbacks(it) }
                     session.targetKey.isPressed = false
                     keyPreview?.hide(session)
+                    keyAlternates?.dismiss(session)
                     // 手勢中斷但按壓時間 < 350ms 仍判定輸入，杜絕吞鍵
                     if (!session.isLongPressTriggered && (System.currentTimeMillis() - session.downTime) < 350L) {
                         onKeyTapListener?.invoke(session.targetKey.primaryChar, session.currentOffsetX, session.currentOffsetY)
@@ -230,10 +263,12 @@ class ZhuyinGridLayout @JvmOverloads constructor(
         session.targetKey.isPressed = false
         keyPreview?.hide(session)
 
+        val char = session.targetKey.primaryChar
         when {
             session.isCancelled -> {}
-            session.isLongPressTriggered -> onKeyLongPressListener?.invoke(session.targetKey.primaryChar)
-            else -> onKeyTapListener?.invoke(session.targetKey.primaryChar, session.currentOffsetX, session.currentOffsetY)
+            session.usesAlternates -> keyAlternates?.dismiss(session)?.let { onKeyLongPressListener?.invoke(char, it) }
+            session.isLongPressTriggered -> onKeyLongPressListener?.invoke(char, session.longOption ?: char.toString())
+            else -> onKeyTapListener?.invoke(char, session.currentOffsetX, session.currentOffsetY)
         }
     }
 
