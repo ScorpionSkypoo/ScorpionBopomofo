@@ -1686,6 +1686,8 @@ class ScorpioDictManager private constructor(private val context: Context) {
         // 首音節的單字（下面 1～3 列出的）與字典字頻、學過的，穿插到前面用（見「首音節的單字穿插」）
         val firstSingles = HashMap<String, Double>()
         val learnedSingles = HashSet<String>()
+        // 前 2 音節的雙字前綴詞（長打短選用，見下面「雙字前綴穿插」）
+        val prefix2Words = ArrayList<String>(2)
         fun noteSingle(w: String, score: Double) { if (score > (firstSingles[w] ?: Double.NEGATIVE_INFINITY)) firstSingles[w] = score }
         if (primarySyllables.size > 1) {
             val firstSyllable = primarySyllables.first()
@@ -1723,6 +1725,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
                 val prefix2Toneless = toToneless(primarySyllables.take(2).joinToString("-"))
                 for (h in words.byToneless(prefix2Toneless, 10)) {
                     addScoredWord(h.word, h.score + 82.0)
+                    if (prefix2Words.size < 2) prefix2Words.add(h.word)
                 }
             }
         }
@@ -1769,6 +1772,18 @@ class ScorpioDictManager private constructor(private val context: Context) {
             if (head.isNotEmpty() && head != ranked.first()) {
                 ranked.remove(head)
                 ranked.add(minOf(TRAIL_HEAD_POSITION, ranked.size), head)
+            }
+        }
+        // 雙字前綴穿插（長打短選）：打 3 音節以上只想先選前兩個字的詞時，前 2 音節的前綴詞排在第 8 名之後就移到第 8 名，
+        // 前 7 名不動，所以第一、前三不受影響（pfx2）
+        if (prefix2Words.isNotEmpty() && !allInitials && ranked.size > 7) {
+            val pfx = ranked.firstOrNull { it in prefix2Words }
+            if (pfx != null) {
+                val at = ranked.indexOf(pfx)
+                if (at > 7) {
+                    ranked.removeAt(at)
+                    ranked.add(7, pfx)
+                }
             }
         }
         // 中間多按了一個鍵：完整的音節後面夾了一個單打聲母（ㄅㄨㄟ-ㄅㄨ-ㄘ-ㄉ 的 ㄘ），而它單獨也是字（次），不會被當成拼不起來修掉。
@@ -1990,7 +2005,11 @@ class ScorpioDictManager private constructor(private val context: Context) {
                 // 只列漢字詞（單打一個聲母時字典裡也有符號本身，例如「ㄍ」）
                 if (toneMismatchCount(syls, h.reading) > 0 || !isHanWord(h.word) || !isRenderable(h.word) || h.word in out) continue
                 // 跟網格同一個尺度：多字詞一樣加長度分
-                out[h.word] = h.score - pen * 1.8 + (hanLength(h.word) - 1) * 2.8
+                var score = h.score - pen * 1.8 + (hanLength(h.word) - 1) * 2.8
+                // 跟整句一樣「打對的注音優先」：落點懲罰達強修正門檻的鄰鍵詞也要多扣 LITERAL_MARGIN，
+                // 不然按歪拼出來的詞會蓋過打的那個（nmargin）
+                if (pen >= STRONG_CORRECTION) score -= LITERAL_MARGIN
+                out[h.word] = score
                 taken++
                 if (out.size >= NEIGHBOR_ALT_WORDS) return out.toList()
             }
@@ -2363,9 +2382,15 @@ class ScorpioDictManager private constructor(private val context: Context) {
     private fun spanLookup(
         key: String, typed: List<String>, touches: List<Map<Char, BopomofoComposer.TouchPoint>>, len: Int, limit: Int, now: Long
     ): List<SpanHit> {
-        val base = spanCache.get(key) ?: run {
+        // 打了聲調的 ㄓㄔㄕㄖㄗㄘㄙ 不當簡拼（spanBase），同一個 key 有沒有打聲調查到的不一樣，快取要分開
+        val tonedMask = typed.mapIndexed { i, syl ->
+            val tl = toToneless(syl)
+            if (tl.length == 1 && tl[0] in BopomofoComposer.STANDALONE_INITIALS && typedToneOf(syl) != null) "T$i" else ""
+        }.joinToString("")
+        val cacheKey = if (tonedMask.isNotEmpty()) "$key#$tonedMask" else key
+        val base = spanCache.get(cacheKey) ?: run {
             val gen = cacheGen.get()
-            spanBase(key, len, now).also { if (cacheGen.get() == gen) spanCache.put(key, it) }
+            spanBase(key, typed, len, now).also { if (cacheGen.get() == gen) spanCache.put(cacheKey, it) }
         }
         val out = ArrayList<SpanHit>(base.size)
         for (h in base) {
@@ -2379,11 +2404,15 @@ class ScorpioDictManager private constructor(private val context: Context) {
 
     /**
      * 有音節只打聲母（簡拼，ㄋㄚ-ㄐ、ㄏ-ㄏ-ㄎ）時，同聲母開頭的詞也算這段讀音的字（字典分數少 ABBREV_COST），
-     * 學過的詞也照簡拼找（學的時候存的是完整讀音），個人比例才跟沒簡拼時一樣算得到
+     * 學過的詞也照簡拼找（學的時候存的是完整讀音），個人比例才跟沒簡拼時一樣算得到。
+     * ㄓㄔㄕㄖㄗㄘㄙ 自己就是一個音節（知、吃、詩…），打了聲調就是在打那個字，不當簡拼（tonedabbrev）
      */
-    private fun spanBase(key: String, len: Int, now: Long): List<SpanHit> {
+    private fun spanBase(key: String, typed: List<String>, len: Int, now: Long): List<SpanHit> {
         val syls = key.split("-")
-        val abbrev = len >= 2 && syls.any { it.length == 1 && BopomofoComposer.INITIALS.contains(it[0]) }
+        val abbrev = len >= 2 && syls.withIndex().any { (i, it) ->
+            it.length == 1 && BopomofoComposer.INITIALS.contains(it[0]) &&
+                !(it[0] in BopomofoComposer.STANDALONE_INITIALS && typed.getOrNull(i)?.let { t -> typedToneOf(t) } != null)
+        }
         val like = if (abbrev) Like(abbrevPattern(syls)) else null
         val dict = LinkedHashMap<String, WordHit>()
         for (h in words.byToneless(key, 12)) if (!h.word.startsWith("MACRO@") && h.word !in dict) dict[h.word] = h
