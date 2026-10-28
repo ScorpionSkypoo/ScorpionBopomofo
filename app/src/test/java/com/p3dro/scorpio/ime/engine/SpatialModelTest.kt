@@ -296,4 +296,32 @@ class SpatialModelTest {
         m.useLayout(samsungLayout, samsungData)
         assertEquals(before, m.effectiveBias('ㄨ').second, 0.05)
     }
+
+    @Test
+    fun resolvedTwoTapsFormValidSyllableWhileRawIsInvalid() {
+        // 打字記錄 #884「可以接受的」：第 4、5 鍵落在 ㄍ 右側（靠 ㄐ）與 ㄨ 上緣（靠 ㄧ），
+        // 按下當下已判成 ㄐㄧㄝ（ㄎㄜ-ㄧ-ㄐㄧㄝ-ㄕㄡ-ㄉㄜ 全部合法），但還原 rawChar 為 ㄍㄨㄝ 時不合法（rawInvalid）
+        val m = SpatialModel().apply {
+            setSyllableFrequencies(mapOf("ㄎㄜ" to 10.0, "ㄧ" to 50.0, "ㄐㄧㄝ" to 30.0, "ㄐㄧ" to 50.0, "ㄍㄨ" to 5.0, "ㄕㄡ" to 20.0, "ㄉㄜ" to 100.0))
+        }
+        val taps = listOf(
+            Triple('ㄎ', -0.403f, 0.232f),
+            Triple('ㄜ', -0.250f, 0.106f),
+            Triple('ㄧ', 0.769f, 0.753f),
+            Triple('ㄍ', 1.133f, 0.501f),
+            Triple('ㄨ', 0.816f, -1.000f),
+            Triple('ㄝ', -0.454f, 0.253f),
+            Triple('ㄕ', -0.925f, 0.755f),
+            Triple('ㄡ', 0.233f, 0.050f),
+            Triple('ㄉ', -0.174f, 0.267f),
+            Triple('ㄜ', 0.464f, 0.542f)
+        )
+        val c = BopomofoComposer()
+        for ((ch, ox, oy) in taps) {
+            c.append(m.resolveTap(ch, ox, oy, c.getTouchPoints()))
+        }
+        assertEquals(listOf("ㄎㄜ", "ㄧ", "ㄐㄧㄝ", "ㄕㄡ", "ㄉㄜ"), c.getAllSyllables())
+        val raw = c.getTouchPoints().map { it.copy(char = it.rawChar) }
+        assertEquals(listOf("ㄎㄜ", "ㄧ", "ㄍㄨㄝ", "ㄕㄡ", "ㄉㄜ"), BopomofoComposer.parseSyllables(raw).map { it.text })
+    }
 }

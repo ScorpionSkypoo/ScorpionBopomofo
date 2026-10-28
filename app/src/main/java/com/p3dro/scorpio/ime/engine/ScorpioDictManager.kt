@@ -1385,8 +1385,8 @@ class ScorpioDictManager private constructor(private val context: Context) {
         var precomputedLattice: LatticeResult? = null
         var repairAlternatives: List<String> = emptyList()
         val rawPoints = touchPoints?.map { if (it.rawChar != it.char) it.copy(char = it.rawChar) else it }
-        val rawInvalid = rawPoints != null && rawPoints != touchPoints &&
-            BopomofoComposer.parseSyllables(rawPoints).let { p -> p.size == primaryInput.size && p.any { !isValidSyllable(it.text) } }
+        val rawParsed = if (rawPoints != null && rawPoints != touchPoints) BopomofoComposer.parseSyllables(rawPoints) else null
+        val rawInvalid = rawParsed != null && rawParsed.size == primaryInput.size && rawParsed.any { !isValidSyllable(it.text) }
         // 打滿整個輸入的候選（整句、整個詞）共同的分數：網格的分數（落點、字頻、上文、個人習慣同一個尺度），
         // 鄰鍵修正的再扣修正懲罰；排在候選最前面（見下面「依統一分數排序」）
         val pool = HashMap<String, Double>()
@@ -1397,7 +1397,32 @@ class ScorpioDictManager private constructor(private val context: Context) {
             }
         }
         if (touchPoints != null && primaryInput.isNotEmpty() && (rawInvalid || primaryInput.any { !isValidSyllable(it) })) {
-            val repairs = repairByNeighborKeys(if (rawInvalid) rawPoints!! else touchPoints, primaryInput.size)
+            val baseRepairs = repairByNeighborKeys(if (rawInvalid) rawPoints!! else touchPoints, primaryInput.size)
+            // 一個音節裡按下當下改判了兩個以上的鍵（#884 ㄍㄨㄝ → ㄐㄧㄝ）：改判後的讀音全部合法，但一次只換一個鍵的修正拼不回來，
+            // 照原本按到的鍵修正會漏掉它；改判後的讀音也放進修正，懲罰是改判那幾個鍵的鄰鍵懲罰合計
+            var off = 0
+            var changedInInvalid = 0
+            val sameSylLengths = rawParsed != null && rawParsed.size == primaryInput.size &&
+                rawParsed.indices.all { rawParsed[it].keyCount == primaryInput[it].length }
+            if (rawInvalid && sameSylLengths && primaryInput.all { isValidSyllable(it) }) {
+                for (ps in rawParsed!!) {
+                    val end = (off + ps.keyCount).coerceAtMost(touchPoints.size)
+                    if (!isValidSyllable(ps.text)) {
+                        var sylChanged = 0
+                        for (i in off until end) if (touchPoints[i].char != touchPoints[i].rawChar) sylChanged++
+                        if (sylChanged in 2 until ps.keyCount) changedInInvalid += sylChanged
+                    }
+                    off = end
+                }
+            }
+            val repairs = if (changedInInvalid >= 2 && baseRepairs.none { it.syllables == primaryInput }) {
+                val primaryPen = touchPoints.indices.sumOf { i ->
+                    val t = touchPoints[i]
+                    val r = rawPoints!![i]
+                    if (t.char == r.char) 0.0 else neighborKeys(r).firstOrNull { it.first == t.char }?.second ?: SpatialModel.MIN_PENALTY
+                }
+                baseRepairs + RepairedParse(primaryInput, primaryTouches, primaryPen)
+            } else baseRepairs
             if (repairs.isNotEmpty()) {
                 // 同樣懲罰的修正可能有好幾種（ㄐ→ㄍ／ㄔ／聲調鍵），每種都走網格（單一音節也是），扣掉修正的懲罰後一起排
                 val scored = repairs.map { r ->
