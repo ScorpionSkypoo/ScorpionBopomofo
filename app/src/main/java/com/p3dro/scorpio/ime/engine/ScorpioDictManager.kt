@@ -1276,10 +1276,12 @@ class ScorpioDictManager private constructor(private val context: Context) {
         val upperFirst = prefix[0].isUpperCase()
         val allUpper = prefix.length > 1 && prefix.all { !it.isLetter() || it.isUpperCase() }
         val list = sorted.take(if (typo) 11 else 12).map { (k, _) ->
-            val base = display[k] ?: k
+            // 學過的寫法優先；學到的是全小寫（字典還沒有寫法時打的）就用字典的寫法（iPhone、Dior）
+            val base = display[k]?.takeIf { it != k } ?: index?.display(k) ?: k
             when {
                 allUpper -> base.uppercase()
-                upperFirst -> base.replaceFirstChar { it.uppercase() }
+                // 有自己的寫法的（iPhone、eBay）句首自動大寫也照原本的寫
+                upperFirst && base == k -> base.replaceFirstChar { it.uppercase() }
                 k == "i" || k.startsWith("i'") -> base.replaceFirstChar { it.uppercase() }
                 else -> base
             }
@@ -1297,8 +1299,11 @@ class ScorpioDictManager private constructor(private val context: Context) {
         if (prev.isBlank() || !prev.all { it in 'a'..'z' || it == '\'' }) return@withContext emptyList()
         val list = LinkedHashSet<String>()
         list.addAll(user.nextRecent(prev, 4) { it.next != it.prev })
-        data.english?.let { list.addAll(it.next(prev, 12)) }
-        return@withContext list.take(10).map { if (it == "i" || it.startsWith("i'")) it.replaceFirstChar { c -> c.uppercase() } else it }
+        val index = data.english
+        index?.let { list.addAll(it.next(prev, 12)) }
+        return@withContext list.take(10).map {
+            if (it == "i" || it.startsWith("i'")) it.replaceFirstChar { c -> c.uppercase() } else index?.display(it) ?: it
+        }
     }
 
     /** 學習使用者打完或選用的英文字 */
