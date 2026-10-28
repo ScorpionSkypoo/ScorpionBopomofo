@@ -22,7 +22,8 @@ android {
         applicationId = "com.p3dro.scorpio.ime"
         minSdk = 26
         targetSdk = 34
-        versionCode = 100 + commitCount
+        // 開發工具：本地裝機時手機上的 dev 版本號可能比較大，用 -PversionCode=… 指定才蓋得過去
+        versionCode = (findProperty("versionCode") as String?)?.toInt() ?: (100 + commitCount)
         versionName = describe
 
         ndk { abiFilters += "arm64-v8a" }
