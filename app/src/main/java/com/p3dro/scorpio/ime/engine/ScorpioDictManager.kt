@@ -648,7 +648,17 @@ class ScorpioDictManager private constructor(private val context: Context) {
     }
 
     private fun typoFixes(tonelessTyped: String): Map<String, Int> =
-        synchronized(typoMemory) { typoMemory[tonelessTyped]?.toMap() } ?: emptyMap()
+        synchronized(typoMemory) { typoMemory[tonelessTyped]?.filterKeys { it != tonelessTyped } } ?: emptyMap()
+
+    /**
+     * 打 typed 時就是想打 typed 的次數：user_typo 裡 typed = intended 那一列（這個讀音有慣性打錯紀錄後，照打的讀音選字才記），
+     * 跟學過的單字（照這個讀音選過的字）取大的，剛改版、還沒記到時也看得出這個讀音平常就是照打
+     */
+    private fun literalCount(typed: String): Int {
+        val stored = synchronized(typoMemory) { typoMemory[typed]?.get(typed) } ?: 0
+        val singles = user.matches(typed, typed, 20, singleChar = true).sumOf { if (it.toneless == typed) it.count else 0 }
+        return maxOf(stored, singles)
+    }
 
     /** 慣性打錯的懲罰：選過越多次越便宜；打出來的音節本身合法時保守一點，避免蓋掉本來就想打的字 */
     private fun typoPenalty(count: Int, typedIsValid: Boolean): Double =
@@ -657,12 +667,15 @@ class ScorpioDictManager private constructor(private val context: Context) {
     /**
      * 穩定的慣性打錯：打 typed 想打 intended 至少 TYPO_HABIT_MIN 次，反方向不到三分之一（ㄒㄧㄣ 想打 ㄒㄧㄢ）。
      * 這是固定的個人習慣，修正它不算「改了你打的注音」，不受打對優先（LITERAL_MARGIN）限制；
-     * 兩個方向都常發生的（ㄧㄠ／ㄧㄡ）是隨手按錯，照打的優先
+     * 兩個方向都常發生的（ㄧㄠ／ㄧㄡ）是隨手按錯，照打的優先。
+     * 只打一個音節（single）時沒有前後的詞可以分辨，還要比照打的讀音選字的次數多：
+     * 平常多半照打、偶爾才按歪成這個讀音的，就照打的優先（多音節時詞本身分得出來，照原本的，重播比較好）
      */
-    private fun isTypoHabit(typed: String, intended: String, count: Int): Boolean {
+    private fun isTypoHabit(typed: String, intended: String, count: Int, single: Boolean): Boolean {
         if (count < TYPO_HABIT_MIN) return false
         val reverse = typoFixes(intended)[typed] ?: 0
-        return reverse * 3 < count
+        if (reverse * 3 >= count) return false
+        return !single || literalCount(typed) < count
     }
 
     private fun recordTypo(typed: String, intended: String) {
@@ -813,7 +826,8 @@ class ScorpioDictManager private constructor(private val context: Context) {
         for (k in parsed.indices) {
             val typed = toToneless(parsed[k].text)
             val intended = intendedOf[k]
-            if (intended != typed) recordTypo(typed, intended)
+            // 有慣性打錯紀錄的讀音，照打的選字也記一筆（typed = intended），判斷是不是穩定的習慣要跟它比
+            if (intended != typed || typoFixes(typed).isNotEmpty()) recordTypo(typed, intended)
             if (fuzzy.observe(typed, intended)) fuzzyDirty++
             for (j in typed.indices) {
                 val touch = parsed[k].touches[typed[j]] ?: continue
@@ -2275,7 +2289,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
         dp[0].add(Node(0.0, "", prevWord.orEmpty(), last2 = prevWord2.orEmpty()))
 
         val variantsPerPos = syllables.mapIndexed { idx, syl ->
-            getWeightedSyllableVariants(syl, touchesPerSyllable.getOrNull(idx) ?: emptyMap())
+            getWeightedSyllableVariants(syl, touchesPerSyllable.getOrNull(idx) ?: emptyMap(), single = n == 1)
         }
         val correctivePerPos = variantsPerPos.map { vs -> vs.filter { it.corrective }.associate { it.text to it.penalty } }
         val spanWords = mutableListOf<String>()
@@ -2534,7 +2548,8 @@ class ScorpioDictManager private constructor(private val context: Context) {
 
     private fun getWeightedSyllableVariants(
         rawSyllable: String,
-        touches: Map<Char, BopomofoComposer.TouchPoint> = emptyMap()
+        touches: Map<Char, BopomofoComposer.TouchPoint> = emptyMap(),
+        single: Boolean = false
     ): List<SyllableVariant> {
         val s = toToneless(rawSyllable)
         val map = LinkedHashMap<String, Double>()
@@ -2577,7 +2592,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
         for ((v, pen) in fuzzy.variants(s)) putMin(v, pen, corr = true)
 
         // (D2) 個人慣性打錯（以前打 s 卻選了 intended 讀音的字）
-        for ((intended, cnt) in typoFixes(s)) putMin(intended, typoPenalty(cnt, isValidSyllable(s)), corr = !isTypoHabit(s, intended, cnt))
+        for ((intended, cnt) in typoFixes(s)) putMin(intended, typoPenalty(cnt, isValidSyllable(s)), corr = !isTypoHabit(s, intended, cnt, single))
 
         // (E) 鄰鍵手滑容錯：一律納入實體相鄰鍵，觸控落點只調整各方向的可能性（偏向哪邊，哪邊的鍵懲罰越低）
         for (i in s.indices) {
@@ -3331,7 +3346,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
             userCreated = user.words().count { !words.hasWord(it) },
             bigrams = countOf("SELECT count(*) FROM user_bigram"),
             englishWords = countOf("SELECT count(*) FROM user_english"),
-            typos = countOf("SELECT count(*) FROM user_typo"),
+            typos = countOf("SELECT count(*) FROM user_typo WHERE typed <> intended"),
             touchSamples = spatial.sampleCount()
         )
     }
