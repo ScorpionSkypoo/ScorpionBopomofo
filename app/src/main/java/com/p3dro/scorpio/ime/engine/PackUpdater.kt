@@ -155,12 +155,50 @@ object PackUpdater {
         0L
     }
 
-    /** 下載到 part 檔並驗證大小與 sha256；不符就丟例外 */
-    private fun download(url: String, size: Long, sha: String, part: File, onProgress: ((Float) -> Unit)? = null) {
+    /** 伺服器回的不是 200 */
+    class HttpError(val code: Int) : java.io.IOException("HTTP $code")
+
+    /** 下載的檔案大小或 sha256 不符 */
+    class ChecksumError : java.io.IOException("檔案校驗不符")
+
+    /**
+     * 暫時性的錯誤（GitHub 回 5xx、逾時、連線中斷、檔案不完整）等一下再試，最多 3 次；
+     * 沒網路（查不到網址）、404 這種再試也一樣的直接丟出去
+     */
+    private fun <T> retrying(block: () -> T): T {
+        var attempt = 0
+        while (true) {
+            try {
+                return block()
+            } catch (e: java.io.IOException) {
+                val transient = when (e) {
+                    is HttpError -> e.code >= 500 || e.code == 429
+                    is java.net.UnknownHostException -> false
+                    else -> true
+                }
+                if (!transient || ++attempt >= 3) throw e
+                Log.w(TAG, "第 $attempt 次失敗，等一下再試：$e")
+                Thread.sleep(if (attempt == 1) 2_000L else 5_000L)
+            }
+        }
+    }
+
+    /** 失敗的原因，給設定頁顯示 */
+    fun failureReason(e: Throwable): String = when (e) {
+        is HttpError -> if (e.code >= 500) "GitHub 伺服器暫時沒回應（HTTP ${e.code}），過幾分鐘再試" else "伺服器回應 HTTP ${e.code}"
+        is ChecksumError -> "下載的檔案不完整，再試一次"
+        is java.net.UnknownHostException -> "連不上網路"
+        is java.net.SocketTimeoutException -> "連線逾時，網路可能不穩"
+        is java.io.IOException -> "連線中斷，網路可能不穩"
+        else -> "更新失敗（${e.javaClass.simpleName}）"
+    }
+
+    /** 下載到 part 檔並驗證大小與 sha256；不符就丟例外（暫時性的錯誤自動重試） */
+    private fun download(url: String, size: Long, sha: String, part: File, onProgress: ((Float) -> Unit)? = null) = retrying {
         fetch(url, part, size, onProgress)
         if ((size >= 0 && part.length() != size) || !sha256(part).equals(sha, ignoreCase = true)) {
             part.delete()
-            throw java.io.IOException("檔案校驗不符")
+            throw ChecksumError()
         }
     }
 
@@ -176,6 +214,28 @@ object PackUpdater {
         } catch (e: Exception) {
             Log.w(TAG, "更新 ${p.id} 失敗", e)
             false
+        } finally {
+            part.delete()
+        }
+    }
+
+    /**
+     * 設定頁的「更新」：下載套用線上最新版。成功、或已經是最新版回傳 null；失敗回傳原因（給人看的）
+     * onProgress：下載進度 0～1；下載完、開始套用時回報 -1（不確定進度）
+     */
+    suspend fun update(context: Context, id: String, onProgress: ((Float) -> Unit)? = null): String? = withContext(Dispatchers.IO) {
+        val dict = ScorpioDictManager.getInstance(context.applicationContext)
+        val part = File(context.cacheDir, "pack-$id.part")
+        try {
+            val p = parseManifest(fetchManifest(context)).firstOrNull { it.id == id } ?: return@withContext "線上找不到這個詞庫"
+            if (p.minAppVersion > appVersion(context)) return@withContext "這一版要先更新 App"
+            if (PackVersion.compare(p.version, dict.installedPackVersion(p.id, p.group)) <= 0) return@withContext null
+            download(p.url, p.size, p.sha256, part, onProgress)
+            onProgress?.invoke(-1f)
+            if (dict.applyPack(part) == null) "下載好了，但套用失敗" else null
+        } catch (e: Exception) {
+            Log.w(TAG, "更新 $id 失敗", e)
+            failureReason(e)
         } finally {
             part.delete()
         }
@@ -223,16 +283,20 @@ object PackUpdater {
     }
 
     /** 下載並套用鍵盤設定 */
-    suspend fun installConfig(context: Context, c: ManifestConfig): Boolean = withContext(Dispatchers.IO) {
+    suspend fun installConfig(context: Context, c: ManifestConfig): Boolean = updateConfig(context, c) == null
+
+    /** 下載並套用鍵盤設定：成功回傳 null，失敗回傳原因 */
+    suspend fun updateConfig(context: Context, c: ManifestConfig): String? = withContext(Dispatchers.IO) {
         val part = File(context.cacheDir, "config-${c.id}.part")
         try {
             download(c.url, c.size, c.sha256, part)
-            ImeConfig.install(context, part.readText()).also { ok ->
-                if (ok) ScorpioDictManager.getInstance(context.applicationContext).onConfigChanged()
-            }
+            if (ImeConfig.install(context, part.readText())) {
+                ScorpioDictManager.getInstance(context.applicationContext).onConfigChanged()
+                null
+            } else "下載好了，但套用失敗"
         } catch (e: Exception) {
             Log.w(TAG, "更新鍵盤設定失敗", e)
-            false
+            failureReason(e)
         } finally {
             part.delete()
         }
@@ -314,7 +378,7 @@ object PackUpdater {
     }
 
     private fun fetchManifest(context: Context): String {
-        val json = fetch(MANIFEST_URL) ?: ""
+        val json = retrying { fetch(MANIFEST_URL) } ?: ""
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(PREF_MANIFEST, json).apply()
         return json
     }
@@ -337,7 +401,7 @@ object PackUpdater {
         conn.instanceFollowRedirects = true
         conn.setRequestProperty("User-Agent", "ScorpioIME")
         try {
-            if (conn.responseCode != 200) throw java.io.IOException("HTTP ${conn.responseCode}")
+            if (conn.responseCode != 200) throw HttpError(conn.responseCode)
             return if (out != null) {
                 val size = if (total > 0) total else conn.contentLengthLong
                 conn.inputStream.use { input ->
