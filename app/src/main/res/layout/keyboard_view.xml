@@ -188,15 +188,37 @@
             </FrameLayout>
         </LinearLayout>
 
-        <androidx.recyclerview.widget.RecyclerView
-            android:id="@+id/rv_expanded_grid"
+        <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="0dp"
             android:layout_weight="1"
-            android:paddingStart="4dp"
-            android:paddingEnd="4dp"
-            android:paddingBottom="4dp"
-            android:overScrollMode="never" />
+            android:orientation="horizontal">
+
+            <!-- 簡拼讀音清單（比照 Gboard）：打 ㄒㄙ 時列出 ㄒ 可能是 ㄒㄧㄠ、ㄒㄧㄤ…，選了把那個音節換成完整讀音；沒有簡拼時隱藏 -->
+            <ScrollView
+                android:id="@+id/scroll_abbrev_readings"
+                android:layout_width="64dp"
+                android:layout_height="match_parent"
+                android:scrollbars="none"
+                android:overScrollMode="never"
+                android:visibility="gone">
+                <LinearLayout
+                    android:id="@+id/layout_abbrev_readings"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical" />
+            </ScrollView>
+
+            <androidx.recyclerview.widget.RecyclerView
+                android:id="@+id/rv_expanded_grid"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1"
+                android:paddingStart="4dp"
+                android:paddingEnd="4dp"
+                android:paddingBottom="4dp"
+                android:overScrollMode="never" />
+        </LinearLayout>
     </LinearLayout>
 
     <!-- 3. 注音大千主鍵盤 (按鍵高度 44dp，維持 2.5dp 原始黃金間距，全域由空間座標定位模式接管) -->

@@ -1262,7 +1262,7 @@ class SettingsActivity : AppCompatActivity() {
 
         sectionTitle("管理")
         val m = card()
-        navRow(m, R.drawable.ic_user_word, "自建詞", "查看並刪除你打出來的詞") { open(Page.USER_WORDS) }
+        navRow(m, R.drawable.ic_user_word, "自建詞", "新增詞，查看並刪除你打出來的詞") { open(Page.USER_WORDS) }
         button(m, "清除所有學習紀錄", filled = false, danger = true) {
             confirm(
                 "清除所有學習紀錄？",
@@ -1874,14 +1874,17 @@ class SettingsActivity : AppCompatActivity() {
     }
 
     private fun buildUserWords() {
+        val a = card()
+        navRow(a, R.drawable.ic_set_add, "新增詞", "字典沒有、或打簡拼（ㄒㄙ）叫不出來的詞，加了以後打完整注音或簡拼都會出現") { showAddWordDialog() }
         val c = card()
         val loading = loadingText(c)
         lifecycleScope.launch {
             val words = dict.userCreatedWords()
+            val manual = dict.manualWords()
             if (stack.lastOrNull() != Page.USER_WORDS) return@launch
             c.removeView(loading)
             if (words.isEmpty()) {
-                infoRow(c, "目前沒有自建詞", "系統詞典沒有、但你選過的詞會出現在這裡。")
+                infoRow(c, "目前沒有自建詞", "手動新增的詞，和系統詞典沒有、但你選過的詞會出現在這裡。")
                 return@launch
             }
             titleView.text = "自建詞（${words.size}）"
@@ -1889,7 +1892,7 @@ class SettingsActivity : AppCompatActivity() {
                 val row = row(c, null, clickable = false)
                 row.minimumHeight = dp(52)
                 row.setPadding(dp(16), dp(6), dp(4), dp(6))
-                texts(textColumn(row), word, "用過 $count 次")
+                texts(textColumn(row), word, if (word in manual) "手動新增" else "用過 $count 次")
                 row.addView(TextView(this@SettingsActivity).apply {
                     text = "刪除"
                     textSize = 14f
@@ -1906,6 +1909,119 @@ class SettingsActivity : AppCompatActivity() {
                 })
             }
         }
+    }
+
+    /**
+     * 新增詞：打詞，每個字的讀音照主詞庫推（破音字跟著詞走），可以在每個字底下改成別的讀音。
+     * 存進個人學習詞庫（見 ScorpioDictManager.addUserWord）
+     */
+    private fun showAddWordDialog() {
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(24), dp(8), dp(24), 0)
+        }
+        val input = EditText(this).apply {
+            hint = "要新增的詞，例如：笑死"
+            isSingleLine = true
+            inputType = InputType.TYPE_CLASS_TEXT
+        }
+        box.addView(input, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        val status = TextView(this).apply {
+            textAppearance(this, com.google.android.material.R.attr.textAppearanceBodyMedium)
+            setTextColor(cOnSurfaceVariant)
+            setPadding(0, dp(8), 0, dp(4))
+            text = "輸入後會自動帶出每個字的注音，破音字可以點注音換。"
+        }
+        box.addView(status)
+        val readingRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        box.addView(android.widget.HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            addView(readingRow)
+        })
+        // 目前每個字的讀音選單；查不到讀音的字讓整個詞不能新增
+        var spinners: List<android.widget.Spinner> = emptyList()
+        var current = ""
+        var job: kotlinx.coroutines.Job? = null
+
+        fun chars(w: String) = w.codePoints().toArray().map { String(Character.toChars(it)) }
+
+        fun refresh(word: String) {
+            job?.cancel()
+            job = lifecycleScope.launch {
+                kotlinx.coroutines.delay(250)
+                readingRow.removeAllViews()
+                spinners = emptyList()
+                current = ""
+                val cs = chars(word)
+                when {
+                    cs.isEmpty() -> return@launch
+                    !ScorpioDictManager.isHanWord(word) -> { status.text = "只能輸入中文字"; return@launch }
+                    cs.size > 10 -> { status.text = "最多 10 個字"; return@launch }
+                }
+                val guess = dict.suggestReading(word)?.split("-")
+                val list = ArrayList<android.widget.Spinner>()
+                for ((i, ch) in cs.withIndex()) {
+                    val options = dict.charReadings(ch)
+                    if (options.isEmpty()) {
+                        status.text = "「$ch」在詞庫裡查不到注音，沒辦法新增"
+                        readingRow.removeAllViews()
+                        return@launch
+                    }
+                    val col = LinearLayout(this@SettingsActivity).apply {
+                        orientation = LinearLayout.VERTICAL
+                        gravity = Gravity.CENTER_HORIZONTAL
+                        setPadding(0, 0, dp(4), 0)
+                    }
+                    col.addView(TextView(this@SettingsActivity).apply {
+                        text = ch
+                        textSize = 22f
+                        setTextColor(cOnSurface)
+                        gravity = Gravity.CENTER
+                    })
+                    val sp = android.widget.Spinner(this@SettingsActivity).apply {
+                        adapter = android.widget.ArrayAdapter(this@SettingsActivity, android.R.layout.simple_spinner_dropdown_item, options)
+                        setSelection(options.indexOf(guess?.getOrNull(i)).coerceAtLeast(0))
+                    }
+                    col.addView(sp)
+                    readingRow.addView(col)
+                    list.add(sp)
+                }
+                spinners = list
+                current = word
+                status.text = if (list.any { it.adapter.count > 1 }) "有破音字的話點注音換成要的讀音。" else "注音正確就按「新增」。"
+            }
+        }
+
+        input.addTextChangedListener(object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+            override fun afterTextChanged(s: android.text.Editable?) = refresh(s?.toString()?.trim().orEmpty())
+        })
+
+        val dialog = com.google.android.material.dialog.MaterialAlertDialogBuilder(this)
+            .setTitle("新增詞")
+            .setView(box)
+            .setPositiveButton("新增", null)
+            .setNegativeButton("取消", null)
+            .create()
+        dialog.setOnShowListener {
+            dialog.getButton(android.content.DialogInterface.BUTTON_POSITIVE).setOnClickListener {
+                val word = current
+                if (word.isEmpty() || spinners.isEmpty() || word != input.text.toString().trim()) return@setOnClickListener
+                val reading = spinners.joinToString("-") { it.selectedItem as String }
+                lifecycleScope.launch {
+                    if (dict.addUserWord(word, reading)) {
+                        android.widget.Toast.makeText(this@SettingsActivity, "已新增「$word」", android.widget.Toast.LENGTH_SHORT).show()
+                        dialog.dismiss()
+                        if (stack.lastOrNull() == Page.USER_WORDS) render()
+                    } else {
+                        status.text = "新增失敗"
+                    }
+                }
+            }
+        }
+        dialog.show()
+        input.requestFocus()
     }
 
     // ---------- 關於 ----------

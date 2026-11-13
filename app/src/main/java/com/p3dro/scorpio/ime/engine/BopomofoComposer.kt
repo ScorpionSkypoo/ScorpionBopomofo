@@ -156,7 +156,9 @@ class BopomofoComposer {
         /** 按下的時間（SystemClock.uptimeMillis）；0 是不知道 */
         val time: Long = 0L,
         /** 按下當下判斷的握法（PostureTracker：0 不確定、1 雙手拇指、2 單手） */
-        val posture: Int = 0
+        val posture: Int = 0,
+        /** 不是手指按的（簡拼讀音清單選了讀音換進來的）：沒有落點可學 */
+        val synthetic: Boolean = false
     ) {
         val from: Pair<Double, Double>? get() = if (fromX.isNaN()) null else fromX.toDouble() to fromY.toDouble()
     }
@@ -251,6 +253,31 @@ class BopomofoComposer {
             }
         }
         return getAllSyllables().size
+    }
+
+    /**
+     * 把第 index 個音節換成完整讀音（簡拼讀音清單選了 ㄒ→ㄒㄧㄠ）：原本那幾下換成這個讀音的鍵（標成 synthetic），
+     * 其他音節的按鍵不動。換完的切分對不上（跟後面的音節黏在一起）就不換，回傳 false。大千注音才有
+     */
+    fun replaceSyllable(index: Int, reading: String): Boolean {
+        if (decoder != null || reading.isEmpty()) return false
+        val syllables = parsed()
+        if (index !in syllables.indices) return false
+        val start = syllables.take(index).sumOf { it.keyCount }
+        val old = touchHistory.subList(start, start + syllables[index].keyCount).toList()
+        // 原本打的聲調留著（ㄙˇ 換成 ㄙㄨㄛˇ）
+        val tone = old.lastOrNull()?.takeIf { TONES.contains(it.char) }
+        val fresh = reading.map { TouchPoint(it, synthetic = true) } + listOfNotNull(tone)
+        repeat(old.size) { touchHistory.removeAt(start) }
+        touchHistory.addAll(start, fresh)
+        val after = parsed().map { it.text }
+        val expected = syllables.map { it.text }.toMutableList().also { it[index] = reading + (tone?.char?.toString() ?: "") }
+        if (after != expected) {
+            repeat(fresh.size) { touchHistory.removeAt(start) }
+            touchHistory.addAll(start, old)
+            return false
+        }
+        return true
     }
 
     /** 前 count 個音節實際按下的鍵（含落點），供個人化偏移學習 */

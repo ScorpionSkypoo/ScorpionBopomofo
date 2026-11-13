@@ -27,6 +27,7 @@ import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.core.content.ContextCompat
@@ -107,6 +108,11 @@ class ScorpioImeService : InputMethodService() {
         NONE, CANDIDATES, EMOJI, KAOMOJI, PLUGINS
     }
     private var currentExpandedType = ExpandedType.NONE
+        set(value) {
+            field = value
+            // 簡拼讀音清單只放在候選字的展開面板（Emoji、顏文字、擴充功能不放）
+            if (value != ExpandedType.CANDIDATES) showAbbrevReadings(null)
+        }
     private val zhuyinKeyViews = mutableMapOf<Char, View>()
     // 候選列是否穿插 emoji／顏文字；關閉時只在展開面板以分頁出現
     private var inlineSymbols = true
@@ -1132,7 +1138,7 @@ class ScorpioImeService : InputMethodService() {
                     // 徹底清除輸入框中的暫存注音，絕不殘留成已上屏字！
                     clearComposer(discardComposingText = true)
                 }
-                rememberRetype(removed)
+                rememberRetype(removed?.takeUnless { it.synthetic })
                 return
             } else {
                 // 若已經選好字或純文字，按一下刪除鍵刪掉前面一個字，並取消接續詞聯想
@@ -3281,9 +3287,11 @@ class ScorpioImeService : InputMethodService() {
             val syllables = composer.getAllSyllables()
             if (syllables.isEmpty()) {
                 layoutExpandedHeader?.visibility = View.GONE
+                showAbbrevReadings(null)
                 showExpandedWords(rvGrid, candidateAdapter?.currentList ?: emptyList())
                 return@launch
             }
+            showAbbrevReadings(if (composer.decoder == null) dictManager.abbrevSyllableChoices(syllables) else null, rvGrid)
             val groups = dictManager.getCandidateGroups(composer.getAllSegmentations(), composer.hasExplicitTone(), contextWord, zhuyinTouches(), prevWord2 = contextWord2)
             if (inlineSymbols || (groups.emoji.isEmpty() && groups.kaomoji.isEmpty())) {
                 layoutExpandedHeader?.visibility = View.GONE
@@ -3309,6 +3317,40 @@ class ScorpioImeService : InputMethodService() {
                 }
             }
             showExpandedWords(rvGrid, segmentCandidates(groups.words, syllables.size))
+        }
+    }
+
+    /**
+     * 展開面板左欄的簡拼讀音清單（比照 Gboard）：打 ㄒㄙ 時列出 ㄒ 可能是 ㄒㄧㄠ、ㄒㄧㄤ…（照字頻排，見 abbrevSyllableChoices）。
+     * 點了把那個音節換成完整讀音、重查候選，簡拼排不上來的冷門詞也找得到；choices 是 null 就收起來
+     */
+    private fun showAbbrevReadings(choices: ScorpioDictManager.AbbrevChoices?, rvGrid: RecyclerView? = null) {
+        val root = keyboardRootView ?: return
+        val scroll = root.findViewById<ScrollView>(R.id.scroll_abbrev_readings) ?: return
+        val box = root.findViewById<LinearLayout>(R.id.layout_abbrev_readings) ?: return
+        box.removeAllViews()
+        if (choices == null || rvGrid == null) {
+            scroll.visibility = View.GONE
+            return
+        }
+        scroll.visibility = View.VISIBLE
+        scroll.scrollTo(0, 0)
+        for (reading in choices.readings) {
+            box.addView(TextView(ui).apply {
+                text = reading
+                textSize = 15f
+                gravity = Gravity.CENTER
+                maxLines = 1
+                setTextColor(ui.getColor(R.color.ime_text_primary))
+                background = keyDrawable(R.attr.imeItemBackgroundBorderless)
+                setOnClickListener {
+                    triggerHaptic(it)
+                    if (composer.replaceSyllable(choices.index, reading)) {
+                        updateComposingAndCandidates()
+                        loadAllWordCandidates(rvGrid)
+                    }
+                }
+            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dpToPx(44)))
         }
     }
 

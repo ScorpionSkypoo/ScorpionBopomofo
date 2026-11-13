@@ -86,6 +86,9 @@ class ScorpioDictManager private constructor(private val context: Context) {
         private const val POOL_MARGIN = 5.0
         // 簡拼（只打聲母）查到的詞比打完整讀音的少多少分（log10）
         private const val ABBREV_COST = 1.5
+        // 簡拼讀音清單（abbrevSyllableChoices）最多列幾個讀音；算比例時每組聲母最多看幾個詞
+        const val ABBREV_CHOICES_MAX = 16
+        const val ABBREV_CHOICES_SCAN = 400
         // 字典接續詞（bigram 資料包）存 ln P(next | prev)，乘這個換成 log10（1 / ln 10）
         private const val LN_TO_LOG10 = 0.4342944819032518
         // 注音組合依懲罰排不進前幾名、但拼得成詞的另外留幾個：懲罰上限（約兩個鄰鍵／慣性打錯）、最多幾個
@@ -109,7 +112,10 @@ class ScorpioDictManager private constructor(private val context: Context) {
         // 英文學習詞（key 為小寫，word 保留最近一次的大小寫，例如 iPhone）
         // 個人慣性打錯：打了 typed 音節、實際選的是 intended 讀音的字（例如 ㄉㄨㄠ → ㄉㄧㄠ）
         private const val USER_TYPO_DDL = "CREATE TABLE IF NOT EXISTS user_typo (typed TEXT NOT NULL, intended TEXT NOT NULL, count INTEGER NOT NULL DEFAULT 1, last_used INTEGER NOT NULL, PRIMARY KEY(typed, intended))"
-        private const val USER_TRIGRAM_DDL = "CREATE TABLE IF NOT EXISTS user_trigram (prev2 TEXT NOT NULL, prev1 TEXT NOT NULL, next_word TEXT NOT NULL, count INTEGER NOT NULL DEFAULT 1, last_used INTEGER NOT NULL, PRIMARY KEY(prev2, prev1, next_word))"
+        private const val USER_MANUAL_DDL = "CREATE TABLE IF NOT EXISTS user_manual (word TEXT NOT NULL, toneless TEXT NOT NULL, created INTEGER NOT NULL, PRIMARY KEY(word, toneless))"
+        // 手動新增的詞在 user_dict 的次數（count，實際算選過 count − 1 次）：跟選過三次一樣，打簡拼也排得上來
+        const val MANUAL_COUNT = 4
+        private const val USER_TRIGRAM_DDL ="CREATE TABLE IF NOT EXISTS user_trigram (prev2 TEXT NOT NULL, prev1 TEXT NOT NULL, next_word TEXT NOT NULL, count INTEGER NOT NULL DEFAULT 1, last_used INTEGER NOT NULL, PRIMARY KEY(prev2, prev1, next_word))"
         private const val USER_ENGLISH_DDL = "CREATE TABLE IF NOT EXISTS user_english (key TEXT PRIMARY KEY, word TEXT NOT NULL, count INTEGER NOT NULL DEFAULT 1, last_used INTEGER NOT NULL)"
 
 
@@ -475,6 +481,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
                 canonicalizeUserWords()
                 prefs.edit().putBoolean(PREF_USER_DICT_CANONICAL, true).apply()
             }
+            loadManualWords(database)
             user.load(database)
             Log.i(TAG, "個人學習資料庫就緒")
         } catch (e: Exception) {
@@ -513,6 +520,37 @@ class ScorpioDictManager private constructor(private val context: Context) {
         database.execSQL(USER_ENGLISH_DDL)
         database.execSQL(USER_TYPO_DDL)
         database.execSQL(USER_TRIGRAM_DDL)
+        database.execSQL(USER_MANUAL_DDL)
+    }
+
+    // 手動新增的詞（user_manual）：「詞|無聲調讀音」
+    private val manualKeys = HashSet<String>()
+
+    private fun manualKey(word: String, toneless: String) = "$word|$toneless"
+
+    private fun isManual(word: String, toneless: String) = synchronized(manualKeys) { manualKey(word, toneless) in manualKeys }
+
+    /**
+     * 讀入手動新增的詞，並把它們在 user_dict 的次數補回 MANUAL_COUNT、最後使用時間設成現在：
+     * 學習會隨時間淡出（LEARN_HALF_LIFE_DAYS），手動加的詞不該過一陣子就簡拼叫不出來
+     */
+    private fun loadManualWords(database: SQLiteDatabase) {
+        val keys = HashSet<String>()
+        try {
+            database.rawQuery("SELECT word, toneless FROM user_manual", null).use { c ->
+                while (c.moveToNext()) keys.add(manualKey(c.getString(0), c.getString(1)))
+            }
+            if (keys.isNotEmpty()) database.execSQL(
+                "UPDATE user_dict SET last_used = ?, count = max(count, ?) WHERE EXISTS (SELECT 1 FROM user_manual m WHERE m.word = user_dict.word AND m.toneless = user_dict.toneless)",
+                arrayOf(System.currentTimeMillis(), MANUAL_COUNT)
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "讀取手動新增的詞失敗", e)
+        }
+        synchronized(manualKeys) {
+            manualKeys.clear()
+            manualKeys.addAll(keys)
+        }
     }
 
     /** 舊版的學習紀錄（在 scorpio_dict.db 裡）依原本的順序搬到 scorpio_user.db */
@@ -824,6 +862,8 @@ class ScorpioDictManager private constructor(private val context: Context) {
         }
         var added = 0
         for (k in parsed.indices) {
+            // 簡拼讀音清單換進來的音節不是手指按的：落點、慣性打錯、讀音混用都不學
+            if (parsed[k].touches.values.any { it.synthetic }) continue
             val typed = toToneless(parsed[k].text)
             val intended = intendedOf[k]
             // 有慣性打錯紀錄的讀音，照打的選字也記一筆（typed = intended），判斷是不是穩定的習慣要跟它比
@@ -2542,6 +2582,50 @@ class ScorpioDictManager private constructor(private val context: Context) {
         if (syl.length == 1 && BopomofoComposer.INITIALS.contains(syl[0])) "$syl%" else syl
     }
 
+    /** 簡拼讀音清單：index 是只打聲母的那個音節，readings 照 shares（在這組簡拼裡的字頻比例）由高到低 */
+    data class AbbrevChoices(val index: Int, val readings: List<String>, val shares: List<Double>)
+
+    /**
+     * 簡拼讀音清單（展開面板左欄，比照 Gboard）：第一個只打聲母的音節，在這組簡拼查得到的詞裡可能是哪些讀音
+     * （打 ㄒㄙ：ㄒㄧㄠ、ㄒㄧㄤ、ㄒㄩㄣ…），照這些詞的字頻合計排序；學過的詞照字典最常用的那個詞算、再乘學過的次數。
+     * 選了就把那個音節換成完整讀音，排不進簡拼前幾名的冷門詞也找得到。
+     * 只算查得到詞的讀音，最多 limit 個；不到兩種讀音（沒得選）或沒有簡拼時是 null。
+     * ㄓㄔㄕㄖㄗㄘㄙ 打了聲調是那個字本身，不算簡拼（同 spanBase）
+     */
+    suspend fun abbrevSyllableChoices(syllables: List<String>, limit: Int = ABBREV_CHOICES_MAX): AbbrevChoices? = withContext(Dispatchers.IO) {
+        if (syllables.size < 2) return@withContext null
+        val words = data.words
+        val subSyls = syllables.map { toToneless(it.replace("ˉ", "")) }
+        val idx = subSyls.indices.firstOrNull { i ->
+            val s = subSyls[i]
+            s.length == 1 && s[0] in BopomofoComposer.INITIALS &&
+                !(s[0] in BopomofoComposer.STANDALONE_INITIALS && typedToneOf(syllables[i]) != null)
+        } ?: return@withContext null
+        val mass = HashMap<String, Double>()
+        var top = 0.0
+        for (h in abbrevHits(subSyls, ABBREV_CHOICES_SCAN)) {
+            val r = toToneless(h.reading).split("-").getOrNull(idx) ?: continue
+            if (r.isEmpty() || r[0] != subSyls[idx][0]) continue
+            val m = 10.0.pow(h.score)
+            mass[r] = (mass[r] ?: 0.0) + m
+            if (m > top) top = m
+        }
+        run {
+            val now = System.currentTimeMillis()
+            for (u in user.initialsLike(getInitialsFromReading(subSyls.joinToString("-")), abbrevPattern(subSyls), 24)) {
+                if (!isHanWord(u.word) || hanLength(u.word) != syllables.size) continue
+                val r = u.toneless.split("-").getOrNull(idx) ?: continue
+                val c = decayedCount(timesChosen(u.count), u.lastUsed, now)
+                if (c <= 0.0) continue
+                mass[r] = (mass[r] ?: 0.0) + top.coerceAtLeast(1e-6) * c
+            }
+        }
+        if (mass.size < 2) return@withContext null
+        val total = mass.values.sum()
+        val sorted = mass.entries.sortedWith(compareByDescending<Map.Entry<String, Double>> { it.value }.thenBy { it.key }).take(limit)
+        AbbrevChoices(idx, sorted.map { it.key }, sorted.map { it.value / total })
+    }
+
 
     /** corrective：把打的注音改成別的（按錯鄰鍵、慣性打錯、模糊音）；補介音、簡拼展開不算 */
     data class SyllableVariant(val text: String, val penalty: Double, val corrective: Boolean = false)
@@ -2846,9 +2930,12 @@ class ScorpioDictManager private constructor(private val context: Context) {
     private fun unlearn(toneless: String, word: String, prevWord: String?) {
         val database = db ?: return
         try {
-            database.execSQL("UPDATE user_dict SET count = count - 1 WHERE toneless = ? AND word = ?", arrayOf(toneless, word))
-            database.execSQL("DELETE FROM user_dict WHERE toneless = ? AND word = ? AND count <= 1", arrayOf(toneless, word))
-            user.reloadWord(database, word)
+            // 手動新增的詞跳過不選不扣（要刪就到設定頁或長按候選刪）
+            if (!isManual(word, toneless)) {
+                database.execSQL("UPDATE user_dict SET count = count - 1 WHERE toneless = ? AND word = ?", arrayOf(toneless, word))
+                database.execSQL("DELETE FROM user_dict WHERE toneless = ? AND word = ? AND count <= 1", arrayOf(toneless, word))
+                user.reloadWord(database, word)
+            }
             if (!prevWord.isNullOrBlank()) {
                 database.execSQL("UPDATE user_bigram SET count = count - 1 WHERE prev_word = ? AND next_word = ?", arrayOf(prevWord, word))
                 database.execSQL("DELETE FROM user_bigram WHERE prev_word = ? AND next_word = ? AND count <= 1", arrayOf(prevWord, word))
@@ -2892,6 +2979,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
             database.beginTransaction()
             try {
                 database.delete("user_dict", "word = ?", arrayOf(word))
+                database.delete("user_manual", "word = ?", arrayOf(word))
                 database.delete("user_bigram", "prev_word = ? OR next_word = ?", arrayOf(word, word))
                 database.delete("user_trigram", "prev2 = ? OR prev1 = ? OR next_word = ?", arrayOf(word, word, word))
                 database.setTransactionSuccessful()
@@ -2899,6 +2987,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
                 database.endTransaction()
             }
             user.forgetWord(word)
+            synchronized(manualKeys) { manualKeys.removeAll { it.startsWith("$word|") } }
             evictCandidateCaches()
             userOnlyCache.evictAll()
             Log.i(TAG, "已自個人學習庫刪除一個詞")
@@ -3351,14 +3440,15 @@ class ScorpioDictManager private constructor(private val context: Context) {
         )
     }
 
-    /** 使用者自建詞（系統詞典沒有的），最近用過的在前 */
+    /** 使用者自建詞（系統詞典沒有的，加上手動新增的），最近用過的在前 */
     suspend fun userCreatedWords(limit: Int = 2000): List<Pair<String, Int>> = withContext(Dispatchers.IO) {
         val out = ArrayList<Pair<String, Int>>()
+        val manual = manualWords()
         try {
             db?.rawQuery("SELECT word, sum(count) AS c, max(last_used) AS lu FROM user_dict GROUP BY word ORDER BY lu DESC", null)?.use { c ->
                 while (c.moveToNext() && out.size < limit) {
                     val w = c.getString(0)
-                    if (!words.hasWord(w)) out.add(w to c.getInt(1))
+                    if (w in manual || !words.hasWord(w)) out.add(w to c.getInt(1))
                 }
             }
         } catch (e: Exception) {
@@ -3367,18 +3457,68 @@ class ScorpioDictManager private constructor(private val context: Context) {
         out
     }
 
+    /** 手動新增的詞 */
+    fun manualWords(): Set<String> = synchronized(manualKeys) { manualKeys.mapTo(HashSet()) { it.substringBefore('|') } }
+
+    /** 新增詞的讀音預設值：照主詞庫推（同匯入）；推不出來是 null */
+    suspend fun suggestReading(word: String): String? = withContext(Dispatchers.IO) { guessReading(word, HashMap()) }
+
+    /** 一個字在詞庫裡的所有讀音（有聲調），新增詞時給破音字選；常用的在前 */
+    suspend fun charReadings(ch: String): List<String> = withContext(Dispatchers.IO) {
+        words.byWord(ch, 16).map { it.reading }.distinct()
+    }
+
+    /**
+     * 手動新增一個詞（設定頁「自建詞」）：記進個人學習詞庫（user_dict），次數給 MANUAL_COUNT，跟選過幾次的詞一樣，
+     * 打完整讀音或簡拼（ㄒㄙ）都找得到；學習照樣會淡出、跳過會扣，所以另外記在 user_manual，開鍵盤時補回、跳過不扣。
+     * reading 是「ㄒㄧㄠˋ-ㄙˇ」，音節數要跟字數一樣
+     */
+    suspend fun addUserWord(word: String, reading: String): Boolean = withContext(Dispatchers.IO) {
+        val database = db ?: return@withContext false
+        if (!isLearnable(reading, word)) return@withContext false
+        try {
+            val toneless = toToneless(reading)
+            val now = System.currentTimeMillis()
+            database.beginTransaction()
+            try {
+                database.execSQL(
+                    "INSERT OR IGNORE INTO user_dict (reading, toneless, initials, word, count, last_used) VALUES (?, ?, ?, ?, ?, ?)",
+                    arrayOf(reading, toneless, getInitialsFromReading(reading), word, MANUAL_COUNT, now)
+                )
+                database.execSQL(
+                    "UPDATE user_dict SET count = max(count, ?), last_used = ? WHERE reading = ? AND word = ?",
+                    arrayOf(MANUAL_COUNT, now, reading, word)
+                )
+                database.execSQL("INSERT OR REPLACE INTO user_manual (word, toneless, created) VALUES (?, ?, ?)", arrayOf(word, toneless, now))
+                database.setTransactionSuccessful()
+            } finally {
+                database.endTransaction()
+            }
+            synchronized(manualKeys) { manualKeys.add(manualKey(word, toneless)) }
+            user.reloadWord(database, word)
+            evictCandidateCaches()
+            userOnlyCache.evictAll()
+            Log.i(TAG, "手動新增一個詞（${hanLength(word)} 字）")
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "手動新增詞失敗", e)
+            false
+        }
+    }
+
     /** 清除所有個人學習（中文選字、接續搭配、英文、打錯修正）；按鍵校正另外重設 */
     suspend fun clearLearning(): Boolean = withContext(Dispatchers.IO) {
         val database = db ?: return@withContext false
         try {
             database.beginTransaction()
             try {
-                for (t in listOf("user_dict", "user_bigram", "user_trigram", "user_english", "user_typo")) database.delete(t, null, null)
+                for (t in listOf("user_dict", "user_bigram", "user_trigram", "user_english", "user_typo", "user_manual")) database.delete(t, null, null)
                 database.setTransactionSuccessful()
             } finally {
                 database.endTransaction()
             }
             user.clear()
+            synchronized(manualKeys) { manualKeys.clear() }
             synchronized(typoMemory) { typoMemory.clear() }
             fuzzy.restore(null)
             spatialPrefs.edit().remove(PREF_FUZZY).apply()
