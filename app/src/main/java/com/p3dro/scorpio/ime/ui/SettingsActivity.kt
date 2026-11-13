@@ -1812,6 +1812,8 @@ class SettingsActivity : AppCompatActivity() {
         val tb = card()
         boolSwitch(tb, "最近使用的 Emoji 與顏文字", "工具列中間常駐最近用過的 Emoji 和顏文字，可以左右滑。",
             com.p3dro.scorpio.ime.ScorpioImeService.PREF_RECENT_BAR, false)
+        boolSwitch(tb, "剛複製的內容", "複製後三分鐘內打開鍵盤，工具列會出現剛複製的文字或圖片，點一下就貼上（按 ✕ 收起）。標成敏感的內容（密碼）不顯示文字。只在手機上，不會記錄。",
+            com.p3dro.scorpio.ime.ScorpioImeService.PREF_CLIP_CHIP, true)
         infoRow(tb, "工具", "用開關決定要不要顯示（最多 ${com.p3dro.scorpio.ime.engine.Toolbar.MAX_SLOTS} 個），按住右邊的把手拖拉調整順序。開著最近使用列時只先放前兩個，其他的按「⋯」展開。關掉「設定」的話，從桌面的 App 圖示也能進來。")
         toolList(tb)
 

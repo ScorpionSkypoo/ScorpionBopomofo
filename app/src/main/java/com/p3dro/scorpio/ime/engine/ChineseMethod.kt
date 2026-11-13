@@ -34,7 +34,9 @@ data class ChineseMethod(
     /** 字鍵排（schema 2）：QWERTY 面板的，或大千注音鍵盤的（例如三星的鍵位）；null 是內建的 QWERTY／大千 */
     val keys: KeyboardLayout? = null,
     /** 版面檔的長按副鍵（寫在預設值上面，見 LongPressKeys） */
-    val longOverrides: Map<Char, List<String>> = emptyMap()
+    val longOverrides: Map<Char, List<String>> = emptyMap(),
+    /** 這個版面自帶的符號鍵盤（中文切過去時用，例如三星鍵位照三星鍵盤的符號）；null 用鍵盤設定的 */
+    val symbols: List<ImeConfig.SymbolPage>? = null
 ) {
 
     enum class Engine(val id: String) { DACHEN("dachen"), ZHUYIN26("zhuyin26"), PINYIN("pinyin"), CANGJIE("cangjie"), QUICK("quick") }
@@ -100,7 +102,9 @@ data class ChineseMethod(
                     o.optString("language").ifEmpty { "zh-TW" },
                     o.optString("languageName").ifEmpty { "中文（台灣）" },
                     keys,
-                    long
+                    long,
+                    // 符號頁寫錯只是不用它（版面照樣能打字）
+                    o.optJSONArray("symbols")?.let { runCatching { ImeConfig.parseSymbolPages(it, fixed = false) }.getOrNull() }
                 )
             }
         } catch (e: Exception) {

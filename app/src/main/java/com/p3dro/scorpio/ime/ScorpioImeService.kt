@@ -24,6 +24,7 @@ import android.view.WindowInsetsController
 import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
 import android.widget.Button
+import android.content.ClipboardManager
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
@@ -185,6 +186,10 @@ class ScorpioImeService : InputMethodService() {
         const val PREF_KEY_RIPPLE = "key_ripple"
         const val PREF_NUMBER_ROW = "number_row"
         const val PREF_RECENT_BAR = "recent_bar"
+        // 工具列顯示剛複製的內容（點了貼上）
+        const val PREF_CLIP_CHIP = "clip_chip"
+        // 複製後多久內還顯示
+        private const val CLIP_OFFER_MS = 3 * 60_000L
         const val PREF_PHOTO_ALPHA = "photo_alpha"
         const val PREF_RECENT_LIST = "recent_symbols"
         // 握法（設定「選字引擎」）：auto／two／one；自動判斷看不出來時當成 two／one／none
@@ -238,6 +243,7 @@ class ScorpioImeService : InputMethodService() {
             getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
         }
         vibrator = vib?.takeIf { it.hasVibrator() }
+        clipboard = getSystemService(ClipboardManager::class.java)?.also { it.addPrimaryClipChangedListener(clipListener) }
         clickVibrationEffect = if (
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
             vibrator?.areAllEffectsSupported(VibrationEffect.EFFECT_CLICK) == Vibrator.VIBRATION_EFFECT_SUPPORT_YES
@@ -524,6 +530,7 @@ class ScorpioImeService : InputMethodService() {
         isVibrationEnabled = prefs.getBoolean("vibrate_on_keypress", false)
         keyPreview?.enabled = prefs.getBoolean("key_preview", true)
         inlineSymbols = prefs.getBoolean("inline_emoji_kaomoji", true)
+        refreshClipOffer()
         dictManager.postureMode = postureOf(prefs.getString(PREF_POSTURE_MODE, "auto"))
         dictManager.postureFallback = postureOf(prefs.getString(PREF_POSTURE_FALLBACK, "two"))
         lastCommittedWord = null
@@ -669,6 +676,116 @@ class ScorpioImeService : InputMethodService() {
             updateBarVisibility()
         }
     }
+
+    override fun onDestroy() {
+        clipboard?.removePrimaryClipChangedListener(clipListener)
+        super.onDestroy()
+    }
+
+    // ---------- 剪貼簿：剛複製的內容放在工具列，點了貼上（比照三星、Gboard） ----------
+
+    /** text 是完整內容（只在記憶體，不記錄）；sensitive 是複製的 App 標成敏感（密碼），工具列不顯示內容 */
+    private class ClipOffer(val stamp: Long, val text: String?, val image: Boolean, val sensitive: Boolean)
+
+    private var clipboard: ClipboardManager? = null
+    private var clipOffer: ClipOffer? = null
+    // 貼過或按了 ✕ 的那次複製（ClipDescription 的時間）：同一次複製不再顯示
+    private var clipUsedStamp = 0L
+    private val clipListener = ClipboardManager.OnPrimaryClipChangedListener { refreshClipOffer() }
+    private val clipExpiry = Runnable { refreshClipOffer() }
+
+    /** 重看剪貼簿：CLIP_OFFER_MS 內複製、還沒貼過的文字或圖片才顯示，過期自動收起 */
+    private fun refreshClipOffer() {
+        clipOffer = readClipOffer()
+        arrangeIdleBar()
+        val root = keyboardRootView ?: return
+        root.removeCallbacks(clipExpiry)
+        clipOffer?.let { root.postDelayed(clipExpiry, (it.stamp + CLIP_OFFER_MS - System.currentTimeMillis()).coerceAtLeast(1000L)) }
+    }
+
+    private fun readClipOffer(): ClipOffer? {
+        if (!prefs.getBoolean(PREF_CLIP_CHIP, true)) return null
+        val cm = clipboard ?: return null
+        // 預設輸入法讀得到剪貼簿，也不會跳「已貼上」的提示；讀不到（不是預設輸入法時）就不顯示
+        val desc = try { cm.primaryClipDescription } catch (e: Exception) { null } ?: return null
+        val stamp = desc.timestamp
+        if (stamp <= 0L || stamp == clipUsedStamp || System.currentTimeMillis() - stamp > CLIP_OFFER_MS) return null
+        val clip = try { cm.primaryClip } catch (e: Exception) { null } ?: return null
+        if (clip.itemCount == 0) return null
+        val sensitive = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            desc.extras?.getBoolean(android.content.ClipDescription.EXTRA_IS_SENSITIVE) == true
+        val image = (0 until desc.mimeTypeCount).any { desc.getMimeType(it).startsWith("image/") }
+        val text = clip.getItemAt(0).text?.toString()?.takeIf { it.isNotBlank() }
+        if (text == null && !image) return null
+        return ClipOffer(stamp, text, image, sensitive)
+    }
+
+    private fun pasteClip() {
+        val offer = clipOffer ?: return
+        val ic = currentInputConnection ?: return
+        // 文字直接送出；圖片交給 App 自己的貼上（App 收不收圖片由它決定）
+        if (offer.text != null && !offer.image) ic.commitText(offer.text, 1) else ic.performContextMenuAction(android.R.id.paste)
+        dismissClip(offer)
+    }
+
+    private fun dismissClip(offer: ClipOffer) {
+        clipUsedStamp = offer.stamp
+        clipOffer = null
+        keyboardRootView?.removeCallbacks(clipExpiry)
+        arrangeIdleBar()
+    }
+
+    /** 工具列上的「📋 內容」膠囊：點了貼上，右邊 ✕ 收起 */
+    private fun buildClipChip(offer: ClipOffer): View {
+        val preview = when {
+            offer.sensitive -> "••••••"
+            offer.image && offer.text == null -> "圖片"
+            else -> offer.text.orEmpty().replace(Regex("\\s+"), " ").trim().take(60)
+        }
+        val chip = LinearLayout(ui).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dpToPx(12), 0, dpToPx(4), 0)
+            background = android.graphics.drawable.GradientDrawable().apply {
+                cornerRadius = dpToPx(17).toFloat()
+                setColor(ui.getColor(R.color.ime_key_function_bg))
+            }
+            contentDescription = "貼上剛複製的內容"
+            setOnClickListener {
+                triggerHaptic(it)
+                pasteClip()
+            }
+            addView(ImageView(ui).apply { setImageResource(R.drawable.plugin_icon_clipboard) }, LinearLayout.LayoutParams(dpToPx(18), dpToPx(18)))
+            addView(TextView(ui).apply {
+                text = preview
+                textSize = 14f
+                maxLines = 1
+                ellipsize = android.text.TextUtils.TruncateAt.END
+                setTextColor(ui.getColor(R.color.ime_text_primary))
+                setPadding(dpToPx(6), 0, dpToPx(2), 0)
+            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            addView(TextView(ui).apply {
+                text = "✕"
+                textSize = 13f
+                gravity = Gravity.CENTER
+                setTextColor(ui.getColor(R.color.ime_text_secondary))
+                contentDescription = "不要貼上"
+                setOnClickListener {
+                    triggerHaptic(it)
+                    dismissClip(offer)
+                }
+            }, LinearLayout.LayoutParams(dpToPx(28), dpToPx(28)))
+        }
+        // 膠囊照內容寬度、最寬到可用空間，在中間
+        return FrameLayout(ui).apply {
+            addView(chip, FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dpToPx(34), Gravity.CENTER).apply {
+                marginStart = dpToPx(4)
+                marginEnd = dpToPx(4)
+            })
+        }
+    }
+
+    private var clipChipView: View? = null
 
     override fun onTrimMemory(level: Int) {
         super.onTrimMemory(level)
@@ -3046,6 +3163,8 @@ class ScorpioImeService : InputMethodService() {
         val idleBar = layoutIdleBar as? LinearLayout
         updateStripView?.let { idleBar?.removeView(it) }
         updateStripView = null
+        clipChipView?.let { idleBar?.removeView(it) }
+        clipChipView = null
         if (updateStage != null && idleBar != null) {
             for (v in listOf(scrollTools, divider, scrollRecent, back)) v?.visibility = View.GONE
             updateStripView = buildUpdateStrip().also {
@@ -3064,7 +3183,9 @@ class ScorpioImeService : InputMethodService() {
         back?.visibility = if (panelOpen) View.VISIBLE else View.GONE
 
         val all = com.p3dro.scorpio.ime.engine.Toolbar.visible(this)
-        val recentOn = prefs.getBoolean(PREF_RECENT_BAR, false) && !panelOpen
+        // 剛複製的內容：放在最近使用列的位置（工具照開著最近使用列的排法收起來）
+        val clip = clipOffer?.takeIf { !panelOpen }
+        val recentOn = (prefs.getBoolean(PREF_RECENT_BAR, false) || clip != null) && !panelOpen
         val canFold = recentOn && all.size > MAX_TOOLS_WITH_RECENT
         val compact = canFold && !toolsExpanded
         // 有新版：「更新」放在工具最前面（收合時只在「⋯」上亮紅點，展開才看得到）；紅點每一版只亮到看過為止
@@ -3100,8 +3221,13 @@ class ScorpioImeService : InputMethodService() {
         scrollTools.layoutParams = LinearLayout.LayoutParams(
             if (showRecent) ViewGroup.LayoutParams.WRAP_CONTENT else 0, ViewGroup.LayoutParams.MATCH_PARENT, if (showRecent) 0f else 1f
         )
-        scrollRecent?.visibility = if (showRecent) View.VISIBLE else View.GONE
+        scrollRecent?.visibility = if (showRecent && clip == null) View.VISIBLE else View.GONE
         divider?.visibility = if (showRecent && box.childCount > 0) View.VISIBLE else View.GONE
+        if (showRecent && clip != null && idleBar != null) {
+            clipChipView = buildClipChip(clip).also {
+                idleBar.addView(it, idleBar.indexOfChild(scrollRecent).coerceAtLeast(0), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f))
+            }
+        }
     }
 
     private fun toolButtonParams() = LinearLayout.LayoutParams(dpToPx(40), dpToPx(36)).apply { marginEnd = dpToPx(4) }
@@ -3488,8 +3614,9 @@ class ScorpioImeService : InputMethodService() {
         val chinese = previousMode != KeyboardMode.ENGLISH
 
         // 每頁的符號在鍵盤設定（ImeConfig，跟著資料 repo 更新）：比照 Gboard，第 1 頁數字、常用符號、標點（中文是全形標點），
-        // 第 2 頁數學、貨幣、括號（中文多了「」與 §）
-        val pages = com.p3dro.scorpio.ime.engine.ImeConfig.get(this).symbols[if (chinese) "zh" else "en"].orEmpty()
+        // 第 2 頁數學、貨幣、括號（中文多了「」與 §）。版面自帶符號頁的（三星鍵位照三星鍵盤，三排）從中文切過來時用它的
+        val pages = (if (chinese) chineseMethod.symbols else null)
+            ?: com.p3dro.scorpio.ime.engine.ImeConfig.get(this).symbols[if (chinese) "zh" else "en"].orEmpty()
         if (pages.isEmpty()) return
         if (symbolsPage >= pages.size) symbolsPage = 0
         val rows = pages[symbolsPage].rows
@@ -3507,14 +3634,16 @@ class ScorpioImeService : InputMethodService() {
         val panelHeight = if (referenceHeight > 0) referenceHeight else (5 * keyRowHeightPx() + dpToPx(4 * 4 + 4 + 6))
         symPanel.layoutParams = symPanel.layoutParams.apply { height = panelHeight }
         val keyHeight = keyRowHeightPx()
-        val gapSpace = panelHeight - symPanel.paddingTop - symPanel.paddingBottom - 4 * keyHeight
-        val rowGap = (gapSpace / 3).coerceAtLeast(dpToPx(4))
-        val lastGap = (gapSpace - 2 * rowGap).coerceAtLeast(dpToPx(4))
+        // 符號排＋第 3 排＋最下排
+        val rowCount = rows.size + 2
+        val gapSpace = panelHeight - symPanel.paddingTop - symPanel.paddingBottom - rowCount * keyHeight
+        val rowGap = (gapSpace / (rowCount - 1)).coerceAtLeast(dpToPx(4))
+        val lastGap = (gapSpace - (rowCount - 2) * rowGap).coerceAtLeast(dpToPx(4))
 
         fun newRow(index: Int, weightSum: Float, row: LinearLayout = LinearLayout(ui)) = row.apply {
             orientation = LinearLayout.HORIZONTAL
             layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, keyHeight).apply {
-                setMargins(0, when (index) { 0 -> 0; 3 -> lastGap; else -> rowGap }, 0, 0)
+                setMargins(0, when (index) { 0 -> 0; rowCount - 1 -> lastGap; else -> rowGap }, 0, 0)
             }
             this.weightSum = weightSum
         }
@@ -3565,19 +3694,20 @@ class ScorpioImeService : InputMethodService() {
         }
 
 
-        // 第 1、2 排：各 10 鍵
+        // 上面幾排：各 10 鍵
         for ((index, row) in rows.withIndex()) {
             val rowLayout = newRow(index, row.size.toFloat())
-            // 第 1 頁第一排的數字跟來源鍵盤的數字列一樣大（英文 20sp、注音 19sp）
-            val digitRow = symbolsPage == 0 && index == 0
+            // 數字排跟來源鍵盤的數字列一樣大（英文 20sp、注音 19sp）
+            val digitRow = row.all { it.length == 1 && it[0].isDigit() }
             for (sym in row) rowLayout.addView(if (digitRow) symbolKey(sym, size = if (fromZhuyinPanel) 19f else 20f) else symbolKey(sym))
             symPanel.addView(rowLayout)
         }
 
-        // 第 3 排：翻頁鍵 + 7 個符號 + 刪除鍵（同 Gboard）
-        val thirdRow = newRow(2, 10f)
-        thirdRow.addView(functionKey(1.5f, R.attr.imeKeyFunctionDrawable).apply {
-            addView(label(if (lastPage && symbolsPage > 0) "?123" else "=\\<", 14f))
+        // 第 3 排：翻頁鍵 + 符號 + 刪除鍵（同 Gboard：7 個符號、兩邊各 1.5 鍵寬；符號多的話兩邊窄一點，最少 1 鍵寬）
+        val side = ((10f - row3.size) / 2f).coerceAtLeast(1f)
+        val thirdRow = newRow(rows.size, row3.size + 2 * side)
+        thirdRow.addView(functionKey(side, R.attr.imeKeyFunctionDrawable).apply {
+            addView(label(pages[symbolsPage].pageLabel ?: if (lastPage && symbolsPage > 0) "?123" else "=\\<", 14f))
             setOnClickListener {
                 triggerHaptic(it)
                 symbolsPage = if (lastPage) 0 else symbolsPage + 1
@@ -3585,12 +3715,12 @@ class ScorpioImeService : InputMethodService() {
             }
         })
         for (sym in row3) thirdRow.addView(symbolKey(sym))
-        thirdRow.addView(backspaceKey(1.5f))
+        thirdRow.addView(backspaceKey(side))
         symPanel.addView(thirdRow)
 
         // 第 4 排（比照 Gboard）：返回、逗號（第 2 頁是 <）、數字鍵盤 1234、空白、句號（第 2 頁是 >）、Enter，
         // 跟注音／英文鍵盤最下排同一組鍵位（KeyRowLayout）：英文／QWERTY 一鍵對一鍵；從大千注音來的空白鍵蓋住空白＋ㄦ、句號在刪除鍵的位置
-        val bottomRow = newRow(3, 10.4f, com.p3dro.scorpio.ime.ui.KeyRowLayout(ui).apply {
+        val bottomRow = newRow(rowCount - 1, 10.4f, com.p3dro.scorpio.ime.ui.KeyRowLayout(ui).apply {
             segments = if (bottomLikeZhuyin) com.p3dro.scorpio.ime.ui.KeyRowLayout.SYMBOLS_FROM_ZHUYIN else com.p3dro.scorpio.ime.ui.KeyRowLayout.QWERTY
         })
         bottomRow.addView(functionKey(1.4f, R.attr.imeKeyFunctionDrawable).apply {

@@ -33,4 +33,15 @@ class ImeConfigTest {
     fun lazyExpansionMustStartWithKey() {
         assertNull(ImeConfig.parse(bundled.replace("\"ㄅ\":[\"ㄅㄨ\"", "\"ㄅ\":[\"ㄆㄨ\"")))
     }
+
+    @Test
+    fun layoutSymbolPagesAllowThreeRowsAndLabel() {
+        val digits = "[\"1\",\"2\",\"3\",\"4\",\"5\",\"6\",\"7\",\"8\",\"9\",\"0\"]"
+        val page = "{\"pageLabel\":\"1/2\",\"rows\":[$digits,$digits,$digits],\"row3\":[\"-\",\"'\",\":\",\";\",\",\",\"?\",\"……\"]}"
+        val pages = ImeConfig.parseSymbolPages(org.json.JSONArray("[$page]"), fixed = false)
+        assertEquals(3, pages[0].rows.size)
+        assertEquals("1/2", pages[0].pageLabel)
+        // 鍵盤設定（ime.json）還是只收兩排（舊版 App 只認這種）
+        assertNull(runCatching { ImeConfig.parseSymbolPages(org.json.JSONArray("[$page]"), fixed = true) }.getOrNull())
+    }
 }

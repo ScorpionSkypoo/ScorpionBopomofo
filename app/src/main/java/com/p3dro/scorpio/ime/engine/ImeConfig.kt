@@ -17,8 +17,11 @@ object ImeConfig {
     private const val SCHEMA = 1
     const val ID = "ime"
 
-    /** 符號鍵盤的一頁：兩排各 10 個、第三排 7 個 */
-    class SymbolPage(val rows: List<List<String>>, val row3: List<String>)
+    /**
+     * 符號鍵盤的一頁：rows 是上面幾排（各 10 個），row3 是翻頁鍵與刪除鍵中間那排。
+     * 鍵盤設定（ime.json）固定兩排＋7 個（舊版 App 只認這種）；版面檔（例如三星鍵位）可以自帶三排、5～8 個，翻頁鍵寫 pageLabel（1/2）
+     */
+    class SymbolPage(val rows: List<List<String>>, val row3: List<String>, val pageLabel: String? = null)
 
     class Data(
         val version: String,
@@ -100,21 +103,29 @@ object ImeConfig {
         val symbols = HashMap<String, List<SymbolPage>>()
         o.getJSONObject("symbols").let { m ->
             for (lang in listOf("zh", "en")) {
-                val pages = m.getJSONArray(lang)
-                symbols[lang] = (0 until pages.length()).map { i ->
-                    val p = pages.getJSONObject(i)
-                    val rows = p.getJSONArray("rows").let { r -> (0 until r.length()).map { strings(r.getJSONArray(it)) } }
-                    val row3 = strings(p.getJSONArray("row3"))
-                    require(rows.size == 2 && rows.all { it.size == 10 } && row3.size == 7)
-                    require((rows.flatten() + row3).all { it.isNotEmpty() && it.length <= 4 })
-                    SymbolPage(rows, row3)
-                }.also { require(it.isNotEmpty()) }
+                symbols[lang] = parseSymbolPages(m.getJSONArray(lang), fixed = true)
             }
         }
         Data(o.optString("version"), lazy, kaomoji, priors, symbols)
     } catch (e: Exception) {
         null
     }
+
+    /**
+     * 符號鍵盤的幾頁；格式不對就丟例外。fixed：鍵盤設定的格式（兩排各 10 個＋7 個，沒有 pageLabel）；
+     * 否則是版面檔自帶的（2～3 排各 10 個、5～8 個）
+     */
+    fun parseSymbolPages(pages: JSONArray, fixed: Boolean): List<SymbolPage> = (0 until pages.length()).map { i ->
+        val p = pages.getJSONObject(i)
+        val rows = p.getJSONArray("rows").let { r -> (0 until r.length()).map { strings(r.getJSONArray(it)) } }
+        val row3 = strings(p.getJSONArray("row3"))
+        if (fixed) require(rows.size == 2 && row3.size == 7)
+        else require(rows.size in 2..3 && row3.size in 5..8)
+        require(rows.all { it.size == 10 })
+        require((rows.flatten() + row3).all { it.isNotEmpty() && it.length <= 4 })
+        val label = if (fixed) null else p.optString("pageLabel").ifEmpty { null }?.also { require(it.length <= 4) }
+        SymbolPage(rows, row3, label)
+    }.also { require(it.isNotEmpty()) }
 
     private fun strings(a: JSONArray) = (0 until a.length()).map { a.getString(it) }
 }
