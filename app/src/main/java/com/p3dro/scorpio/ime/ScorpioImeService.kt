@@ -188,6 +188,8 @@ class ScorpioImeService : InputMethodService() {
         const val PREF_RECENT_BAR = "recent_bar"
         // 工具列顯示剛複製的內容（點了貼上）
         const val PREF_CLIP_CHIP = "clip_chip"
+        // 成對插入、游標停在中間的符號鍵
+        private val PAIRED_SYMBOLS = setOf("''", "\"\"", "“”", "‘’", "「」", "『』")
         // 複製後多久內還顯示
         private const val CLIP_OFFER_MS = 3 * 60_000L
         const val PREF_PHOTO_ALPHA = "photo_alpha"
@@ -3594,6 +3596,20 @@ class ScorpioImeService : InputMethodService() {
 
     private var symbolsPage = 0
 
+    /** 符號鍵送出：成對的引號（三星鍵盤的 ''、""）一次打兩個、游標停在中間，其他照打 */
+    private fun commitSymbol(sym: String) {
+        val ic = currentInputConnection ?: return
+        if (sym in PAIRED_SYMBOLS) {
+            ic.beginBatchEdit()
+            ic.commitText(sym.substring(0, 1), 1)
+            // 0：游標放在這次送出的字前面，也就是兩個引號中間
+            ic.commitText(sym.substring(1), 0)
+            ic.endBatchEdit()
+        } else {
+            ic.commitText(sym, 1)
+        }
+    }
+
     private fun setupSymbolsKeyboard(root: View) {
         symbolsPage = 0
         buildSymbolsPanel()
@@ -3610,7 +3626,11 @@ class ScorpioImeService : InputMethodService() {
         symPanel.clearKeys()
         symPanel.onKeyHapticListener = { triggerHaptic(it) }
         symPanel.keyPreview = keyPreview
-        symPanel.onKeyTapListener = { char, _, _ -> currentInputConnection?.commitText(char.toString(), 1) }
+        // 好幾個字的符號鍵（……、成對的引號 ''）用私用區的代號登記，按了送出整串
+        val multi = HashMap<Char, String>()
+        fun keyCharOf(sym: String): Char = if (sym.length == 1) sym[0] else ('\uE000' + multi.size).also { multi[it] = sym }
+        symPanel.previewLabel = { multi[it] ?: it.toString() }
+        symPanel.onKeyTapListener = { char, _, _ -> commitSymbol(multi[char] ?: char.toString()) }
         val chinese = previousMode != KeyboardMode.ENGLISH
 
         // 每頁的符號在鍵盤設定（ImeConfig，跟著資料 repo 更新）：比照 Gboard，第 1 頁數字、常用符號、標點（中文是全形標點），
@@ -3690,7 +3710,7 @@ class ScorpioImeService : InputMethodService() {
         // 字的大小跟來源鍵盤一樣：注音鍵盤 18sp、英文字母 23sp；底排的逗號、句點兩邊都是 18sp
         fun symbolKey(sym: String, weight: Float = 1f, size: Float = if (fromZhuyinPanel) 18f else 23f) = keyFrame(weight, R.attr.imeKeyDrawable).apply {
             addView(label(sym, size))
-            symPanel.registerKey(this, sym[0])
+            symPanel.registerKey(this, keyCharOf(sym))
         }
 
 
@@ -3733,7 +3753,7 @@ class ScorpioImeService : InputMethodService() {
         // 最下排的字跟注音／英文鍵盤最下排同一種寫法（bottomRowLabel），不照上面幾排的置中方式
         fun bottomSymbolKey(sym: String, weight: Float) = keyFrame(weight, R.attr.imeKeyDrawable).apply {
             addView(bottomRowLabel(sym, 18f))
-            symPanel.registerKey(this, sym[0])
+            symPanel.registerKey(this, keyCharOf(sym))
         }
         val left = if (symbolsPage > 0) "<" else if (chinese) "，" else ","
         val right = if (symbolsPage > 0) ">" else if (chinese) "。" else "."
