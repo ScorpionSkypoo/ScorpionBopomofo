@@ -894,7 +894,9 @@ class SettingsActivity : AppCompatActivity() {
                 val r = row(avail, null, clickable = false)
                 val size = if (l.requiresSize > 0) "\n含資料，約 ${"%.1f".format(l.requiresSize / 1048576.0)} MB" else ""
                 texts(textColumn(r), l.name, l.description + size)
-                if (l.id in installed) {
+                // 已安裝但線上有新版：跟沒裝的一樣給按鈕，寫「更新」
+                val update = l.id in installed && com.p3dro.scorpio.ime.engine.PackUpdater.layoutPending(this@SettingsActivity, l)
+                if (l.id in installed && !update) {
                     r.addView(TextView(this@SettingsActivity).apply {
                         text = "已安裝"
                         textSize = 14f
@@ -904,15 +906,20 @@ class SettingsActivity : AppCompatActivity() {
                     continue
                 }
                 val b = MaterialButton(this@SettingsActivity, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
-                    text = "安裝"
+                    text = if (update) "更新" else "安裝"
                     isAllCaps = false
                 }
                 b.setOnClickListener {
                     b.isEnabled = false
-                    b.text = "安裝中…"
+                    b.text = if (update) "更新中…" else "安裝中…"
                     lifecycleScope.launch {
                         val ok = com.p3dro.scorpio.ime.engine.PackUpdater.installLayout(this@SettingsActivity, l)
-                        android.widget.Toast.makeText(this@SettingsActivity, if (ok) "已安裝「${l.name}」，可以用地球鍵切換" else "安裝失敗", android.widget.Toast.LENGTH_SHORT).show()
+                        val msg = when {
+                            !ok -> if (update) "更新失敗" else "安裝失敗"
+                            update -> "已更新「${l.name}」到 ${l.version}"
+                            else -> "已安裝「${l.name}」，可以用地球鍵切換"
+                        }
+                        android.widget.Toast.makeText(this@SettingsActivity, msg, android.widget.Toast.LENGTH_SHORT).show()
                         if (stack.lastOrNull() == Page.LANGUAGE_LAYOUTS) render()
                     }
                 }
@@ -1444,6 +1451,13 @@ class SettingsActivity : AppCompatActivity() {
             if (config != null) pending.add(Update(config.id, "鍵盤設定", configHave, config.version, config.size,
                 { p -> p(0f); com.p3dro.scorpio.ime.engine.PackUpdater.installConfig(this@SettingsActivity, config) },
                 { summaryOf(configRow).text = "$configDesc\n版本 ${config.version}" }))
+            // 裝著的鍵盤版面（例如三星鍵位）有新版也收進最上面
+            for (l in com.p3dro.scorpio.ime.engine.PackUpdater.pendingLayouts(this@SettingsActivity)) {
+                val have = ChineseMethod.installedVersion(this@SettingsActivity, l.id).orEmpty()
+                pending.add(Update("layout:${l.id}", "鍵盤版面：${l.name}", have, l.version, l.size,
+                    { p -> com.p3dro.scorpio.ime.engine.PackUpdater.installLayout(this@SettingsActivity, l, p) },
+                    {}))
+            }
 
             // ---- 最上面的「可用的更新」 ----
             var headTitle: TextView? = null

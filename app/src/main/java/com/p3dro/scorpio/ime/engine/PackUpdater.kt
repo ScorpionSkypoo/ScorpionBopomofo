@@ -206,6 +206,22 @@ object PackUpdater {
         null
     }
 
+    /** 裝著的鍵盤版面線上有新版（App 版本也夠新）；每天的自動檢查與設定頁「可用的更新」共用 */
+    fun layoutPending(context: Context, l: ManifestLayout, appVersionCode: Long = appVersion(context)): Boolean {
+        if (l.minAppVersion > appVersionCode) return false
+        val have = ChineseMethod.installedVersion(context, l.id) ?: return false
+        return PackVersion.compare(l.version, have) > 0
+    }
+
+    /** 上次讀到的 manifest 裡、比手機上新的鍵盤版面（設定頁「可用的更新」用） */
+    fun pendingLayouts(context: Context): List<ManifestLayout> = try {
+        val json = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(PREF_MANIFEST, null) ?: "{}"
+        val v = appVersion(context)
+        parseLayouts(json).filter { layoutPending(context, it, v) }
+    } catch (e: Exception) {
+        emptyList()
+    }
+
     /** 下載並套用鍵盤設定 */
     suspend fun installConfig(context: Context, c: ManifestConfig): Boolean = withContext(Dispatchers.IO) {
         val part = File(context.cacheDir, "config-${c.id}.part")
@@ -383,8 +399,7 @@ object PackUpdater {
         val missing = ChineseMethod.missingEnabled(context, prefs).toSet()
         for (l in parseLayouts(json)) {
             if (l.minAppVersion > appVersion) continue
-            val have = ChineseMethod.installedVersion(context, l.id)
-            if ((have != null && PackVersion.compare(l.version, have) > 0) || (have == null && l.id in missing)) {
+            if (layoutPending(context, l, appVersion) || (ChineseMethod.installedVersion(context, l.id) == null && l.id in missing)) {
                 if (installLayout(context, l)) updated.add(l.name to l.version) else failed.add(l.name)
             }
         }
