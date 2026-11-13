@@ -2614,7 +2614,12 @@ class ScorpioDictManager private constructor(private val context: Context) {
             val now = System.currentTimeMillis()
             for (u in user.initialsLike(getInitialsFromReading(subSyls.joinToString("-")), abbrevPattern(subSyls), 24)) {
                 if (!isHanWord(u.word) || hanLength(u.word) != syllables.size) continue
-                val r = u.toneless.split("-").getOrNull(idx) ?: continue
+                var r = u.toneless.split("-").getOrNull(idx) ?: continue
+                // 用簡拼學到的詞記的是打的讀音（ㄒ-ㄒ 謝謝）：換成那個字在詞庫裡同聲母開頭的讀音，查不到就不列
+                if (r.length == 1 && r[0] !in BopomofoComposer.STANDALONE_INITIALS) {
+                    val ch = u.word.codePoints().toArray().getOrNull(idx)?.let { String(Character.toChars(it)) } ?: continue
+                    r = words.tonelessOfWord(ch).filter { it.length > 1 && it.startsWith(r) }.minOrNull() ?: continue
+                }
                 val c = decayedCount(timesChosen(u.count), u.lastUsed, now)
                 if (c <= 0.0) continue
                 mass[r] = (mass[r] ?: 0.0) + top.coerceAtLeast(1e-6) * c
