@@ -37,6 +37,10 @@ class BopomofoComposer {
             'ㄍ', 'ㄎ', 'ㄏ', 'ㄓ', 'ㄔ', 'ㄕ', 'ㄖ', 'ㄗ', 'ㄘ', 'ㄙ'
         )
 
+        // 不能與「ㄨ」拼合的聲母（ㄐㄑㄒ 只接 ㄧ、ㄩ）。一般組字不拆：ㄒㄨ 多半是 ㄕㄨ、ㄖㄨ 按歪（重播比過，拆開的話鄰鍵修正變差）；
+        // 只有簡拼讀音清單把它看成簡拼（ㄒㄨㄟㄔ＝ㄒ＋ㄨㄟ＋ㄔ 先維持），見 splitJqxW
+        val INCOMPATIBLE_WITH_W = setOf('ㄐ', 'ㄑ', 'ㄒ')
+
         /** keyCount：此音節實際消耗的按鍵數（補上的介音不算），部分選字時據此移除按鍵 */
         data class ParsedSyllable(val text: String, val touches: Map<Char, TouchPoint>, val keyCount: Int)
 
@@ -60,8 +64,9 @@ class BopomofoComposer {
         /**
          * keepIncompatible：聲母後面接了拼不起來的介音（ㄏ＋ㄩ）也不拆開，整個當一個（拼不起來的）音節。
          * 一般組字會拆成「ㄏ（簡拼）＋ㄩㄢ」；按錯鄰鍵的修正與學習要用不拆開的看（ㄏㄩㄢ 其實是 ㄒㄩㄢ）
+         * splitJqxW：ㄐㄑㄒ 後面接 ㄨ 也拆開（簡拼讀音清單用）
          */
-        fun parseSyllables(points: List<TouchPoint>, allowSwap: Boolean = false, keepIncompatible: Boolean = false): List<ParsedSyllable> {
+        fun parseSyllables(points: List<TouchPoint>, allowSwap: Boolean = false, keepIncompatible: Boolean = false, splitJqxW: Boolean = false): List<ParsedSyllable> {
             val syllables = mutableListOf<ParsedSyllable>()
             var curInit: Char? = null
             var curMed: Char? = null
@@ -107,7 +112,8 @@ class BopomofoComposer {
                         // 若當前聲母與該介母不相容（如 ㄎ與ㄧ、ㄍ與ㄧ、ㄓ與ㄧ、ㄅ與ㄩ等），聲母必須獨立成音節，介母開展新音節
                         val isIncompatible = !keepIncompatible && (curInit != null) && (
                             (c == 'ㄧ' && INCOMPATIBLE_WITH_I.contains(curInit)) ||
-                            (c == 'ㄩ' && INCOMPATIBLE_WITH_U.contains(curInit))
+                            (c == 'ㄩ' && INCOMPATIBLE_WITH_U.contains(curInit)) ||
+                            (splitJqxW && c == 'ㄨ' && INCOMPATIBLE_WITH_W.contains(curInit))
                         )
                         // 左右手搶拍順序顛倒：先按韻母才補按相容介音（如 ㄒㄠㄧ -> ㄒㄧㄠ）
                         if (allowSwap && curMed == null && curFin != null && !isIncompatible) {
@@ -256,12 +262,12 @@ class BopomofoComposer {
     }
 
     /**
-     * 把第 index 個音節換成完整讀音（簡拼讀音清單選了 ㄒ→ㄒㄧㄠ）：原本那幾下換成這個讀音的鍵（標成 synthetic），
+     * 把第 index 個音節（照 getAbbrevSyllables 的切法）換成完整讀音（簡拼讀音清單選了 ㄒ→ㄒㄧㄠ）：原本那幾下換成這個讀音的鍵（標成 synthetic），
      * 其他音節的按鍵不動。換完的切分對不上（跟後面的音節黏在一起）就不換，回傳 false。大千注音才有
      */
     fun replaceSyllable(index: Int, reading: String): Boolean {
         if (decoder != null || reading.isEmpty()) return false
-        val syllables = parsed()
+        val syllables = abbrevParsed()
         if (index !in syllables.indices) return false
         val start = syllables.take(index).sumOf { it.keyCount }
         val old = touchHistory.subList(start, start + syllables[index].keyCount).toList()
@@ -270,7 +276,7 @@ class BopomofoComposer {
         val fresh = reading.map { TouchPoint(it, synthetic = true) } + listOfNotNull(tone)
         repeat(old.size) { touchHistory.removeAt(start) }
         touchHistory.addAll(start, fresh)
-        val after = parsed().map { it.text }
+        val after = abbrevParsed().map { it.text }
         val expected = syllables.map { it.text }.toMutableList().also { it[index] = reading + (tone?.char?.toString() ?: "") }
         if (after != expected) {
             repeat(fresh.size) { touchHistory.removeAt(start) }
@@ -279,6 +285,11 @@ class BopomofoComposer {
         }
         return true
     }
+
+    private fun abbrevParsed() = parseSyllables(touchHistory, splitJqxW = true)
+
+    /** 簡拼讀音清單看的音節：同 getAllSyllables，但 ㄐㄑㄒ 後面接 ㄨ 也當簡拼拆開（ㄒㄨㄟㄔ＝ㄒ-ㄨㄟ-ㄔ）；字母鍵輸入法沒有 */
+    fun getAbbrevSyllables(): List<String> = if (decoder != null) emptyList() else abbrevParsed().map { it.text }
 
     /** 前 count 個音節實際按下的鍵（含落點），供個人化偏移學習 */
     fun touchPointsForSyllables(count: Int): List<TouchPoint> {

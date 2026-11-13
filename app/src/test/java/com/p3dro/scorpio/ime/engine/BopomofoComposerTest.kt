@@ -36,6 +36,16 @@ class BopomofoComposerTest {
     }
 
     @Test
+    fun jqxBeforeWSplitsOnlyForAbbrevReadings() {
+        val c = composer("ㄒㄨㄟㄔ")
+        // 一般組字不拆（ㄒㄨ 多半是 ㄕㄨ 按歪，交給鄰鍵修正）
+        assertEquals(listOf("ㄒㄨㄟ", "ㄔ"), c.getAllSyllables())
+        assertEquals(listOf("ㄒ", "ㄨㄟ", "ㄔ"), c.getAbbrevSyllables())
+        assertTrue(c.replaceSyllable(0, "ㄒㄧㄢ"))
+        assertEquals(listOf("ㄒㄧㄢ", "ㄨㄟ", "ㄔ"), c.getAllSyllables())
+    }
+
+    @Test
     fun backspaceAfterReplaceRemovesOneKey() {
         val c = composer("ㄒㄙ")
         c.replaceSyllable(0, "ㄒㄧㄠ")

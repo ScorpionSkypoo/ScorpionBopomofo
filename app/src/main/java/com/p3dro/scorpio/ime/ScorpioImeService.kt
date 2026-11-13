@@ -3291,7 +3291,7 @@ class ScorpioImeService : InputMethodService() {
                 showExpandedWords(rvGrid, candidateAdapter?.currentList ?: emptyList())
                 return@launch
             }
-            showAbbrevReadings(if (composer.decoder == null) dictManager.abbrevSyllableChoices(syllables) else null, rvGrid)
+            showAbbrevReadings(if (composer.decoder == null) dictManager.abbrevSyllableChoices(composer.getAbbrevSyllables()) else null, rvGrid)
             val groups = dictManager.getCandidateGroups(composer.getAllSegmentations(), composer.hasExplicitTone(), contextWord, zhuyinTouches(), prevWord2 = contextWord2)
             if (inlineSymbols || (groups.emoji.isEmpty() && groups.kaomoji.isEmpty())) {
                 layoutExpandedHeader?.visibility = View.GONE
