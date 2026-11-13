@@ -2589,7 +2589,8 @@ class ScorpioDictManager private constructor(private val context: Context) {
      * 簡拼讀音清單（展開面板左欄，比照 Gboard）：第一個只打聲母的音節，在這組簡拼查得到的詞裡可能是哪些讀音
      * （打 ㄒㄙ：ㄒㄧㄠ、ㄒㄧㄤ、ㄒㄩㄣ…），照這些詞的字頻合計排序；學過的詞照字典最常用的那個詞算、再乘學過的次數。
      * 選了就把那個音節換成完整讀音，排不進簡拼前幾名的冷門詞也找得到。
-     * 只算查得到詞的讀音，最多 limit 個；不到兩種讀音（沒得選）或沒有簡拼時是 null。
+     * 只算查得到詞的讀音，最多 limit 個；整串對得上的詞不到兩種讀音時，改列這個聲母開頭的所有音節（照單字字頻）。
+     * 沒有簡拼時是 null。
      * ㄓㄔㄕㄖㄗㄘㄙ 打了聲調是那個字本身，不算簡拼（同 spanBase）
      */
     suspend fun abbrevSyllableChoices(syllables: List<String>, limit: Int = ABBREV_CHOICES_MAX): AbbrevChoices? = withContext(Dispatchers.IO) {
@@ -2625,7 +2626,15 @@ class ScorpioDictManager private constructor(private val context: Context) {
                 mass[r] = (mass[r] ?: 0.0) + top.coerceAtLeast(1e-6) * c
             }
         }
-        if (mass.size < 2) return@withContext null
+        // 整串對得上的詞不到兩種讀音（ㄒ-ㄨㄟ-ㄔ 的「先維持」不是詞庫裡的詞）：改列這個聲母開頭的所有音節，照單字字頻排
+        if (mass.size < 2) {
+            val init = subSyls[idx][0]
+            mass.clear()
+            for ((syl, f) in syllableFrequencies()) {
+                if (syl.isNotEmpty() && syl[0] == init && (syl.length > 1 || init in BopomofoComposer.STANDALONE_INITIALS)) mass[syl] = f
+            }
+            if (mass.size < 2) return@withContext null
+        }
         val total = mass.values.sum()
         val sorted = mass.entries.sortedWith(compareByDescending<Map.Entry<String, Double>> { it.value }.thenBy { it.key }).take(limit)
         AbbrevChoices(idx, sorted.map { it.key }, sorted.map { it.value / total })
