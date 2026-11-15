@@ -202,6 +202,10 @@ class ScorpioDictManager private constructor(private val context: Context) {
         /** 學習加分（學過的長詞補全、簡拼）：疊加在字典分數上；count 是淡出後的次數 */
         fun learnBonus(count: Double): Double = minOf(3.0 + count * 1.5, 12.0)
 
+        /** 簡拼時同一組鍵選過的詞換到第一：至少選過幾次、看前幾名（見 promoteAbbrevPick） */
+        const val ABBREV_PICK_MIN = 2
+        const val ABBREV_PICK_WINDOW = 5
+
         /** 學習的證據隨時間淡出：大約一個月沒用，次數剩一半 */
         const val LEARN_HALF_LIFE_DAYS = 30.0
 
@@ -1796,6 +1800,7 @@ class ScorpioDictManager private constructor(private val context: Context) {
         val ranked = pool.entries.filter { it.value >= poolBest - POOL_MARGIN && !it.key.startsWith("MACRO@") }
             .sortedWith(compareByDescending<Map.Entry<String, Double>> { it.value }.thenBy { it.key })
             .mapTo(ArrayList()) { it.key }
+        if (ranked.size >= 2) promoteAbbrevPick(ranked, primaryInput)
         val front = ranked.toHashSet()
         bestWordScores.entries
             .sortedWith(compareByDescending<Map.Entry<String, Double>> { it.value }.thenBy { it.key })
@@ -2566,6 +2571,27 @@ class ScorpioDictManager private constructor(private val context: Context) {
         var p = mix(user.nextAll(prev), prior, trigram = false)
         if (!prev2.isNullOrEmpty()) p = mix(user.nextAfter(prev2, prev, 50), p, trigram = true)
         return DoubleArray(n) { static[it] + log10(p[it] / prior[it]) }
+    }
+
+    /**
+     * 簡拼（有音節只打聲母）：同一組鍵以前選過的詞排第一。
+     * 簡拼一組鍵對得上的詞很多，分數（字頻、上文、完整打時的選字次數）常把沒這樣選過的詞排在前面；
+     * 這組鍵選過 ABBREV_PICK_MIN 次以上、又比第一名多很多（3 倍，第一名也選過的話再多 2 次）才換，只看前 ABBREV_PICK_WINDOW 名
+     */
+    private fun promoteAbbrevPick(ranked: ArrayList<String>, syllables: List<String>) {
+        val typed = syllables.map { toToneless(it) }
+        if (typed.size < 2 || typed.none { it.length == 1 && it[0] in BopomofoComposer.INITIALS }) return
+        val key = typed.joinToString("-")
+        val picks = HashMap<String, Int>()
+        for (u in user.matches(key, syllables.joinToString("-").replace("ˉ", ""), 24)) if (u.toneless == key) picks.merge(u.word, timesChosen(u.count), Int::plus)
+        if (picks.isEmpty()) return
+        val top = picks[ranked[0]] ?: 0
+        if (top > 1) return
+        val best = ranked.subList(1, minOf(ABBREV_PICK_WINDOW, ranked.size)).maxByOrNull { picks[it] ?: 0 } ?: return
+        val n = picks[best] ?: 0
+        if (n < ABBREV_PICK_MIN || n < 3 * top + if (top > 0) 2 else 0) return
+        ranked.remove(best)
+        ranked.add(0, best)
     }
 
     /** 簡拼（有音節只打聲母，ㄨㄛ-ㄐ-ㄉ）查得到的詞；沒有單打聲母的音節就是空的 */
