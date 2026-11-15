@@ -9,8 +9,9 @@
     <!-- 檢查 App 更新：下載 GitHub Releases 的 APK 後交給系統安裝 -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
+    <!-- allowBackup=false：學習紀錄、自建詞不進 Android 的雲端備份（Google 雲端硬碟），只留在手機上 -->
     <application
-        android:allowBackup="true"
+        android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
