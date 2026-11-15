@@ -25,6 +25,7 @@
         <item name="imeKeyActionDrawable">@drawable/bg_keyboard_action_key</item>
         <item name="imeItemBackground">@drawable/bg_item_pressed</item>
         <item name="imeItemBackgroundBorderless">@drawable/bg_item_pressed_round</item>
+        <item name="imeRowFret">@null</item>
     </style>
 
     <!-- 外觀選項：疊在鍵盤主題上（設定「介面外觀 → 按鍵、鍵盤」） -->
@@ -103,5 +104,47 @@
         <item name="imeCandidateText">#FFFFFFFF</item>
         <item name="imeCandidateDivider">#00000000</item>
         <item name="imeComposingText">#FFA8C7FA</item>
+    </style>
+
+    <!-- 鍵盤主題：BlackBerry 10（扁平：黑底、直角純色按鍵、每排一條細銀線琴格、藍色強調） -->
+    <style name="ImeTheme.BB10" parent="Theme.ScorpioIME">
+        <item name="imeBg">#FF000000</item>
+        <item name="imeKeyBg">#FF2B2D2F</item>
+        <item name="imeKeyFunctionBg">#FF1A1B1D</item>
+        <item name="imeKeyPressed">#FF00A8DF</item>
+        <item name="imeKeyActionBg">#FF00A8DF</item>
+        <item name="imeKeyActionIcon">#FFFFFFFF</item>
+        <item name="imeTextPrimary">#FFFFFFFF</item>
+        <item name="imeTextSecondary">#FFB4B8BC</item>
+        <item name="imeCandidateBg">#FF000000</item>
+        <item name="imeCandidateText">#FFFFFFFF</item>
+        <item name="imeCandidateDivider">#FF2B2D2F</item>
+        <item name="imeComposingText">#FF4FC8F4</item>
+        <item name="imeKeyboardRadius">0dp</item>
+        <item name="imeKeyDrawable">@drawable/bg_bb10_key</item>
+        <item name="imeKeyFunctionDrawable">@drawable/bg_bb10_function_key</item>
+        <item name="imeKeyActionDrawable">@drawable/bg_bb10_action_key</item>
+        <item name="imeRowFret">@drawable/fret_bb10</item>
+    </style>
+
+    <!-- 鍵盤主題：舊版 BlackBerry OS（立體：深色漸層按鍵、每排一條金屬銀條琴格、藍色強調） -->
+    <style name="ImeTheme.BBOS" parent="Theme.ScorpioIME">
+        <item name="imeBg">#FF0B0C0D</item>
+        <item name="imeKeyBg">#FF2C2E30</item>
+        <item name="imeKeyFunctionBg">#FF1D1F21</item>
+        <item name="imeKeyPressed">#FF00A8DF</item>
+        <item name="imeKeyActionBg">#FF00A8DF</item>
+        <item name="imeKeyActionIcon">#FFFFFFFF</item>
+        <item name="imeTextPrimary">#FFFFFFFF</item>
+        <item name="imeTextSecondary">#FFB4B8BC</item>
+        <item name="imeCandidateBg">#FF0B0C0D</item>
+        <item name="imeCandidateText">#FFFFFFFF</item>
+        <item name="imeCandidateDivider">#FF2C2E30</item>
+        <item name="imeComposingText">#FF4FC8F4</item>
+        <item name="imeKeyboardRadius">0dp</item>
+        <item name="imeKeyDrawable">@drawable/bg_bbos_key</item>
+        <item name="imeKeyFunctionDrawable">@drawable/bg_bbos_function_key</item>
+        <item name="imeKeyActionDrawable">@drawable/bg_bbos_action_key</item>
+        <item name="imeRowFret">@drawable/fret_bbos</item>
     </style>
 </resources>

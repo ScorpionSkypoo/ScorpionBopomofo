@@ -24,4 +24,6 @@
     <!-- 候選字／面板格子、工具列圖示的按下效果：預設瞬間變色，ImeOverlay.Ripple 換成系統漣漪 -->
     <attr name="imeItemBackground" format="reference" />
     <attr name="imeItemBackgroundBorderless" format="reference" />
+    <!-- 琴格：畫在每一排按鍵最下面、橫跨整排的線（BlackBerry 風格主題才有，其他主題是 @null） -->
+    <attr name="imeRowFret" format="reference" />
 </resources>

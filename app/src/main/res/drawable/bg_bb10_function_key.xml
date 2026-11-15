@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- BlackBerry 10 風格功能鍵：扁平直角，比字鍵深 -->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_pressed="true">
+        <shape android:shape="rectangle">
+            <solid android:color="#FF00A8DF" />
+            <stroke android:width="?attr/imeKeyStroke" android:color="?attr/imeKeyStrokeColor" />
+        </shape>
+    </item>
+    <item>
+        <shape android:shape="rectangle">
+            <solid android:color="@color/ime_key_function_bg" />
+            <stroke android:width="?attr/imeKeyStroke" android:color="?attr/imeKeyStrokeColor" />
+        </shape>
+    </item>
+</selector>

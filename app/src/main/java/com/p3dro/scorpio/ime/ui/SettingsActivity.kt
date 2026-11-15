@@ -953,6 +953,8 @@ class SettingsActivity : AppCompatActivity() {
             Triple("system", "經典", "灰白配色，跟著系統切換淺色和深色。"),
             Triple("light", "淺色", "永遠使用淺色。"),
             Triple("dark", "深色", "永遠使用深色。"),
+            Triple("bb10", "BlackBerry 10", "扁平風格：黑底、直角純色按鍵，每排底下一條細銀線，按下亮藍色。"),
+            Triple("bbos", "BlackBerry OS（舊版）", "立體風格：深色漸層按鍵，每排底下一條金屬銀條。"),
             Triple("photo", "照片", if (hasPhoto) "用你選的照片當鍵盤背景，按鍵半透明。" else "選一張照片當鍵盤背景。")
         )
         for ((id, title, summary) in themes) {

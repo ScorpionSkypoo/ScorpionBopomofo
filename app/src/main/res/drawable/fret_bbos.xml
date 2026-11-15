@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 舊版 BlackBerry OS 風格琴格：每一排按鍵底下一條橫跨整排的金屬銀條 -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:gravity="bottom" android:height="2.5dp">
+        <shape android:shape="rectangle">
+            <gradient android:angle="270" android:startColor="#FFECEEF0" android:centerColor="#FFB5BABF" android:endColor="#FF6F7479" />
+        </shape>
+    </item>
+</layer-list>

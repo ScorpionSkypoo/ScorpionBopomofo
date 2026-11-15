@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 舊版 BlackBerry OS 風格按鍵：深色漸層，按下變藍 -->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_pressed="true">
+        <layer-list>
+            <item>
+                <shape android:shape="rectangle">
+                    <gradient android:angle="270" android:startColor="#FF2FC4F2" android:endColor="#FF0090C8" />
+                    <corners android:radius="3dp" />
+                    <stroke android:width="?attr/imeKeyStroke" android:color="?attr/imeKeyStrokeColor" />
+                </shape>
+            </item>
+        </layer-list>
+    </item>
+    <item>
+        <layer-list>
+            <item>
+                <shape android:shape="rectangle">
+                    <gradient android:angle="270" android:startColor="#FF3C3F42" android:endColor="#FF1D1F21" />
+                    <corners android:radius="3dp" />
+                    <stroke android:width="?attr/imeKeyStroke" android:color="?attr/imeKeyStrokeColor" />
+                </shape>
+            </item>
+        </layer-list>
+    </item>
+</selector>

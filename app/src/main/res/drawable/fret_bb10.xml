@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- BlackBerry 10 風格琴格：每一排按鍵底下一條橫跨整排的細銀線 -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:gravity="bottom" android:height="1.5dp">
+        <shape android:shape="rectangle"><solid android:color="#FFA9AEB3" /></shape>
+    </item>
+</layer-list>

@@ -290,6 +290,8 @@ class ScorpioImeService : InputMethodService() {
         val style = when (theme) {
             "dynamic" -> R.style.ImeTheme_Dynamic
             "photo" -> R.style.ImeTheme_Photo
+            "bb10" -> R.style.ImeTheme_BB10
+            "bbos" -> R.style.ImeTheme_BBOS
             else -> R.style.ImeTheme_Classic
         }
         // 外觀選項疊在主題上：按鍵邊框、按鍵底色、鍵盤上方圓角、按鍵漣漪
@@ -303,6 +305,19 @@ class ScorpioImeService : InputMethodService() {
 
     /** 按鍵底圖（主題屬性 imeKey*Drawable）：預設按下瞬間變色，開了「按鍵漣漪效果」是漣漪版 */
     private fun keyDrawable(attr: Int) = ui.getDrawable(android.util.TypedValue().also { ui.theme.resolveAttribute(attr, it, true) }.resourceId)
+
+    /** 琴格（主題屬性 imeRowFret）：畫在一排按鍵最下面、橫跨整排的線；主題沒有琴格就不動 */
+    private fun fretRow(row: View) {
+        val id = android.util.TypedValue().also { ui.theme.resolveAttribute(R.attr.imeRowFret, it, true) }.resourceId
+        if (id != 0) row.foreground = ui.getDrawable(id)
+    }
+
+    /** 版面檔裡的按鍵排（高度是一排按鍵的橫向排）都加上琴格；程式建立的面板在建立每一排時自己加 */
+    private fun fretKeyRows(v: View) {
+        val lp = v.layoutParams
+        if (v is LinearLayout && v.orientation == LinearLayout.HORIZONTAL && lp != null && kotlin.math.abs(lp.height - keyRowHeightPx()) <= 1) fretRow(v)
+        else if (v is ViewGroup) for (i in 0 until v.childCount) fretKeyRows(v.getChildAt(i))
+    }
 
     /**
      * 按鍵高度：把所有 44dp 的按鍵排依比例縮放（觸控定位以實際按鍵大小換算，不受影響）。
@@ -349,6 +364,7 @@ class ScorpioImeService : InputMethodService() {
             scaleKeyRows(root, scale)
             root.findViewById<View>(R.id.panel_expanded)?.let { it.layoutParams = it.layoutParams.apply { height = dpToPx(246f * scale) } }
         }
+        fretKeyRows(root)
 
         // 照片主題：照片鋪在鍵盤後面（置中裁切＋調暗），按鍵半透明
         // 左上、右上圓角：只有開了漣漪效果才把整個鍵盤依圓角裁切（漣漪會畫到圓角外）；
@@ -820,7 +836,7 @@ class ScorpioImeService : InputMethodService() {
     private fun updateWindowAppearance() {
         window?.window?.let { win ->
             val isDark = when (themeId()) {
-                "dark", "photo" -> true
+                "dark", "photo", "bb10", "bbos" -> true
                 "light" -> false
                 else -> (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
             }
@@ -1966,6 +1982,7 @@ class ScorpioImeService : InputMethodService() {
                 layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, h).apply {
                     if (r > 0) topMargin = gap
                 }
+                fretRow(this)
             }
             for (d in digits) if (r == 3) bottomKey(row, d) else charKey(row, d, function = !d[0].isDigit())
             when (r) {
@@ -2017,6 +2034,7 @@ class ScorpioImeService : InputMethodService() {
         fun row(index: Int, h: Int) = LinearLayout(ui).apply {
             orientation = LinearLayout.HORIZONTAL
             layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, h).apply { if (index > 0) topMargin = gap }
+            fretRow(this)
             pad.addView(this)
         }
         fun key(parent: LinearLayout, weight: Float, bgAttr: Int, ch: Char?) = FrameLayout(ui).apply {
@@ -2263,6 +2281,7 @@ class ScorpioImeService : InputMethodService() {
             orientation = LinearLayout.HORIZONTAL
             weightSum = 10.4f
             segments = com.p3dro.scorpio.ime.ui.KeyRowLayout.HANDWRITING
+            fretRow(this)
         }
         fun key(weight: Float, bgAttr: Int, label: String? = null, icon: Int? = null, onClick: (View) -> Unit) = FrameLayout(ui).apply {
             background = keyDrawable(bgAttr)
@@ -3666,6 +3685,7 @@ class ScorpioImeService : InputMethodService() {
                 setMargins(0, when (index) { 0 -> 0; rowCount - 1 -> lastGap; else -> rowGap }, 0, 0)
             }
             this.weightSum = weightSum
+            fretRow(this)
         }
 
         fun keyFrame(weight: Float, bgAttr: Int) = FrameLayout(ui).apply {
