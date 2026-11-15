@@ -1470,7 +1470,7 @@ class SettingsActivity : AppCompatActivity() {
             for (l in com.p3dro.scorpio.ime.engine.PackUpdater.pendingLayouts(this@SettingsActivity)) {
                 val have = ChineseMethod.installedVersion(this@SettingsActivity, l.id).orEmpty()
                 pending.add(Update("layout:${l.id}", "鍵盤版面：${l.name}", have, l.version, l.size,
-                    { p -> com.p3dro.scorpio.ime.engine.PackUpdater.installLayout(this@SettingsActivity, l, p) },
+                    { p -> if (com.p3dro.scorpio.ime.engine.PackUpdater.installLayout(this@SettingsActivity, l, p)) null else "下載失敗，確認網路後再試一次" },
                     {}))
             }
 
